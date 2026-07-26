@@ -79,6 +79,7 @@ object VoiceNudgeNotifications {
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setPriority(Notification.PRIORITY_HIGH)
             .setContentIntent(contentIntent)
+            .setGroup(groupKey(groupId))
             .setOngoing(ongoing)
             .setAutoCancel(!ongoing)
         if (cachedAudioAvailable) {
@@ -149,6 +150,7 @@ object VoiceNudgeNotifications {
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setPriority(Notification.PRIORITY_HIGH)
             .setContentIntent(contentIntent)
+            .setGroup(groupKey(groupId))
             .setAutoCancel(true)
             .addNudgeActions(
                 context = context,
@@ -205,6 +207,7 @@ object VoiceNudgeNotifications {
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setPriority(Notification.PRIORITY_HIGH)
             .setContentIntent(contentIntent)
+            .setGroup(groupKey(groupId))
             .setAutoCancel(true)
             .build()
     }
@@ -213,6 +216,7 @@ object VoiceNudgeNotifications {
         context: Context,
         title: String,
         body: String,
+        groupId: String? = null,
     ): Notification {
         ensureChannels(context)
         val openIntent = Intent(context, MainActivity::class.java).apply {
@@ -230,6 +234,7 @@ object VoiceNudgeNotifications {
             @Suppress("DEPRECATION")
             Notification.Builder(context)
         }
+        if (groupId != null) builder.setGroup(groupKey(groupId))
         return builder
             .setSmallIcon(R.drawable.ic_voice_nudge)
             .setContentTitle(title)
@@ -244,6 +249,8 @@ object VoiceNudgeNotifications {
     }
 
     fun idFor(eventId: String): Int = eventId.hashCode() and 0x7fffffff
+
+    fun groupKey(groupId: String): String = "oneone_group_$groupId"
 
     private fun Notification.Builder.addNudgeActions(
         context: Context,

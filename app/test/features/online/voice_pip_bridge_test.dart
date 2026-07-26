@@ -7,7 +7,7 @@ void main() {
       parseVoicePipAction('toggle_microphone'),
       VoicePipAction.toggleMicrophone,
     );
-    expect(parseVoicePipAction('mute'), VoicePipAction.mute);
+    expect(parseVoicePipAction('mute'), isNull);
     expect(parseVoicePipAction('unknown'), isNull);
   });
 }

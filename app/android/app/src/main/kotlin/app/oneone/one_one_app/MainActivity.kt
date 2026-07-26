@@ -241,14 +241,7 @@ class MainActivity : FlutterFragmentActivity() {
             if (voiceSessionTalking) "Stop talking" else "Talk",
             pipActionIntent(VoicePipContract.actionToggleMicrophone, 1),
         )
-        val muteAction = RemoteAction(
-            Icon.createWithResource(this, R.drawable.ic_mic_off),
-            "Mute",
-            "Mute microphone",
-            pipActionIntent(VoicePipContract.actionMute, 2),
-        )
-        muteAction.isEnabled = voiceSessionTalking
-        return listOf(toggleAction, muteAction)
+        return listOf(toggleAction)
     }
 
     private fun pipActionIntent(action: String, requestCode: Int): PendingIntent {

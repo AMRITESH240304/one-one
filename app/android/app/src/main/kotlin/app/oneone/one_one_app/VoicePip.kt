@@ -15,7 +15,6 @@ import io.flutter.plugin.common.MethodChannel
 object VoicePipContract {
     const val flutterChannel = "app.oneone/voice_pip"
     const val actionToggleMicrophone = "app.oneone.action.PIP_TOGGLE_MICROPHONE"
-    const val actionMute = "app.oneone.action.PIP_MUTE"
 }
 
 object VoicePipActionDispatcher {
@@ -49,8 +48,6 @@ class VoicePipActionReceiver : BroadcastReceiver() {
         when (intent.action) {
             VoicePipContract.actionToggleMicrophone ->
                 VoicePipActionDispatcher.dispatch("toggle_microphone")
-            VoicePipContract.actionMute ->
-                VoicePipActionDispatcher.dispatch("mute")
         }
     }
 }

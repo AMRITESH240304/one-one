@@ -86,13 +86,13 @@ class OnlineRepository {
         'updatedAt': now,
       },
     });
+    await _scheduleAwayOnDisconnect(session);
 
     return session;
   }
 
   Future<void> markLive(OnlineSession session) async {
     final now = _nowSeconds();
-    await _scheduleAwayOnDisconnect(session);
     await _database.ref().update({
       'appServiceSessions/${session.serviceSessionId}/serviceState': 'running',
       'appServiceSessions/${session.serviceSessionId}/lastHeartbeatAt': now,
@@ -121,7 +121,6 @@ class OnlineRepository {
     bool isTalking = false,
   }) async {
     final now = _nowSeconds();
-    await _scheduleAwayOnDisconnect(session);
     await _database.ref().update({
       'appServiceSessions/${session.serviceSessionId}/lastHeartbeatAt': now,
       'memberAvailability/${session.groupId}/${session.userId}/desiredState':
@@ -142,16 +141,29 @@ class OnlineRepository {
     });
   }
 
-  Future<void> goAway(OnlineSession session) async {
+  Future<void> goAway(
+    OnlineSession session, {
+    String reason = 'user_away',
+  }) async {
     final now = _nowSeconds();
     final availabilityRef = _database.ref(
       'memberAvailability/${session.groupId}/${session.userId}',
     );
-    await availabilityRef.onDisconnect().cancel();
+    final serviceRef = _database.ref(
+      'appServiceSessions/${session.serviceSessionId}',
+    );
+    final liveKitRef = _database.ref(
+      'livekitSessions/${session.livekitSessionId}',
+    );
+    await Future.wait([
+      availabilityRef.onDisconnect().cancel(),
+      serviceRef.onDisconnect().cancel(),
+      liveKitRef.onDisconnect().cancel(),
+    ]);
 
     await _database.ref().update({
       'appServiceSessions/${session.serviceSessionId}/serviceState': 'stopped',
-      'appServiceSessions/${session.serviceSessionId}/stopReason': 'user_away',
+      'appServiceSessions/${session.serviceSessionId}/stopReason': reason,
       'appServiceSessions/${session.serviceSessionId}/stoppedAt': now,
       'appServiceSessions/${session.serviceSessionId}/lastHeartbeatAt': now,
       'livekitSessions/${session.livekitSessionId}/connectionState':
@@ -175,22 +187,42 @@ class OnlineRepository {
   }
 
   Future<void> _scheduleAwayOnDisconnect(OnlineSession session) async {
+    final now = _nowSeconds();
     final availabilityRef = _database.ref(
       'memberAvailability/${session.groupId}/${session.userId}',
     );
-    await availabilityRef.onDisconnect().set({
-      'activeDeviceId': null,
-      'activeServiceSessionId': null,
-      'activeLivekitSessionId': null,
-      'desiredState': MemberAvailability.away.desiredState,
-      'effectiveState': MemberAvailability.away.effectiveState,
-      'serviceState': 'stopped',
-      'livekitConnectionState': 'disconnected',
-      'canReceiveLiveAudio': false,
-      'lastHeartbeatAt': 0,
-      'staleAfterAt': 0,
-      'updatedAt': _nowSeconds(),
-    });
+    final serviceRef = _database.ref(
+      'appServiceSessions/${session.serviceSessionId}',
+    );
+    final liveKitRef = _database.ref(
+      'livekitSessions/${session.livekitSessionId}',
+    );
+    await Future.wait([
+      serviceRef.onDisconnect().update({
+        'serviceState': 'stopped',
+        'stopReason': 'network_loss',
+        'stoppedAt': now,
+        'lastHeartbeatAt': now,
+      }),
+      liveKitRef.onDisconnect().update({
+        'connectionState': 'disconnected',
+        'disconnectedAt': now,
+        'lastStateChangedAt': now,
+      }),
+      availabilityRef.onDisconnect().set({
+        'activeDeviceId': null,
+        'activeServiceSessionId': null,
+        'activeLivekitSessionId': null,
+        'desiredState': MemberAvailability.away.desiredState,
+        'effectiveState': MemberAvailability.away.effectiveState,
+        'serviceState': 'stopped',
+        'livekitConnectionState': 'disconnected',
+        'canReceiveLiveAudio': false,
+        'lastHeartbeatAt': 0,
+        'staleAfterAt': 0,
+        'updatedAt': now,
+      }),
+    ]);
   }
 
   Future<LiveKitTokenResponse> _requestLiveKitToken({

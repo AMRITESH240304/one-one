@@ -25,7 +25,7 @@ Phase 3 rules are in:
 firebase/realtime-database.rules.json
 ```
 
-They allow each authenticated anonymous user to read/write:
+They allow each authenticated user to read/write:
 
 - `/users/{ownUserId}`
 - `/userDevices/{ownUserId}`
@@ -34,9 +34,18 @@ They allow each authenticated anonymous user to read/write:
 - `/handRaises/{groupId}/{ownUserId}`
 - own `/appServiceSessions/{sessionId}`
 - own `/livekitSessions/{sessionId}`
-- talk lock/session/status paths for Phase 7 testing
+- own talk lock/session/status paths while actively in the group
 
-Authenticated users can read group/member/user display state for the MVP.
-Invite writes, group writes, LiveKit room writes, and notification writes are backend-owned.
+Group, member, availability, talk, and notification reads require active
+membership. Other users' profile data is returned by the authenticated group
+member API rather than read directly. Group/member/invite/index writes are
+backend-owned. `/userGroups/{ownUserId}` is the server-written real-time
+membership index used by every signed-in device.
 
-Phase 7 talk-lock rules are permissive for testing. Harden them before release.
+## Service Status Remote Config
+
+Deploy `firebase/remote-config.template.json`, then set `service_status` to one
+of `operational`, `maintenance`, `country_restricted`, `slow_network`, or
+`backend_failure`. Use Remote Config country conditions for regional rollout.
+Set `service_status_updates_url` to the production Reddit page before enabling
+maintenance mode.

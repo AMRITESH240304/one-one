@@ -36,6 +36,7 @@ object VoiceNudgeContract {
     const val actionPlayCachedAudio = "app.oneone.action.PLAY_CACHED_NUDGE"
     const val actionPauseCachedAudio = "app.oneone.action.PAUSE_CACHED_NUDGE"
     const val actionDismissCachedAudio = "app.oneone.action.DISMISS_CACHED_NUDGE"
+    const val actionStopGroupNudges = "app.oneone.action.STOP_GROUP_NUDGES"
 }
 
 object VoiceNudgeTokenStore {

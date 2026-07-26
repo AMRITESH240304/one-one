@@ -12,6 +12,7 @@ import 'firebase_setup_blocked_screen.dart';
 import 'google_auth_screen.dart';
 import 'startup_gate_screen.dart';
 import 'startup_performance.dart';
+import '../features/service_status/service_status_gate.dart';
 
 class OneOneApp extends StatelessWidget {
   const OneOneApp({super.key});
@@ -145,24 +146,23 @@ class _FirebaseGateState extends State<_FirebaseGate> {
           );
         }
 
-        return StreamBuilder<User?>(
-          stream: FirebaseAuth.instance.userChanges(),
-          initialData: FirebaseAuth.instance.currentUser,
-          builder: (context, authSnapshot) {
-            final user = authSnapshot.data;
-            if (user == null ||
-                user.isAnonymous ||
-                !user.providerData.any(
-                  (provider) => provider.providerId == 'google.com',
-                )) {
-              return const GoogleAuthScreen();
-            }
+        return ServiceStatusGate(
+          child: StreamBuilder<User?>(
+            stream: FirebaseAuth.instance.userChanges(),
+            initialData: FirebaseAuth.instance.currentUser,
+            builder: (context, authSnapshot) {
+              final user = authSnapshot.data;
+              if (user == null ||
+                  user.isAnonymous ||
+                  !user.providerData.any(
+                    (provider) => provider.providerId == 'google.com',
+                  )) {
+                return const GoogleAuthScreen();
+              }
 
-            // RevenueCat is intentionally absent on this branch. Once Google
-            // authentication succeeds, continue into the normal app startup
-            // and onboarding flow without initializing a subscription SDK.
-            return const StartupGateScreen();
-          },
+              return const StartupGateScreen();
+            },
+          ),
         );
       },
     );

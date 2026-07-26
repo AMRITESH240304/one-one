@@ -50,86 +50,38 @@ class GroupRepository {
     return response['groupId'].toString();
   }
 
-  Future<List<GroupSummary>> loadGroupsForUser(String userId) async {
-    final membersSnapshot = await _database.ref('groupMembers').get();
+  DatabaseReference userGroupsRef(String userId) {
+    return _database.ref('userGroups/$userId');
+  }
 
-    if (membersSnapshot.value is! Map<Object?, Object?>) {
-      return const [];
-    }
+  Future<List<GroupSummary>> loadGroupsForUser(String _) async {
+    final response = await _apiClient.getJson('/v1/groups');
+    final rawGroups = response['groups'];
+    if (rawGroups is! List) return const [];
 
-    final membersByGroup = membersSnapshot.value! as Map<Object?, Object?>;
-    final groupIds = <String>[];
-
-    for (final entry in membersByGroup.entries) {
-      final groupId = entry.key.toString();
-      final members = entry.value;
-
-      if (members is! Map<Object?, Object?>) continue;
-
-      final currentUserMember = members[userId];
-      if (currentUserMember is! Map<Object?, Object?>) continue;
-
-      if ((currentUserMember['memberState']?.toString() ?? 'active') ==
-          'active') {
-        groupIds.add(groupId);
-      }
-    }
-
-    final groups = await Future.wait(
-      groupIds.map((groupId) async {
-        final groupSnapshot = await _database.ref('groups/$groupId').get();
-        if (groupSnapshot.value is Map<Object?, Object?>) {
-          return GroupSummary.fromJson(
-            groupId,
-            groupSnapshot.value! as Map<Object?, Object?>,
-          );
-        }
-        return null;
-      }),
-    );
-
-    return groups.whereType<GroupSummary>().toList();
+    return rawGroups.whereType<Map>().map((raw) {
+      final groupId = raw['groupId']?.toString() ?? '';
+      return GroupSummary.fromJson(groupId, raw.cast<Object?, Object?>());
+    }).where((group) => group.groupId.isNotEmpty).toList();
   }
 
   Future<List<GroupMemberSummary>> loadGroupMembers(String groupId) async {
-    final snapshot = await _database.ref('groupMembers/$groupId').get();
-
-    if (snapshot.value is! Map<Object?, Object?>) {
-      return const [];
-    }
-
-    final members = snapshot.value! as Map<Object?, Object?>;
-    final result = await Future.wait(
-      members.entries.map((entry) async {
-        final rawMember = entry.value;
-        if (rawMember is! Map<Object?, Object?>) return null;
-
-        final userId = entry.key.toString();
-        final data = rawMember;
-        final userSnapshot = await _database.ref('users/$userId').get();
-        String displayName = userId;
-        String? profilePhotoUrl;
-        String? profilePhotoBase64;
-
-        if (userSnapshot.value is Map<Object?, Object?>) {
-          final userData = userSnapshot.value! as Map<Object?, Object?>;
-          displayName = userData['displayName']?.toString() ?? userId;
-          profilePhotoUrl = userData['profilePhotoUrl']?.toString();
-          profilePhotoBase64 = userData['profilePhotoBase64']?.toString();
-        }
-
-        return GroupMemberSummary(
-          userId: userId,
-          displayName: displayName,
-          role: data['role']?.toString() ?? 'member',
-          memberState: data['memberState']?.toString() ?? 'active',
-          profilePhotoUrl: profilePhotoUrl,
-          profilePhotoBase64: profilePhotoBase64,
-        );
-      }),
+    final response = await _apiClient.getJson(
+      '/v1/groups/${Uri.encodeComponent(groupId)}/members',
     );
+    final rawMembers = response['members'];
+    if (rawMembers is! List) return const [];
 
-    return result.whereType<GroupMemberSummary>().toList();
+    return rawMembers.whereType<Map>().map((raw) {
+      return GroupMemberSummary(
+        userId: raw['userId']?.toString() ?? '',
+        displayName: raw['displayName']?.toString() ?? 'Member',
+        role: raw['role']?.toString() ?? 'member',
+        memberState: raw['memberState']?.toString() ?? 'active',
+        profilePhotoUrl: raw['profilePhotoUrl']?.toString(),
+        profilePhotoBase64: raw['profilePhotoBase64']?.toString(),
+      );
+    }).where((member) => member.userId.isNotEmpty).toList();
   }
 
   Future<int> countActiveMembers(String groupId) async {
@@ -149,5 +101,25 @@ class GroupRepository {
     }
 
     return count;
+  }
+
+  Future<void> removeMember(String groupId, String memberUserId) async {
+    await _apiClient.deleteJson(
+      '/v1/groups/${Uri.encodeComponent(groupId)}/members/'
+      '${Uri.encodeComponent(memberUserId)}',
+    );
+  }
+
+  Future<void> leaveGroup(String groupId) async {
+    await _apiClient.postJson(
+      '/v1/groups/${Uri.encodeComponent(groupId)}/leave',
+      const {},
+    );
+  }
+
+  Future<void> deleteGroup(String groupId) async {
+    await _apiClient.deleteJson(
+      '/v1/groups/${Uri.encodeComponent(groupId)}',
+    );
   }
 }

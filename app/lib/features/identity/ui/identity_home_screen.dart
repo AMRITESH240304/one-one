@@ -20,6 +20,7 @@ import '../../groups/group_service_readiness.dart';
 import '../../groups/models/group_invite_result.dart';
 import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
+import '../../groups/ui/group_management_screen.dart';
 import '../../online/data/online_repository.dart';
 import '../../online/livekit_status.dart';
 import '../../online/models/member_availability.dart';
@@ -81,6 +82,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   StreamSubscription<DatabaseEvent>? _availabilitySubscription;
   Timer? _availabilityExpiryTimer;
   StreamSubscription<DatabaseEvent>? _membersSubscription;
+  StreamSubscription<DatabaseEvent>? _userGroupsSubscription;
+  Set<String>? _pendingUserGroupIds;
   StreamSubscription<DatabaseEvent>? _handRaiseSubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   StreamSubscription<void>? _nudgeActionSubscription;
@@ -130,6 +133,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   NudgeNotificationAction? _deferredNudgeAction;
   bool _nudgeActionInFlight = false;
   bool _inviteJoinInFlight = false;
+  bool _connectionCleanupInFlight = false;
+  bool _hasAvailabilitySnapshot = false;
+  String? _lastPeerLossUserId;
+  DateTime? _lastPeerLossAt;
   bool _inPictureInPicture = false;
   String? _preferredGroupId;
 
@@ -177,6 +184,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _availabilitySubscription?.cancel();
     _availabilityExpiryTimer?.cancel();
     _membersSubscription?.cancel();
+    _userGroupsSubscription?.cancel();
     _handRaiseSubscription?.cancel();
     _connectivitySubscription?.cancel();
     _nudgeActionSubscription?.cancel();
@@ -184,17 +192,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _inviteLinkSubscription?.cancel();
     _voicePipActionSubscription?.cancel();
     _voicePipBridge.isInPictureInPicture.removeListener(_onPipModeChanged);
-    unawaited(
-      _voicePipBridge.setSessionState(active: false, isTalking: false),
-    );
+    unawaited(_voicePipBridge.setSessionState(active: false, isTalking: false));
     unawaited(_voicePipBridge.dispose());
     _heartbeatTimer?.cancel();
     _peerDisconnectGraceTimer?.cancel();
     _inactivityTimer?.cancel();
     _usagePersistTimer?.cancel();
     // Persist final usage before disposal.
-    if (_todayOnlineSeconds > 0 && _selectedGroup != null) {
-      unawaited(_persistDailyUsage(_selectedGroup!.groupId));
+    if (_todayOnlineSeconds > 0 && _onlineSession != null) {
+      unawaited(_persistDailyUsage(_onlineSession!.groupId));
     }
     _clearFloatingReactions();
     final activeTalk = _talkSession;
@@ -230,11 +236,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           await _startTalking();
         } else {
           await _stopTalking(reason: 'pip_toggle');
-        }
-        return;
-      case VoicePipAction.mute:
-        if (_talkSession != null) {
-          await _stopTalking(reason: 'pip_mute');
         }
         return;
     }
@@ -286,29 +287,40 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final connectivity = Connectivity();
     try {
       final current = await connectivity.checkConnectivity();
-      if (mounted) setState(() => _connectivity = current);
+      _handleConnectivityChanged(current);
     } catch (_) {
       // LiveKit connection quality remains the primary signal.
     }
     _connectivitySubscription = connectivity.onConnectivityChanged.listen((
       results,
     ) {
-      if (mounted) setState(() => _connectivity = results);
+      _handleConnectivityChanged(results);
     });
+  }
+
+  void _handleConnectivityChanged(List<ConnectivityResult> results) {
+    if (!mounted) return;
+    setState(() => _connectivity = results);
+    if (results.contains(ConnectivityResult.none) && _isOnline) {
+      unawaited(
+        _handleConnectionLoss('You were marked Away due to network loss.'),
+      );
+    }
   }
 
   Future<void> _loadGroups() async {
     final stopwatch = Stopwatch()..start();
     setState(() => _loadingGroups = true);
     try {
-      final groups = await _groupRepository.loadGroupsForUser(
-        _session.userId,
-      );
+      final groups = await _groupRepository.loadGroupsForUser(_session.userId);
       logStartupMilestone('groups loaded', stopwatch);
       if (!mounted) return;
+      _userGroupsSubscription ??= _groupRepository
+          .userGroupsRef(_session.userId)
+          .onValue
+          .listen((event) => unawaited(_handleUserGroupsChanged(event)));
 
-      if (groups.isEmpty &&
-          (ModalRoute.of(context)?.isCurrent ?? true)) {
+      if (groups.isEmpty && (ModalRoute.of(context)?.isCurrent ?? true)) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           unawaited(_replaceWithNoGroups());
@@ -362,8 +374,71 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         logStartupMilestone('Home data interactive', stopwatch);
         unawaited(_takePendingNudgeAction());
         unawaited(_takePendingInviteLink());
+        final pendingGroupIds = _pendingUserGroupIds;
+        _pendingUserGroupIds = null;
+        if (pendingGroupIds != null) {
+          unawaited(_handleIndexedGroupsChanged(pendingGroupIds));
+        }
       }
     }
+  }
+
+  Future<void> _handleUserGroupsChanged(DatabaseEvent event) async {
+    if (!mounted) return;
+    final value = event.snapshot.value;
+    final indexedGroupIds = value is Map<Object?, Object?>
+        ? value.keys.map((key) => key.toString()).toSet()
+        : <String>{};
+    if (_loadingGroups) {
+      _pendingUserGroupIds = indexedGroupIds;
+      return;
+    }
+    await _handleIndexedGroupsChanged(indexedGroupIds);
+  }
+
+  Future<void> _handleIndexedGroupsChanged(
+    Set<String> indexedGroupIds,
+  ) async {
+    if (!mounted) return;
+    final loadedGroupIds = _groups.map((group) => group.groupId).toSet();
+    if (indexedGroupIds.length == loadedGroupIds.length &&
+        indexedGroupIds.containsAll(loadedGroupIds)) {
+      return;
+    }
+
+    final activeGroupId = _onlineSession?.groupId;
+    if (activeGroupId != null && !indexedGroupIds.contains(activeGroupId)) {
+      await _endRevokedVoiceSession(activeGroupId);
+    }
+    if (!mounted) return;
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    if (!mounted) return;
+    await _loadGroups();
+    if (mounted && indexedGroupIds.isNotEmpty) {
+      setState(() => _message = 'Your group membership changed.');
+    }
+  }
+
+  Future<void> _endRevokedVoiceSession(String groupId) async {
+    if (_onlineSession?.groupId != groupId) return;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _peerDisconnectGraceTimer?.cancel();
+    _peerDisconnectGraceTimer = null;
+    _inactivityTimer?.cancel();
+    _inactivityTimer = null;
+    _usagePersistTimer?.cancel();
+    _usagePersistTimer = null;
+    await _disconnectLiveKit();
+    if (!mounted) return;
+    setState(() {
+      _onlineSession = null;
+      _talkSession = null;
+      _talkPressed = false;
+      _speakingUserIds = const {};
+      _state = 'away';
+    });
+    _syncPipSessionState();
   }
 
   Future<void> _takePendingInviteLink() async {
@@ -447,7 +522,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     await _onGroupCarouselChanged(index);
     if (!mounted) return;
-    if (!_isOnline) await _goOnline();
+    if (!_isViewingActiveGroup) {
+      if (_isOnline) {
+        await _switchVoiceGroup();
+      } else {
+        await _goOnline();
+      }
+    }
     if (!mounted) return;
     if (!_isOnline) {
       throw StateError('Could not enter the nudge group.');
@@ -526,6 +607,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   void _listenToAvailability(String groupId) {
     unawaited(_availabilitySubscription?.cancel());
+    _hasAvailabilitySnapshot = false;
     _availabilitySubscription = AppDatabase.instance()
         .ref('memberAvailability/$groupId')
         .onValue
@@ -543,10 +625,46 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           }
 
           if (!mounted || _selectedGroup?.groupId != groupId) return;
+          if (_hasAvailabilitySnapshot) {
+            final lostPeerIds = _availability.entries
+                .where(
+                  (entry) =>
+                      entry.key != _session.userId &&
+                      entry.value.isLive &&
+                      !(next[entry.key]?.isLive ?? false),
+                )
+                .map((entry) => entry.key)
+                .toList(growable: false);
+            if (lostPeerIds.isNotEmpty) {
+              _showPeerLostConnection(lostPeerIds.first);
+            }
+          }
           setState(() => _availability = next);
+          _hasAvailabilitySnapshot = true;
           _scheduleAvailabilityExpiryRefresh();
-          _evaluatePeerPresenceForAutoOffline(next);
+          if (_onlineSession?.groupId == groupId) {
+            _evaluatePeerPresenceForAutoOffline(next);
+          }
         });
+  }
+
+  void _showPeerLostConnection(String userId) {
+    final now = DateTime.now();
+    if (_lastPeerLossUserId == userId &&
+        _lastPeerLossAt != null &&
+        now.difference(_lastPeerLossAt!) < const Duration(seconds: 3)) {
+      return;
+    }
+    _lastPeerLossUserId = userId;
+    _lastPeerLossAt = now;
+    final name = _membersByGroupId.values
+        .expand((members) => members)
+        .where((member) => member.userId == userId)
+        .map((member) => member.displayName.trim())
+        .firstOrNull;
+    _showPresenceSnackbar(
+      '${name == null || name.isEmpty ? 'A participant' : name} lost connection.',
+    );
   }
 
   /// Implements "automatic offline handling with a grace period": while
@@ -640,7 +758,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Future<int> _loadDailyUsage(String groupId) async {
     try {
       final snapshot = await AppDatabase.instance()
-          .ref('dailyUsage/$groupId/${_session.userId}/${_todayDateKey}')
+          .ref('dailyUsage/$groupId/${_session.userId}/$_todayDateKey')
           .get();
       if (snapshot.exists && snapshot.value is Map<Object?, Object?>) {
         final data = snapshot.value! as Map<Object?, Object?>;
@@ -656,7 +774,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Future<void> _persistDailyUsage(String groupId) async {
     try {
       await AppDatabase.instance()
-          .ref('dailyUsage/$groupId/${_session.userId}/${_todayDateKey}')
+          .ref('dailyUsage/$groupId/${_session.userId}/$_todayDateKey')
           .update({
             'onlineSeconds': _todayOnlineSeconds,
             'updatedAt': DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -671,7 +789,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   void _startUsageTracking() {
     _usagePersistTimer?.cancel();
     // Persist immediately when going online.
-    final groupId = _selectedGroup?.groupId;
+    final groupId = _onlineSession?.groupId;
     if (groupId != null) {
       unawaited(_persistDailyUsage(groupId));
     }
@@ -682,7 +800,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         return;
       }
       _todayOnlineSeconds += 30;
-      final groupId = _selectedGroup?.groupId;
+      final groupId = _onlineSession?.groupId;
       if (groupId != null) {
         unawaited(_persistDailyUsage(groupId));
       }
@@ -810,11 +928,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _selectGroup(String groupId) async {
-    final previousGroup = _selectedGroup;
-    if (previousGroup != null) {
-      await _clearOwnHandRaise(groupId: previousGroup.groupId);
-    }
-
     final group = _groups.firstWhere((item) => item.groupId == groupId);
     final cachedMembers = _membersByGroupId[groupId];
     setState(() {
@@ -822,7 +935,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _members = cachedMembers ?? const [];
       _availability = const {};
       _handRaises = const {};
-      _speakingUserIds = const {};
     });
     if (cachedMembers == null) {
       await _loadMembers(group.groupId);
@@ -838,11 +950,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     setState(() => _carouselIndex = index);
 
     if (group.groupId == _selectedGroup?.groupId) return;
-
-    if (_isOnline) {
-      await _goAway();
-      if (!mounted) return;
-    }
 
     await _selectGroup(group.groupId);
   }
@@ -895,7 +1002,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Future<void> _createInvite() async {
     final group = _selectedGroup;
     if (group == null) return;
+    await _createInviteForGroup(group);
+  }
 
+  Future<void> _createInviteForGroup(GroupSummary group) async {
     await _runBusy(() async {
       final invite = await _groupRepository.createInvite(group.groupId);
       if (!mounted) return;
@@ -1085,8 +1195,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() => _message = 'Invite a friend to enable voice service.');
       return;
     }
-    if (_isOnline) {
+    if (_isViewingActiveGroup) {
       unawaited(_goAway());
+      return;
+    }
+    if (_isOnline) {
+      unawaited(_switchVoiceGroup());
       return;
     }
     // If someone else is already online in this group, let the user join
@@ -1115,6 +1229,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() => _message = 'Create or join a group first.');
       return;
     }
+    if (_isOnline) {
+      if (!_isViewingActiveGroup) await _switchVoiceGroup();
+      return;
+    }
     if (!_serviceReady) {
       setState(() => _message = 'Invite a friend to enable voice service.');
       return;
@@ -1141,7 +1259,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() {
         _busy = false;
         _state = 'away';
-        _message = 'Daily usage limit reached (${PresenceConfig.dailyUsageCap.inMinutes} min). '
+        _message =
+            'Daily usage limit reached (${PresenceConfig.dailyUsageCap.inMinutes} min). '
             'You can go online again tomorrow.';
       });
       return;
@@ -1198,6 +1317,26 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
   }
 
+  Future<void> _switchVoiceGroup() async {
+    final previousSession = _onlineSession;
+    final nextGroup = _selectedGroup;
+    if (previousSession == null || nextGroup == null) return;
+    if (previousSession.groupId == nextGroup.groupId) return;
+
+    final previousName = _groups
+        .where((group) => group.groupId == previousSession.groupId)
+        .map((group) => group.name)
+        .firstOrNull;
+    await _goAway();
+    if (!mounted || _onlineSession != null) return;
+    await _goOnline();
+    if (!mounted || _onlineSession?.groupId != nextGroup.groupId) return;
+    _showPresenceSnackbar(
+      'You joined ${nextGroup.name}. '
+      'Connection with ${previousName ?? 'the previous group'} has ended.',
+    );
+  }
+
   Future<void> _goAway() async {
     final session = _onlineSession;
     if (session == null) {
@@ -1244,7 +1383,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   Future<void> _startTalking() async {
     final session = _onlineSession;
-    if (session == null || _talkSession != null || _talkBusy) return;
+    if (session == null ||
+        !_isViewingActiveGroup ||
+        _talkSession != null ||
+        _talkBusy) {
+      return;
+    }
 
     _talkPressed = true;
     setState(() {
@@ -1357,7 +1501,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   Future<void> _toggleHandRaise() async {
     final group = _selectedGroup;
-    if (group == null || _handRaiseBusy || !_isOnline) return;
+    if (group == null || _handRaiseBusy || !_isViewingActiveGroup) {
+      return;
+    }
 
     final nextRaised = _handRaises[_session.userId] != true;
     setState(() {
@@ -1408,7 +1554,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   /// Emoji/short text is available whenever at least two members are online.
   bool get _canSendInCallReaction {
-    return _isOnline &&
+    return _isViewingActiveGroup &&
         _room?.localParticipant != null &&
         _talkSession == null &&
         _onlineParticipantCount > 1;
@@ -1670,22 +1816,23 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _setStateAndMessage('live', LiveKitStatus.connected);
       })
       ..on<RoomDisconnectedEvent>((event) {
-        if (!mounted) return;
-        setState(() {
-          _speakingUserIds = const {};
-          _state = 'disconnected';
-          _message = LiveKitStatus.fromDisconnectReason(event.reason);
-        });
         unawaited(
-          _voicePipBridge.setSessionState(active: false, isTalking: false),
+          _handleConnectionLoss(
+            LiveKitStatus.fromDisconnectReason(event.reason),
+          ),
         );
-        _clearConnectionQualities();
       })
       ..on<ParticipantConnectedEvent>((event) {
         _updateParticipantConnectionQuality(
           event.participant,
           event.participant.connectionQuality,
         );
+      })
+      ..on<ParticipantDisconnectedEvent>((event) {
+        final userId = _participantUserIdFromIdentity(
+          event.participant.identity,
+        );
+        if (userId != null) _showPeerLostConnection(userId);
       })
       ..on<ParticipantConnectionQualityUpdatedEvent>((event) {
         _updateParticipantConnectionQuality(
@@ -1730,6 +1877,53 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         });
       })
       ..on<DataReceivedEvent>(_onDataReceived);
+  }
+
+  Future<void> _handleConnectionLoss(String message) async {
+    final session = _onlineSession;
+    if (session == null || _connectionCleanupInFlight) return;
+    _connectionCleanupInFlight = true;
+
+    final talkSession = _talkSession;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _peerDisconnectGraceTimer?.cancel();
+    _peerDisconnectGraceTimer = null;
+    _inactivityTimer?.cancel();
+    _inactivityTimer = null;
+    _usagePersistTimer?.cancel();
+    _usagePersistTimer = null;
+    if (mounted) {
+      setState(() {
+        _onlineSession = null;
+        _talkSession = null;
+        _talkPressed = false;
+        _speakingUserIds = const {};
+        _state = 'away';
+        _message = message;
+      });
+      _syncPipSessionState();
+    }
+
+    try {
+      if (talkSession != null) {
+        await _talkRepository.stopTalk(talkSession, reason: 'connection_lost');
+      }
+    } catch (_) {
+      // Presence cleanup still has to continue.
+    }
+    await _disconnectLiveKit();
+    try {
+      await _onlineRepository
+          .goAway(session, reason: 'network_loss')
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // Firebase onDisconnect was registered before going live and is the
+      // server-side fallback when the device cannot write during an outage.
+    } finally {
+      _connectionCleanupInFlight = false;
+    }
+    if (mounted) _showPresenceSnackbar(message);
   }
 
   Future<void> _disconnectLiveKit() async {
@@ -1815,12 +2009,42 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     return groups.first;
   }
 
+  Future<bool> _openGroupManagement() async {
+    final group = _selectedGroup;
+    if (group == null) return false;
+    final outcome = await Navigator.of(context).push<GroupManagementOutcome>(
+      MaterialPageRoute<GroupManagementOutcome>(
+        builder: (_) => GroupManagementScreen(
+          group: group,
+          currentUserId: _session.userId,
+          onInvite: () => _createInviteForGroup(group),
+        ),
+      ),
+    );
+    if (outcome == null || !mounted) return false;
+
+    await _endRevokedVoiceSession(group.groupId);
+    if (!mounted) return true;
+    await _loadGroups();
+    if (mounted && _groups.isNotEmpty) {
+      setState(() {
+        _message = outcome == GroupManagementOutcome.groupDeleted
+            ? '${group.name} was deleted.'
+            : 'You left ${group.name}.';
+      });
+    }
+    return true;
+  }
+
   void _openSettings() {
+    final group = _selectedGroup;
     unawaited(
       SettingsScreen.open(
         context,
         session: _session,
         identityRepository: widget.identityRepository,
+        groupName: group?.name,
+        onManageGroup: group == null ? null : _openGroupManagement,
       ),
     );
   }
@@ -1896,6 +2120,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   bool get _isOnline => _onlineSession != null;
+  bool get _isViewingActiveGroup =>
+      _onlineSession?.groupId == _selectedGroup?.groupId;
 
   /// Single-word presence label shown beneath the online/offline toggle.
   /// Recomputed on every `setState` that touches `_state`/`_onlineSession`,
@@ -1931,7 +2157,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   GroupMemberSummary get _pictureInPictureMember {
     final activeUserId = _speakingUserIds.firstOrNull ?? _session.userId;
-    for (final member in _displayMembers) {
+    final activeMembers = _displayMembersFrom(
+      _membersByGroupId[_onlineSession?.groupId] ?? const [],
+    );
+    for (final member in activeMembers) {
       if (member.userId == activeUserId) return member;
     }
     return GroupMemberSummary(
@@ -1991,7 +2220,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           displayName: _session.user.displayName,
           profilePhotoUrl: _session.user.profilePhotoUrl,
           profilePhotoBase64: _session.user.profilePhotoBase64,
-          availability: group.groupId == _selectedGroup?.groupId
+          availability: group.groupId == _onlineSession?.groupId
               ? selfAvailability
               : MemberAvailability.away,
           members: _displayMembersFrom(
@@ -2004,7 +2233,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   @override
   Widget build(BuildContext context) {
     final accent = accentColorForKey(_session.settings.accentColorKey);
-    if (_inPictureInPicture) {
+    // Android reports PiP exit before the window has finished expanding.
+    // Keep the compact constraint-safe view during those intermediate frames.
+    if (_inPictureInPicture || MediaQuery.sizeOf(context).height < 480) {
       final member = _pictureInPictureMember;
       return _VoicePictureInPictureView(
         member: member,
@@ -2018,6 +2249,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final warnings = _setupWarnings();
     final items = _carouselItems;
     final focusedGroup = _selectedGroup;
+    final activeGroup = _groups
+        .where((group) => group.groupId == _onlineSession?.groupId)
+        .firstOrNull;
+    final viewingActiveGroup = _isViewingActiveGroup;
     // Local session is the source of truth — remote availability can lag after goAway.
     final live = _isOnline && (_state == 'live' || _state == 'talking');
     final inviteAction = _busy || focusedGroup == null
@@ -2078,7 +2313,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     displayName: _session.user.displayName,
                     handRaised: _handRaises[_session.userId] == true,
                     handRaiseBusy: _handRaiseBusy,
-                    handRaiseEnabled: _isOnline,
+                    handRaiseEnabled: viewingActiveGroup,
                     onHandRaise: _toggleHandRaise,
                     showNudge: groupNeedsNudge(
                       members: _members,
@@ -2087,6 +2322,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     ),
                     onNudge: _busy ? null : _openNudges,
                     showReaction:
+                        viewingActiveGroup &&
                         _canSendInCallReaction &&
                         _speakingUserIds.any((id) => id != _session.userId),
                     reactionBusy: _reactionBusy,
@@ -2100,7 +2336,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                   child: _ExperienceCarousel(
                     items: items,
                     index: _carouselIndex,
-                    talkEnabled: _isOnline && !_busy,
+                    connectedGroupId: _onlineSession?.groupId,
+                    talkEnabled: viewingActiveGroup && !_busy,
                     talkActive: _talkSession != null,
                     talkBusy: _talkBusy,
                     accent: accent,
@@ -2109,6 +2346,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     },
                     onTalkStart: _startTalking,
                     onTalkStop: () => _stopTalking(),
+                    onJoinVoiceGroup: _togglePresence,
                     onCreateGroup: _openCreateGroup,
                     onJoinGroup: _openJoinGroup,
                   ),
@@ -2122,8 +2360,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 ],
                 SizedBox(height: 18.h),
                 Text(
-                  _isOnline
+                  viewingActiveGroup
                       ? 'Tap to Talk'
+                      : _isOnline
+                      ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
                       : !_serviceReady
                       ? 'invite a friend to enable voice service'
                       : 'send a nudge to go online together',
@@ -2167,66 +2407,77 @@ class _VoicePictureInPictureView extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: const Color(0xff101010),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final shortestSide = constraints.biggest.shortestSide;
-          final avatarRadius = (shortestSide * 0.22).clamp(28.0, 64.0);
-          return Semantics(
-            label:
-                '${member.displayName}, ${speaking ? 'speaking' : 'listening'}, '
-                '${talking ? 'microphone on' : 'microphone muted'}',
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
+      child: ClipRect(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final shortestSide = constraints.biggest.shortestSide;
+            final avatarRadius = (shortestSide * 0.32).clamp(20.0, 68.0);
+            return Semantics(
+              label:
+                  '${member.displayName}, ${speaking ? 'speaking' : 'listening'}, '
+                  '${talking ? 'microphone on' : 'microphone muted'}',
+              child: Stack(
+                fit: StackFit.expand,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(3),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: speaking ? const Color(0xff7CFF6B) : accent,
-                        width: speaking ? 3 : 1,
+                  Center(
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      padding: const EdgeInsets.all(3),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: speaking ? const Color(0xff7CFF6B) : accent,
+                          width: speaking ? 3 : 1,
+                        ),
                       ),
-                    ),
-                    child: ProfileAvatar(
-                      profilePhotoUrl: member.profilePhotoUrl,
-                      profilePhotoBase64: member.profilePhotoBase64,
-                      radius: avatarRadius,
+                      child: ProfileAvatar(
+                        profilePhotoUrl: member.profilePhotoUrl,
+                        profilePhotoBase64: member.profilePhotoBase64,
+                        radius: avatarRadius,
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  Text(
-                    member.displayName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
+                  Positioned(
+                    right: 8,
+                    bottom: 8,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: talking
+                            ? const Color(0xff28A745)
+                            : const Color(0xdd202020),
+                      ),
+                      child: Icon(
+                        talking ? Icons.mic_rounded : Icons.mic_off_rounded,
+                        color: Colors.white,
+                        size: 22,
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        talking ? Icons.mic_rounded : Icons.mic_none_rounded,
-                        color: talking ? const Color(0xff7CFF6B) : Colors.white70,
-                        size: 18,
+                  Positioned(
+                    left: 8,
+                    right: 52,
+                    bottom: 10,
+                    child: Text(
+                      member.displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        shadows: [Shadow(blurRadius: 6, color: Colors.black)],
                       ),
-                      const SizedBox(width: 12),
-                      Icon(
-                        Icons.mic_off_rounded,
-                        color: talking ? Colors.white : Colors.white38,
-                        size: 18,
-                      ),
-                    ],
+                    ),
                   ),
                 ],
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -2677,10 +2928,7 @@ class _StatusToggle extends StatelessWidget {
                           Expanded(
                             child: Center(
                               child: busy
-                                  ? Text(
-                                      '…',
-                                      style: TextStyle(fontSize: 11.sp),
-                                    )
+                                  ? Text('…', style: TextStyle(fontSize: 11.sp))
                                   : online
                                   ? Text(
                                       '🟢',
@@ -2709,12 +2957,14 @@ class _GlassIconButton extends StatelessWidget {
     required this.icon,
     required this.onPressed,
     this.onLongPress,
+    this.selected = false,
   });
 
   final String tooltip;
   final IconData icon;
   final VoidCallback? onPressed;
   final VoidCallback? onLongPress;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
@@ -2724,13 +2974,16 @@ class _GlassIconButton extends StatelessWidget {
         onTap: onPressed,
         onLongPress: onLongPress,
         borderRadius: BorderRadius.circular(22.r),
-        child: Container(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
           width: 48,
           height: 48,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: onPressed == null
+            color: selected
+                ? const Color(0xfffff1a8)
+                : onPressed == null
                 ? const Color.fromRGBO(255, 255, 255, 0.06)
                 : const Color.fromRGBO(0, 0, 0, 0.35),
             border: Border.all(
@@ -2739,8 +2992,12 @@ class _GlassIconButton extends StatelessWidget {
           ),
           child: Icon(
             icon,
-            color: onPressed == null ? Colors.white38 : Colors.white,
-            size: 20.sp,
+            color: selected
+                ? Colors.black
+                : onPressed == null
+                ? Colors.white38
+                : Colors.white,
+            size: 22.sp,
           ),
         ),
       ),
@@ -3152,86 +3409,41 @@ class _CarouselCaption extends StatelessWidget {
             fontWeight: FontWeight.w500,
           ),
         ),
-        SizedBox(height: 10.h),
+        SizedBox(height: 8.h),
         SizedBox(
-          width: 330.w,
+          width: 240.w,
           height: 48,
           child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Expanded(
-                child: Center(
-                  child: Visibility(
-                    visible: showNudge,
-                    maintainSize: true,
-                    maintainAnimation: true,
-                    maintainState: true,
-                    child: _GlassIconButton(
-                      tooltip: 'Nudge offline friends',
-                      icon: Icons.waving_hand_rounded,
-                      onPressed: onNudge,
-                    ),
-                  ),
+              Visibility(
+                visible: showNudge,
+                maintainSize: true,
+                maintainAnimation: true,
+                maintainState: true,
+                child: _GlassIconButton(
+                  tooltip: 'Nudge offline friends',
+                  icon: Icons.notifications_active_rounded,
+                  onPressed: onNudge,
                 ),
               ),
-              Expanded(
-                flex: 2,
-                child: Center(
-                  child: Opacity(
-                    opacity: handRaiseBusy || !handRaiseEnabled ? 0.45 : 1,
-                    child: SizedBox(
-                      height: 48,
-                      child: Material(
-                        color: handRaised
-                            ? const Color(0xfffff1a8)
-                            : const Color.fromRGBO(255, 255, 255, 0.14),
-                        borderRadius: BorderRadius.circular(18.r),
-                        child: InkWell(
-                          onTap: handRaiseBusy || !handRaiseEnabled
-                              ? null
-                              : onHandRaise,
-                          borderRadius: BorderRadius.circular(18.r),
-                          child: Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 12.w),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text('✋', style: TextStyle(fontSize: 13.sp)),
-                                SizedBox(width: 6.w),
-                                Text(
-                                  handRaised ? 'Hand raised' : 'Raise hand',
-                                  style: TextStyle(
-                                    color: handRaised
-                                        ? Colors.black
-                                        : Colors.white,
-                                    fontSize: 13.sp,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+              Opacity(
+                opacity: handRaiseBusy || !handRaiseEnabled ? 0.45 : 1,
+                child: _GlassIconButton(
+                  tooltip: handRaised ? 'Lower hand' : 'Raise hand',
+                  icon: Icons.pan_tool_alt_rounded,
+                  selected: handRaised,
+                  onPressed: handRaiseBusy || !handRaiseEnabled
+                      ? null
+                      : onHandRaise,
                 ),
               ),
-              Expanded(
-                child: Center(
-                  child: Visibility(
-                    visible: showReaction,
-                    maintainSize: true,
-                    maintainAnimation: true,
-                    maintainState: true,
-                    child: Opacity(
-                      opacity: reactionBusy ? 0.55 : 1,
-                      child: _GlassIconButton(
-                        tooltip: 'Send a reaction',
-                        icon: Icons.keyboard_rounded,
-                        onPressed: reactionBusy ? null : onReaction,
-                      ),
-                    ),
-                  ),
+              Opacity(
+                opacity: reactionBusy ? 0.55 : 1,
+                child: _GlassIconButton(
+                  tooltip: 'Send a keyboard reaction',
+                  icon: Icons.keyboard_rounded,
+                  onPressed: reactionBusy || !showReaction ? null : onReaction,
                 ),
               ),
             ],
@@ -3278,6 +3490,7 @@ class _ExperienceCarousel extends StatefulWidget {
   const _ExperienceCarousel({
     required this.items,
     required this.index,
+    required this.connectedGroupId,
     required this.talkEnabled,
     required this.talkActive,
     required this.talkBusy,
@@ -3285,12 +3498,14 @@ class _ExperienceCarousel extends StatefulWidget {
     required this.onSelected,
     required this.onTalkStart,
     required this.onTalkStop,
+    required this.onJoinVoiceGroup,
     required this.onCreateGroup,
     required this.onJoinGroup,
   });
 
   final List<_CarouselItem> items;
   final int index;
+  final String? connectedGroupId;
   final bool talkEnabled;
   final bool talkActive;
   final bool talkBusy;
@@ -3298,6 +3513,7 @@ class _ExperienceCarousel extends StatefulWidget {
   final ValueChanged<int> onSelected;
   final Future<void> Function() onTalkStart;
   final Future<void> Function() onTalkStop;
+  final VoidCallback onJoinVoiceGroup;
   final VoidCallback onCreateGroup;
   final VoidCallback onJoinGroup;
 
@@ -3423,12 +3639,19 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
     Widget circle = _MainAvatarCircle(
       item: item,
       selected: visuallySelected,
+      connected: item.group.groupId == widget.connectedGroupId,
       talkEnabled: widget.talkEnabled && actuallySelected && distance < 0.45,
+      joinEnabled:
+          actuallySelected &&
+          distance < 0.45 &&
+          widget.connectedGroupId != null &&
+          item.group.groupId != widget.connectedGroupId,
       talkActive: widget.talkActive && actuallySelected,
       talkBusy: widget.talkBusy,
       accent: widget.accent,
       onTalkStart: widget.onTalkStart,
       onTalkStop: widget.onTalkStop,
+      onJoin: widget.onJoinVoiceGroup,
     );
 
     if (!actuallySelected) {
@@ -3604,22 +3827,28 @@ class _MainAvatarCircle extends StatelessWidget {
   const _MainAvatarCircle({
     required this.item,
     required this.selected,
+    required this.connected,
     required this.talkEnabled,
+    required this.joinEnabled,
     required this.talkActive,
     required this.talkBusy,
     required this.accent,
     required this.onTalkStart,
     required this.onTalkStop,
+    required this.onJoin,
   });
 
   final _CarouselItem item;
   final bool selected;
+  final bool connected;
   final bool talkEnabled;
+  final bool joinEnabled;
   final bool talkActive;
   final bool talkBusy;
   final Color accent;
   final Future<void> Function() onTalkStart;
   final Future<void> Function() onTalkStop;
+  final VoidCallback onJoin;
 
   @override
   Widget build(BuildContext context) {
@@ -3631,8 +3860,8 @@ class _MainAvatarCircle extends StatelessWidget {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         border: Border.all(
-          color: talkActive ? accent : Colors.white,
-          width: selected ? 2.5 : 2,
+          color: connected ? const Color(0xff28A745) : Colors.white,
+          width: connected ? 4 : (selected ? 2.5 : 2),
         ),
       ),
       child: ClipOval(
@@ -3661,14 +3890,22 @@ class _MainAvatarCircle extends StatelessWidget {
       ),
     );
 
-    if (talkEnabled) {
+    if (talkEnabled || joinEnabled) {
       circle = Semantics(
         button: true,
-        label: talkActive ? 'Stop talking' : 'Tap to Talk',
+        label: joinEnabled
+            ? 'Join ${item.group.name}'
+            : talkActive
+            ? 'Stop talking'
+            : 'Tap to Talk',
         child: GestureDetector(
           onTap: talkBusy
               ? null
               : () {
+                  if (joinEnabled) {
+                    onJoin();
+                    return;
+                  }
                   if (talkActive) {
                     unawaited(onTalkStop());
                   } else {

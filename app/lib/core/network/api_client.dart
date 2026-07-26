@@ -20,6 +20,20 @@ class ApiClient {
   final http.Client? _httpClient;
   final String _baseUrl;
 
+  Future<Map<String, dynamic>> getJson(String path) async {
+    final token = await _auth.currentUser?.getIdToken();
+    if (token == null) {
+      throw StateError('Cannot call backend before Firebase sign-in.');
+    }
+
+    final uri = Uri.parse('$_baseUrl$path');
+    final headers = {'authorization': 'Bearer $token'};
+    final response = await (_httpClient?.get(uri, headers: headers) ??
+            http.get(uri, headers: headers))
+        .timeout(_requestTimeout);
+    return _decodeResponse(response);
+  }
+
   Future<Map<String, dynamic>> postJson(
     String path,
     Map<String, Object?> body,
@@ -55,6 +69,20 @@ class ApiClient {
     }
 
     return responseBody;
+  }
+
+  Future<Map<String, dynamic>> deleteJson(String path) async {
+    final token = await _auth.currentUser?.getIdToken();
+    if (token == null) {
+      throw StateError('Cannot call backend before Firebase sign-in.');
+    }
+
+    final uri = Uri.parse('$_baseUrl$path');
+    final headers = {'authorization': 'Bearer $token'};
+    final response = await (_httpClient?.delete(uri, headers: headers) ??
+            http.delete(uri, headers: headers))
+        .timeout(_requestTimeout);
+    return _decodeResponse(response);
   }
 
   Future<Map<String, dynamic>> postBytes(
@@ -116,6 +144,18 @@ class ApiClient {
             : response.body,
       );
     }
+  }
+
+  Map<String, dynamic> _decodeResponse(http.Response response) {
+    final responseBody = decodeJsonObject(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ApiException(
+        statusCode: response.statusCode,
+        code: responseBody['error']?.toString() ?? 'request_failed',
+        message: responseBody['message']?.toString() ?? response.body,
+      );
+    }
+    return responseBody;
   }
 }
 

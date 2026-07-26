@@ -50,6 +50,12 @@ class VoiceNudgePlaybackService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val cachedRequest = intent?.toCachedRequest()
         when (intent?.action) {
+            VoiceNudgeContract.actionStopGroupNudges -> {
+                stopGroupNudges(
+                    intent.getStringExtra(VoiceNudgeContract.extraGroupId) ?: return START_NOT_STICKY,
+                )
+                return START_NOT_STICKY
+            }
             VoiceNudgeContract.actionPlayCachedAudio -> {
                 if (cachedRequest == null) return START_NOT_STICKY
                 if (
@@ -101,6 +107,31 @@ class VoiceNudgePlaybackService : Service() {
         releaseWakeLock()
         networkExecutor.shutdownNow()
         super.onDestroy()
+    }
+
+    private fun stopGroupNudges(groupId: String) {
+        queue.removeAll { it.groupId == groupId }
+        val current = active
+        if (current?.groupId == groupId) {
+            releasePlayback()
+            releaseWakeLock()
+            active = null
+            VoiceNudgeAudioCache.delete(this, current.eventId)
+            getSystemService(NotificationManager::class.java).cancel(
+                VoiceNudgeNotifications.idFor(current.eventId),
+            )
+        }
+        if (active == null && queue.isEmpty()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
+        } else if (active == null) {
+            processNext()
+        }
     }
 
     private fun processNext() {

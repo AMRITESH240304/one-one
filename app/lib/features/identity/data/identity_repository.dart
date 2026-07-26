@@ -206,6 +206,65 @@ class IdentityRepository {
     return ensureIdentity();
   }
 
+  Future<bool> hasCompletedSetup() async {
+    final user = _auth.currentUser;
+    if (user == null) {
+      throw StateError('Cannot resolve setup before sign-in.');
+    }
+
+    final snapshot = await _requiredStartupStep(
+      _database.ref('users/${user.uid}').get(),
+      'profile lookup',
+    );
+    if (!snapshot.exists || snapshot.value is! Map<Object?, Object?>) {
+      return false;
+    }
+
+    final data = snapshot.value! as Map<Object?, Object?>;
+    final profile = AppUserProfile.fromJson(user.uid, data);
+    if (profile.setupCompleted) return true;
+
+    // Existing accounts predate the explicit flag. Completed onboarding
+    // always produced both a chosen name and profile photo.
+    final completedLegacySetup = hasCompletedProfileSetup(
+      profile,
+      isLegacyProfile: !data.containsKey('setupCompleted'),
+    );
+    if (completedLegacySetup) {
+      await markSetupComplete();
+    }
+    return completedLegacySetup;
+  }
+
+  Future<void> markSetupComplete() async {
+    final user = _auth.currentUser;
+    if (user == null) {
+      throw StateError('Cannot complete setup before sign-in.');
+    }
+
+    final now = _nowSeconds();
+    await _database.ref('users/${user.uid}').update({
+      'setupCompleted': true,
+      'updatedAt': now,
+      'lastSeenAt': now,
+    });
+
+    final session = _cachedSession;
+    if (session != null) {
+      _publishSession(
+        IdentitySession(
+          user: session.user.copyWith(
+            setupCompleted: true,
+            updatedAt: now,
+            lastSeenAt: now,
+          ),
+          device: session.device,
+          settings: session.settings,
+        ),
+      );
+    }
+  }
+
   Future<IdentitySession> updateSettings({
     required String accentColorKey,
     required bool hapticsEnabled,

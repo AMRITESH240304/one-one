@@ -2,7 +2,7 @@
   "rules": {
     "users": {
       "$userId": {
-        ".read": "auth != null",
+        ".read": "auth != null && auth.uid == $userId",
         ".write": "auth != null && auth.uid == $userId"
       }
     },
@@ -20,86 +20,125 @@
     },
     "groups": {
       "$groupId": {
-        ".read": "auth != null",
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
         ".write": false
       }
     },
     "groupMembers": {
-      ".read": "auth != null",
       "$groupId": {
+        ".read": "auth != null && data.child(auth.uid).child('memberState').val() == 'active'",
         ".write": false
       }
     },
+    "userGroups": {
+      "$userId": {
+        ".read": "auth != null && auth.uid == $userId",
+        ".write": false
+      }
+    },
+    "userGroupIndexVersion": {
+      ".read": false,
+      ".write": false
+    },
     "groupInvites": {
+      ".indexOn": ["groupId", "inviteCodeHash"],
+      ".read": false,
+      ".write": false
+    },
+    "inviteCodeIndex": {
+      ".read": false,
+      ".write": false
+    },
+    "groupLifecycleLocks": {
       ".read": false,
       ".write": false
     },
     "livekitRooms": {
       "$groupId": {
-        ".read": "auth != null",
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
         ".write": false
       }
     },
     "memberAvailability": {
       "$groupId": {
-        ".read": "auth != null",
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
         "$userId": {
-          ".write": "auth != null && auth.uid == $userId"
+          ".write": "auth != null && auth.uid == $userId && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'"
         }
       }
     },
     "handRaises": {
       "$groupId": {
-        ".read": "auth != null",
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
         "$userId": {
-          ".write": "auth != null && auth.uid == $userId"
+          ".write": "auth != null && auth.uid == $userId && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'"
         }
       }
     },
     "appServiceSessions": {
+      ".indexOn": ["groupId"],
       "$sessionId": {
         ".read": "auth != null && data.child('userId').val() == auth.uid",
-        ".write": "auth != null"
+        ".write": "auth != null && ((data.exists() && data.child('userId').val() == auth.uid) || (!data.exists() && newData.child('userId').val() == auth.uid)) && root.child('groupMembers').child(newData.child('groupId').val()).child(auth.uid).child('memberState').val() == 'active'"
       }
     },
     "livekitSessions": {
+      ".indexOn": ["groupId"],
       "$sessionId": {
         ".read": "auth != null && data.child('userId').val() == auth.uid",
-        ".write": "auth != null"
+        ".write": "auth != null && ((data.exists() && data.child('userId').val() == auth.uid) || (!data.exists() && newData.child('userId').val() == auth.uid)) && root.child('groupMembers').child(newData.child('groupId').val()).child(auth.uid).child('memberState').val() == 'active'"
       }
     },
     "notificationEvents": {
       "$groupId": {
-        ".read": "auth != null",
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
         ".write": false
       }
     },
     "notificationDeliveries": {
       "$notificationEventId": {
-        ".read": "auth != null",
+        ".read": false,
         ".write": false
       }
     },
     "voiceNudges": {
+      ".indexOn": ["groupId"],
+      ".read": false,
+      ".write": false
+    },
+    "livekitTokenIssuances": {
+      ".indexOn": ["groupId"],
       ".read": false,
       ".write": false
     },
     "talkLocks": {
       "$groupId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
+        ".write": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active' && ((!newData.exists() && data.child('holderUserId').val() == auth.uid) || (newData.exists() && newData.child('holderUserId').val() == auth.uid))"
       }
     },
     "talkSessions": {
       "$groupId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
+        "$talkSessionId": {
+          ".write": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active' && ((!data.exists() && newData.child('speakerUserId').val() == auth.uid) || (data.exists() && data.child('speakerUserId').val() == auth.uid))"
+        }
       }
     },
     "statusEvents": {
       "$groupId": {
-        ".read": "auth != null",
-        ".write": "auth != null"
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
+        "$eventId": {
+          ".write": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active' && newData.child('userId').val() == auth.uid"
+        }
+      }
+    },
+    "dailyUsage": {
+      "$groupId": {
+        "$userId": {
+          ".read": "auth != null && auth.uid == $userId && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
+          ".write": "auth != null && auth.uid == $userId && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'"
+        }
       }
     }
   }

@@ -3,12 +3,11 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-enum VoicePipAction { toggleMicrophone, mute }
+enum VoicePipAction { toggleMicrophone }
 
 VoicePipAction? parseVoicePipAction(String? value) {
   return switch (value) {
     'toggle_microphone' => VoicePipAction.toggleMicrophone,
-    'mute' => VoicePipAction.mute,
     _ => null,
   };
 }

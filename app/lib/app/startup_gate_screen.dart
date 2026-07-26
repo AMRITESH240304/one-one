@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../features/groups/data/group_repository.dart';
@@ -80,11 +83,23 @@ class _StartupGateScreenState extends State<StartupGateScreen>
       if (!mounted) return;
       _readySession = session;
 
-      final setupCompleted = await _hasCompletedSetup(session.userId);
-      logStartupMilestone('setup cache restored', stopwatch);
+      final locallyCompleted = await _hasCompletedSetup(session.userId);
+      final setupCompleted =
+          locallyCompleted || await _identityRepository.hasCompletedSetup();
+      logStartupMilestone('setup state resolved', stopwatch);
       if (!mounted) return;
 
       if (setupCompleted) {
+        if (!locallyCompleted && !await _requiredPermissionsGranted()) {
+          if (!mounted) return;
+          setState(() {
+            _nextScreen = SetupPermissionScreen(
+              onComplete: () => _finishReturningSetup(session),
+            );
+          });
+          return;
+        }
+        await _markSetupComplete(session.userId);
         final invitedGroupId = await _joinPendingInvite();
         if (!mounted) return;
         setState(() {
@@ -104,23 +119,24 @@ class _StartupGateScreenState extends State<StartupGateScreen>
       }
 
       setState(() {
-        _nextScreen = ProfilePictureScreen(
-          session: session,
-          identityRepository: _identityRepository,
-          onComplete: (updatedSession) async {
+        _nextScreen = SetupPermissionScreen(
+          onComplete: () async {
             if (!mounted) return;
             setState(() {
-              _nextScreen = DisplayNameScreen(
-                session: updatedSession,
+              _nextScreen = ProfilePictureScreen(
+                session: session,
                 identityRepository: _identityRepository,
-                onComplete: () async {
+                onComplete: (updatedSession) async {
                   if (!mounted) return;
                   setState(() {
-                    _nextScreen = SetupPermissionScreen(
+                    _nextScreen = DisplayNameScreen(
+                      session: updatedSession,
+                      identityRepository: _identityRepository,
                       onComplete: () async {
                         final readySession = await _identityRepository
                             .ensureIdentity();
                         _readySession = readySession;
+                        await _identityRepository.markSetupComplete();
                         await _markSetupComplete(readySession.userId);
                         if (!mounted) return;
                         final invitedGroupId = await _joinPendingInvite();
@@ -150,6 +166,35 @@ class _StartupGateScreenState extends State<StartupGateScreen>
         _startupError = error.toString();
       });
     }
+  }
+
+  Future<bool> _requiredPermissionsGranted() async {
+    final mic = await Permission.microphone.isGranted;
+    final notifications = await Permission.notification.isGranted;
+    if (!mic || !notifications) return false;
+    if (!Platform.isAndroid) return true;
+    try {
+      return await FlutterForegroundTask.isIgnoringBatteryOptimizations;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _finishReturningSetup(IdentitySession session) async {
+    await _markSetupComplete(session.userId);
+    final readySession = await _identityRepository.ensureIdentity();
+    _readySession = readySession;
+    if (!mounted) return;
+    final invitedGroupId = await _joinPendingInvite();
+    if (!mounted) return;
+    setState(() {
+      _nextScreen = IdentityHomeScreen(
+        initialSession: readySession,
+        identityRepository: _identityRepository,
+        initialGroupId: invitedGroupId,
+      );
+    });
+    _showPendingInviteMessage();
   }
 
   Future<bool> _hasCompletedSetup(String userId) async {
