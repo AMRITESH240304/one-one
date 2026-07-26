@@ -14,6 +14,7 @@ import '../core/network/api_client.dart';
 import 'display_name_screen.dart';
 import 'profile_picture_screen.dart';
 import 'setup_permission_screen.dart';
+import 'startup_performance.dart';
 
 class StartupGateScreen extends StatefulWidget {
   const StartupGateScreen({super.key});
@@ -66,6 +67,7 @@ class _StartupGateScreenState extends State<StartupGateScreen>
 
   Future<void> _continueAfterLogin() async {
     if (_isLoggingIn) return;
+    final stopwatch = Stopwatch()..start();
 
     setState(() {
       _isLoggingIn = true;
@@ -74,10 +76,12 @@ class _StartupGateScreenState extends State<StartupGateScreen>
 
     try {
       final session = await _identityRepository.ensureIdentity();
+      logStartupMilestone('local identity ready', stopwatch);
       if (!mounted) return;
       _readySession = session;
 
       final setupCompleted = await _hasCompletedSetup(session.userId);
+      logStartupMilestone('setup cache restored', stopwatch);
       if (!mounted) return;
 
       if (setupCompleted) {
@@ -94,6 +98,7 @@ class _StartupGateScreenState extends State<StartupGateScreen>
             initialGroupId: invitedGroupId,
           );
         });
+        logStartupMilestone('Home route selected', stopwatch);
         _showPendingInviteMessage();
         return;
       }
@@ -250,7 +255,9 @@ class _StartupGateScreenState extends State<StartupGateScreen>
                 ),
                 SizedBox(height: 28.h),
                 if (_startupError == null)
-                  const _StartupPulseDots(color: Color(0xff384047))
+                  const DelayedLoadingIndicator(
+                    child: _StartupPulseDots(color: Color(0xff384047)),
+                  )
                 else ...[
                   Text(
                     'We couldn\'t finish setting up your account.',

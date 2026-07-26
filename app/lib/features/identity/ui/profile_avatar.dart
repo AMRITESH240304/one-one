@@ -47,7 +47,10 @@ class ProfileImage extends StatelessWidget {
           placeholder: (context, url) => Center(child: resolvedFallback),
           errorWidget: (context, url, error) {
             // Surface Cloudinary/network failures instead of failing silently.
-            debugPrint('ProfileImage: failed to load "$url": $error');
+            debugPrint(
+              'ProfileImage: failed to load profile photo: '
+              '${error.runtimeType}',
+            );
             return Center(child: resolvedFallback);
           },
         ),

@@ -11,6 +11,7 @@ import 'package:livekit_client/livekit_client.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../app/accent_theme.dart';
+import '../../../app/startup_performance.dart';
 import '../../../core/firebase/app_database.dart';
 import '../../../core/network/api_client.dart';
 import '../../groups/data/group_repository.dart';
@@ -24,6 +25,7 @@ import '../../online/livekit_status.dart';
 import '../../online/models/member_availability.dart';
 import '../../online/models/online_session.dart';
 import '../../online/presence_config.dart';
+import '../../online/voice_pip_bridge.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../../nudges/data/nudge_repository.dart';
 import '../../nudges/ui/nudge_screen.dart';
@@ -66,6 +68,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   final AndroidVoiceNudgeBridge _nudgeActionBridge = AndroidVoiceNudgeBridge();
   final NudgeRepository _nudgeRepository = NudgeRepository();
   final InviteLinkBridge _inviteLinkBridge = InviteLinkBridge();
+  final VoicePipBridge _voicePipBridge = VoicePipBridge();
 
   late IdentitySession _session;
   List<GroupSummary> _groups = const [];
@@ -83,6 +86,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   StreamSubscription<void>? _nudgeActionSubscription;
   StreamSubscription<void>? _registrationRenewalSubscription;
   StreamSubscription<void>? _inviteLinkSubscription;
+  StreamSubscription<VoicePipAction>? _voicePipActionSubscription;
 
   OnlineSession? _onlineSession;
   TalkSession? _talkSession;
@@ -126,6 +130,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   NudgeNotificationAction? _deferredNudgeAction;
   bool _nudgeActionInFlight = false;
   bool _inviteJoinInFlight = false;
+  bool _inPictureInPicture = false;
   String? _preferredGroupId;
 
   @override
@@ -152,8 +157,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _inviteLinkSubscription = InviteLinkBridge.linkSignals.listen((_) {
       unawaited(_takePendingInviteLink());
     });
+    _voicePipBridge.isInPictureInPicture.addListener(_onPipModeChanged);
+    _voicePipActionSubscription = _voicePipBridge.actions.listen(
+      (action) => unawaited(_handlePipAction(action)),
+    );
     unawaited(_startConnectivityMonitoring());
     unawaited(_loadGroups());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => logStartupMilestone('Home visible'),
+    );
   }
 
   @override
@@ -170,6 +182,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _nudgeActionSubscription?.cancel();
     _registrationRenewalSubscription?.cancel();
     _inviteLinkSubscription?.cancel();
+    _voicePipActionSubscription?.cancel();
+    _voicePipBridge.isInPictureInPicture.removeListener(_onPipModeChanged);
+    unawaited(
+      _voicePipBridge.setSessionState(active: false, isTalking: false),
+    );
+    unawaited(_voicePipBridge.dispose());
     _heartbeatTimer?.cancel();
     _peerDisconnectGraceTimer?.cancel();
     _inactivityTimer?.cancel();
@@ -195,6 +213,40 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       unawaited(_takePendingNudgeAction());
       unawaited(_takePendingInviteLink());
     }
+  }
+
+  void _onPipModeChanged() {
+    if (!mounted) return;
+    setState(() {
+      _inPictureInPicture = _voicePipBridge.isInPictureInPicture.value;
+    });
+  }
+
+  Future<void> _handlePipAction(VoicePipAction action) async {
+    if (_onlineSession == null) return;
+    switch (action) {
+      case VoicePipAction.toggleMicrophone:
+        if (_talkSession == null) {
+          await _startTalking();
+        } else {
+          await _stopTalking(reason: 'pip_toggle');
+        }
+        return;
+      case VoicePipAction.mute:
+        if (_talkSession != null) {
+          await _stopTalking(reason: 'pip_mute');
+        }
+        return;
+    }
+  }
+
+  void _syncPipSessionState() {
+    unawaited(
+      _voicePipBridge.setSessionState(
+        active: _onlineSession != null,
+        isTalking: _talkSession != null,
+      ),
+    );
   }
 
   Future<void> _refreshDeviceRegistration({bool force = false}) async {
@@ -246,28 +298,34 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _loadGroups() async {
+    final stopwatch = Stopwatch()..start();
     setState(() => _loadingGroups = true);
     try {
-      final resolution = await _groupRepository.resolveGroupEntry(
+      final groups = await _groupRepository.loadGroupsForUser(
         _session.userId,
       );
+      logStartupMilestone('groups loaded', stopwatch);
       if (!mounted) return;
 
-      if (resolution.kind == GroupEntryKind.noGroups &&
+      if (groups.isEmpty &&
           (ModalRoute.of(context)?.isCurrent ?? true)) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
-          unawaited(_replaceWithGroupEntry(resolution));
+          unawaited(_replaceWithNoGroups());
         });
         return;
       }
 
-      final groups = resolution.groups;
       final selected = _resolveSelectedGroup(groups);
-      final membersByGroupId = await _loadAllGroupMembers(groups);
-      await _precacheGroupMemberPhotos(
-        membersByGroupId.values.expand((members) => members),
-      );
+      final selectedMembers = selected == null
+          ? const <GroupMemberSummary>[]
+          : await _groupRepository.loadGroupMembers(selected.groupId);
+      final membersByGroupId = selected == null
+          ? const <String, List<GroupMemberSummary>>{}
+          : <String, List<GroupMemberSummary>>{
+              selected.groupId: selectedMembers,
+            };
+      logStartupMilestone('selected group members loaded', stopwatch);
 
       if (!mounted) return;
       setState(() {
@@ -281,17 +339,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           _availability = const {};
         }
       });
-      _syncCarouselToSelectedGroup();
-
-      // If this is the first load and the user has no groups, navigate
-      // to the dedicated no-groups screen so the new UI is shown.
-      if (groups.isEmpty && (ModalRoute.of(context)?.isCurrent ?? true)) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          _replaceWithGroupEntry(const GroupEntryResolution.noGroups());
-        });
-        return;
+      if (selected != null) {
+        unawaited(
+          _precacheGroupMemberPhotos(
+            membersByGroupId[selected.groupId] ?? const [],
+          ),
+        );
       }
+      _syncCarouselToSelectedGroup();
 
       if (selected != null) {
         _listenToMembers(selected.groupId);
@@ -304,6 +359,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     } finally {
       if (mounted && _loadingGroups) {
         setState(() => _loadingGroups = false);
+        logStartupMilestone('Home data interactive', stopwatch);
         unawaited(_takePendingNudgeAction());
         unawaited(_takePendingInviteLink());
       }
@@ -408,22 +464,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
   }
 
-  Future<void> _replaceWithGroupEntry(GroupEntryResolution resolution) async {
-    switch (resolution.kind) {
-      case GroupEntryKind.noGroups:
-        await Navigator.of(context).pushReplacement(
-          MaterialPageRoute<void>(
-            builder: (_) => NoGroupsScreen(
-              session: _session,
-              identityRepository: widget.identityRepository,
-            ),
-          ),
-        );
-      case GroupEntryKind.waiting:
-        break;
-      case GroupEntryKind.home:
-        break;
-    }
+  Future<void> _replaceWithNoGroups() async {
+    await Navigator.of(context).pushReplacement(
+      MaterialPageRoute<void>(
+        builder: (_) => NoGroupsScreen(
+          session: _session,
+          identityRepository: widget.identityRepository,
+        ),
+      ),
+    );
   }
 
   Future<void> _loadMembers(String groupId) async {
@@ -433,18 +482,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _members = members;
       _membersByGroupId = {..._membersByGroupId, groupId: members};
     });
-  }
-
-  Future<Map<String, List<GroupMemberSummary>>> _loadAllGroupMembers(
-    List<GroupSummary> groups,
-  ) async {
-    final entries = await Future.wait(
-      groups.map((group) async {
-        final members = await _groupRepository.loadGroupMembers(group.groupId);
-        return MapEntry(group.groupId, members);
-      }),
-    );
-    return Map<String, List<GroupMemberSummary>>.fromEntries(entries);
   }
 
   Future<void> _precacheGroupMemberPhotos(
@@ -476,7 +513,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _membersSubscription = AppDatabase.instance()
         .ref('groupMembers/$groupId')
         .onValue
-        .listen((_) => unawaited(_loadMembers(groupId)));
+        .listen((event) {
+          if (groupMembershipMatchesSnapshot(
+            members: _members,
+            snapshotValue: event.snapshot.value,
+          )) {
+            return;
+          }
+          unawaited(_loadMembers(groupId));
+        });
   }
 
   void _listenToAvailability(String groupId) {
@@ -1129,6 +1174,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _state = 'live';
         _message = LiveKitStatus.live;
       });
+      _syncPipSessionState();
       _scheduleInactivityCheck();
       _startUsageTracking();
     } catch (error) {
@@ -1156,6 +1202,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final session = _onlineSession;
     if (session == null) {
       setState(() => _state = 'away');
+      _syncPipSessionState();
       return;
     }
 
@@ -1191,6 +1238,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _state = 'away';
         _message = LiveKitStatus.away;
       });
+      _syncPipSessionState();
     });
   }
 
@@ -1249,6 +1297,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _state = 'talking';
         _message = LiveKitStatus.talking;
       });
+      _syncPipSessionState();
       _recordVoiceActivity();
     } catch (error) {
       if (startedTalk != null) {
@@ -1260,6 +1309,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _state = _onlineSession == null ? 'away' : 'live';
         _message = LiveKitStatus.sanitizeError(error);
       });
+      _syncPipSessionState();
     } finally {
       if (mounted) {
         setState(() => _talkBusy = false);
@@ -1277,6 +1327,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _state = 'live';
       _message = LiveKitStatus.live;
     });
+    _syncPipSessionState();
 
     _recordVoiceActivity();
 
@@ -1625,6 +1676,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           _state = 'disconnected';
           _message = LiveKitStatus.fromDisconnectReason(event.reason);
         });
+        unawaited(
+          _voicePipBridge.setSessionState(active: false, isTalking: false),
+        );
         _clearConnectionQualities();
       })
       ..on<ParticipantConnectedEvent>((event) {
@@ -1875,6 +1929,21 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     return _displayMembersFrom(_members);
   }
 
+  GroupMemberSummary get _pictureInPictureMember {
+    final activeUserId = _speakingUserIds.firstOrNull ?? _session.userId;
+    for (final member in _displayMembers) {
+      if (member.userId == activeUserId) return member;
+    }
+    return GroupMemberSummary(
+      userId: _session.userId,
+      displayName: _session.user.displayName,
+      role: 'member',
+      memberState: 'active',
+      profilePhotoUrl: _session.user.profilePhotoUrl,
+      profilePhotoBase64: _session.user.profilePhotoBase64,
+    );
+  }
+
   List<GroupMemberSummary> _displayMembersFrom(
     List<GroupMemberSummary> members,
   ) {
@@ -1935,6 +2004,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   @override
   Widget build(BuildContext context) {
     final accent = accentColorForKey(_session.settings.accentColorKey);
+    if (_inPictureInPicture) {
+      final member = _pictureInPictureMember;
+      return _VoicePictureInPictureView(
+        member: member,
+        speaking:
+            _speakingUserIds.contains(member.userId) ||
+            (_talkSession != null && member.userId == _session.userId),
+        talking: _talkSession != null,
+        accent: accent,
+      );
+    }
     final warnings = _setupWarnings();
     final items = _carouselItems;
     final focusedGroup = _selectedGroup;
@@ -2000,7 +2080,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     handRaiseBusy: _handRaiseBusy,
                     handRaiseEnabled: _isOnline,
                     onHandRaise: _toggleHandRaise,
-                    showReaction: _canSendInCallReaction,
+                    showNudge: groupNeedsNudge(
+                      members: _members,
+                      currentUserId: _session.userId,
+                      availability: _availability,
+                    ),
+                    onNudge: _busy ? null : _openNudges,
+                    showReaction:
+                        _canSendInCallReaction &&
+                        _speakingUserIds.any((id) => id != _session.userId),
                     reactionBusy: _reactionBusy,
                     onReaction: _openReactionComposer,
                     groupName: focusedGroup.name,
@@ -2049,35 +2137,96 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               ],
             ),
           ),
-          // Edge-anchored floating action rather than a top-bar icon: a
-          // nudge is an occasional, deliberate "reach out" action, so it
-          // gets a thumb-reachable spot near the screen's rim instead of
-          // competing for space among the settings/status icons up top.
-          // Sit above the carousel's "+ create new group" dashed circle
-          // (200.h row, 72.w tile) plus the hint/copy block beneath it.
-          Positioned(
-            right: 0,
-            bottom: 230.h,
-            child: SafeArea(
-              child: Padding(
-                padding: EdgeInsets.only(right: 12.w),
-                child: _NudgeFloatingButton(
-                  enabled: focusedGroup != null && _friends.isNotEmpty,
-                  attentionPulse:
-                      focusedGroup != null && _friends.isNotEmpty && !_isOnline,
-                  accent: accent,
-                  onTap: _openNudges,
-                ),
-              ),
-            ),
-          ),
           if (_floatingReactions.isNotEmpty)
             InCallReactionOverlay(reactions: _floatingReactions),
           // A shimmering silhouette of this exact layout reads as "already
           // loading the real screen" rather than a generic wait — replaces
           // the previous full-screen spinner overlay.
-          if (_loadingGroups) const _HomeLoadingSkeleton(),
+          if (_loadingGroups)
+            const DelayedLoadingIndicator(child: _HomeLoadingSkeleton()),
         ],
+      ),
+    );
+  }
+}
+
+class _VoicePictureInPictureView extends StatelessWidget {
+  const _VoicePictureInPictureView({
+    required this.member,
+    required this.speaking,
+    required this.talking,
+    required this.accent,
+  });
+
+  final GroupMemberSummary member;
+  final bool speaking;
+  final bool talking;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xff101010),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final shortestSide = constraints.biggest.shortestSide;
+          final avatarRadius = (shortestSide * 0.22).clamp(28.0, 64.0);
+          return Semantics(
+            label:
+                '${member.displayName}, ${speaking ? 'speaking' : 'listening'}, '
+                '${talking ? 'microphone on' : 'microphone muted'}',
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: speaking ? const Color(0xff7CFF6B) : accent,
+                        width: speaking ? 3 : 1,
+                      ),
+                    ),
+                    child: ProfileAvatar(
+                      profilePhotoUrl: member.profilePhotoUrl,
+                      profilePhotoBase64: member.profilePhotoBase64,
+                      radius: avatarRadius,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    member.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        talking ? Icons.mic_rounded : Icons.mic_none_rounded,
+                        color: talking ? const Color(0xff7CFF6B) : Colors.white70,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 12),
+                      Icon(
+                        Icons.mic_off_rounded,
+                        color: talking ? Colors.white : Colors.white38,
+                        size: 18,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -2118,7 +2267,7 @@ class _HomeLoadingSkeletonState extends State<_HomeLoadingSkeleton>
             children: [
               Row(
                 children: [
-                  _shimmer(width: 44.w, height: 44.w, radius: 22.r),
+                  _shimmer(width: 48.w, height: 48.w, radius: 24.r),
                   const Spacer(),
                   _shimmer(width: 72.w, height: 30.h, radius: 18.r),
                 ],
@@ -2476,58 +2625,75 @@ class _StatusToggle extends StatelessWidget {
             : online
             ? 'Tap to go away'
             : 'Go online when someone is already live, or send a nudge to go together',
-        child: Material(
-          color: const Color.fromRGBO(255, 255, 255, 0.12),
-          borderRadius: BorderRadius.circular(18.r),
-          child: InkWell(
-            onTap: busy || !enabled ? null : onToggle,
-            borderRadius: BorderRadius.circular(18.r),
-            child: Container(
-              width: 72.w,
-              height: 30.h,
-              padding: EdgeInsets.all(2.w),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(18.r),
-                border: Border.all(
-                  color: const Color.fromRGBO(255, 255, 255, 0.22),
-                ),
-              ),
-              child: Stack(
-                children: [
-                  AnimatedAlign(
-                    duration: const Duration(milliseconds: 220),
-                    curve: Curves.easeOutCubic,
-                    alignment: online
-                        ? Alignment.centerRight
-                        : Alignment.centerLeft,
-                    child: Container(
-                      width: 34.w,
-                      height: double.infinity,
-                      decoration: BoxDecoration(
-                        color: online ? const Color(0xff7CFF6B) : Colors.white,
-                        borderRadius: BorderRadius.circular(14.r),
-                      ),
+        child: SizedBox(
+          width: 72.w,
+          height: 48,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: busy || !enabled ? null : onToggle,
+              borderRadius: BorderRadius.circular(24),
+              child: Center(
+                child: Container(
+                  width: double.infinity,
+                  height: 30.h,
+                  padding: EdgeInsets.all(2.w),
+                  decoration: BoxDecoration(
+                    color: const Color.fromRGBO(255, 255, 255, 0.12),
+                    borderRadius: BorderRadius.circular(18.r),
+                    border: Border.all(
+                      color: const Color.fromRGBO(255, 255, 255, 0.22),
                     ),
                   ),
-                  Row(
+                  child: Stack(
                     children: [
-                      Expanded(
-                        child: Center(
-                          child: Text('🌙', style: TextStyle(fontSize: 11.sp)),
+                      AnimatedAlign(
+                        duration: const Duration(milliseconds: 220),
+                        curve: Curves.easeOutCubic,
+                        alignment: online
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        child: Container(
+                          width: 34.w,
+                          height: double.infinity,
+                          decoration: BoxDecoration(
+                            color: online
+                                ? const Color(0xff7CFF6B)
+                                : Colors.white,
+                            borderRadius: BorderRadius.circular(14.r),
+                          ),
                         ),
                       ),
-                      Expanded(
-                        child: Center(
-                          child: busy
-                              ? Text('…', style: TextStyle(fontSize: 11.sp))
-                              : online
-                              ? Text('🟢', style: TextStyle(fontSize: 11.sp))
-                              : const SizedBox.shrink(),
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Center(
+                              child: Text(
+                                '🌙',
+                                style: TextStyle(fontSize: 11.sp),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: Center(
+                              child: busy
+                                  ? Text(
+                                      '…',
+                                      style: TextStyle(fontSize: 11.sp),
+                                    )
+                                  : online
+                                  ? Text(
+                                      '🟢',
+                                      style: TextStyle(fontSize: 11.sp),
+                                    )
+                                  : const SizedBox.shrink(),
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
-                ],
+                ),
               ),
             ),
           ),
@@ -2559,8 +2725,8 @@ class _GlassIconButton extends StatelessWidget {
         onLongPress: onLongPress,
         borderRadius: BorderRadius.circular(22.r),
         child: Container(
-          width: 44.w,
-          height: 44.w,
+          width: 48,
+          height: 48,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
@@ -2576,122 +2742,6 @@ class _GlassIconButton extends StatelessWidget {
             color: onPressed == null ? Colors.white38 : Colors.white,
             size: 20.sp,
           ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Edge-anchored floating "nudge" action. Replaces the old top-bar bell
-/// icon (which read as a generic notification/alarm glyph) with a warm,
-/// human "wave hello" metaphor that fits an intimate one-to-one app better.
-/// When nobody is online yet, a slow breathing glow hints that this is the
-/// way to reach out — a gentle affordance, not an alarm-style flash.
-class _NudgeFloatingButton extends StatefulWidget {
-  const _NudgeFloatingButton({
-    required this.enabled,
-    required this.attentionPulse,
-    required this.accent,
-    required this.onTap,
-  });
-
-  final bool enabled;
-  final bool attentionPulse;
-  final Color accent;
-  final VoidCallback onTap;
-
-  @override
-  State<_NudgeFloatingButton> createState() => _NudgeFloatingButtonState();
-}
-
-class _NudgeFloatingButtonState extends State<_NudgeFloatingButton>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _breatheController = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1900),
-  );
-  double _pressScale = 1;
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.attentionPulse) _breatheController.repeat(reverse: true);
-  }
-
-  @override
-  void didUpdateWidget(covariant _NudgeFloatingButton oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.attentionPulse == oldWidget.attentionPulse) return;
-    if (widget.attentionPulse) {
-      _breatheController.repeat(reverse: true);
-    } else {
-      _breatheController.stop();
-      _breatheController.value = 0;
-    }
-  }
-
-  @override
-  void dispose() {
-    _breatheController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Tooltip(
-      message: widget.enabled
-          ? 'Nudge friends'
-          : 'Invite a friend to send a nudge',
-      child: GestureDetector(
-        onTapDown: widget.enabled
-            ? (_) => setState(() => _pressScale = 0.9)
-            : null,
-        onTapCancel: () => setState(() => _pressScale = 1),
-        onTapUp: (_) => setState(() => _pressScale = 1),
-        onTap: widget.enabled ? widget.onTap : null,
-        child: AnimatedBuilder(
-          animation: _breatheController,
-          builder: (context, _) {
-            final glow = widget.attentionPulse ? _breatheController.value : 0.0;
-            return AnimatedScale(
-              scale: _pressScale,
-              duration: const Duration(milliseconds: 120),
-              curve: Curves.easeOut,
-              child: Container(
-                width: 56.w,
-                height: 56.w,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: widget.enabled
-                      ? const Color.fromRGBO(0, 0, 0, 0.4)
-                      : const Color.fromRGBO(255, 255, 255, 0.06),
-                  border: Border.all(
-                    color: widget.enabled
-                        ? widget.accent.withValues(alpha: 0.55 + glow * 0.35)
-                        : Colors.white.withValues(alpha: 0.14),
-                    width: 1.4,
-                  ),
-                  boxShadow: widget.enabled
-                      ? [
-                          BoxShadow(
-                            color: widget.accent.withValues(
-                              alpha: 0.18 + glow * 0.22,
-                            ),
-                            blurRadius: 16.r + glow * 10.r,
-                            spreadRadius: glow * 2.r,
-                          ),
-                        ]
-                      : null,
-                ),
-                child: Icon(
-                  Icons.waving_hand_rounded,
-                  color: widget.enabled ? Colors.white : Colors.white38,
-                  size: 24.sp,
-                ),
-              ),
-            );
-          },
         ),
       ),
     );
@@ -3041,6 +3091,8 @@ class _CarouselCaption extends StatelessWidget {
     required this.handRaiseBusy,
     required this.handRaiseEnabled,
     required this.onHandRaise,
+    required this.showNudge,
+    required this.onNudge,
     required this.showReaction,
     required this.reactionBusy,
     required this.onReaction,
@@ -3053,6 +3105,8 @@ class _CarouselCaption extends StatelessWidget {
   final bool handRaiseBusy;
   final bool handRaiseEnabled;
   final VoidCallback onHandRaise;
+  final bool showNudge;
+  final VoidCallback? onNudge;
   final bool showReaction;
   final bool reactionBusy;
   final VoidCallback onReaction;
@@ -3101,68 +3155,59 @@ class _CarouselCaption extends StatelessWidget {
         SizedBox(height: 10.h),
         SizedBox(
           width: 330.w,
-          height: 38.h,
-          child: Stack(
-            alignment: Alignment.center,
+          height: 48,
+          child: Row(
             children: [
-              Center(
-                child: Opacity(
-                  opacity: handRaiseBusy || !handRaiseEnabled ? 0.45 : 1,
-                  child: Material(
-                    color: handRaised
-                        ? const Color(0xfffff1a8)
-                        : const Color.fromRGBO(255, 255, 255, 0.14),
-                    borderRadius: BorderRadius.circular(18.r),
-                    child: InkWell(
-                      onTap: handRaiseBusy || !handRaiseEnabled
-                          ? null
-                          : onHandRaise,
-                      borderRadius: BorderRadius.circular(18.r),
-                      child: Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: 12.w,
-                          vertical: 7.h,
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text('✋', style: TextStyle(fontSize: 13.sp)),
-                            SizedBox(width: 6.w),
-                            Text(
-                              handRaised ? 'Hand raised' : 'Raise hand',
-                              style: TextStyle(
-                                color: handRaised ? Colors.black : Colors.white,
-                                fontSize: 13.sp,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+              Expanded(
+                child: Center(
+                  child: Visibility(
+                    visible: showNudge,
+                    maintainSize: true,
+                    maintainAnimation: true,
+                    maintainState: true,
+                    child: _GlassIconButton(
+                      tooltip: 'Nudge offline friends',
+                      icon: Icons.waving_hand_rounded,
+                      onPressed: onNudge,
                     ),
                   ),
                 ),
               ),
-              if (showReaction)
-                Align(
-                  alignment: Alignment.centerRight,
+              Expanded(
+                flex: 2,
+                child: Center(
                   child: Opacity(
-                    opacity: reactionBusy ? 0.55 : 1,
-                    child: Tooltip(
-                      message: 'Send a reaction',
+                    opacity: handRaiseBusy || !handRaiseEnabled ? 0.45 : 1,
+                    child: SizedBox(
+                      height: 48,
                       child: Material(
-                        color: const Color.fromRGBO(255, 255, 255, 0.14),
-                        shape: const CircleBorder(),
+                        color: handRaised
+                            ? const Color(0xfffff1a8)
+                            : const Color.fromRGBO(255, 255, 255, 0.14),
+                        borderRadius: BorderRadius.circular(18.r),
                         child: InkWell(
-                          onTap: reactionBusy ? null : onReaction,
-                          customBorder: const CircleBorder(),
-                          child: SizedBox(
-                            width: 38.w,
-                            height: 38.w,
-                            child: Icon(
-                              Icons.keyboard_rounded,
-                              color: Colors.white,
-                              size: 20.sp,
+                          onTap: handRaiseBusy || !handRaiseEnabled
+                              ? null
+                              : onHandRaise,
+                          borderRadius: BorderRadius.circular(18.r),
+                          child: Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 12.w),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text('✋', style: TextStyle(fontSize: 13.sp)),
+                                SizedBox(width: 6.w),
+                                Text(
+                                  handRaised ? 'Hand raised' : 'Raise hand',
+                                  style: TextStyle(
+                                    color: handRaised
+                                        ? Colors.black
+                                        : Colors.white,
+                                    fontSize: 13.sp,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
@@ -3170,6 +3215,25 @@ class _CarouselCaption extends StatelessWidget {
                     ),
                   ),
                 ),
+              ),
+              Expanded(
+                child: Center(
+                  child: Visibility(
+                    visible: showReaction,
+                    maintainSize: true,
+                    maintainAnimation: true,
+                    maintainState: true,
+                    child: Opacity(
+                      opacity: reactionBusy ? 0.55 : 1,
+                      child: _GlassIconButton(
+                        tooltip: 'Send a reaction',
+                        icon: Icons.keyboard_rounded,
+                        onPressed: reactionBusy ? null : onReaction,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),

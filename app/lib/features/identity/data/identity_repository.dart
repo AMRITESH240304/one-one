@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:device_info_plus/device_info_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
@@ -12,6 +11,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../../app/accent_theme.dart';
+import '../../../app/startup_performance.dart';
 import '../../../core/firebase/app_database.dart';
 import '../../../core/storage/profile_photo_storage.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
@@ -32,7 +32,7 @@ class IdentityRepository {
        _deviceIdentityStore = deviceIdentityStore ?? DeviceIdentityStore(),
        _profilePhotoStorage = profilePhotoStorage ?? ProfilePhotoStorage();
 
-  static const Duration _requiredStartupTimeout = Duration(seconds: 20);
+  static const Duration _requiredStartupTimeout = Duration(seconds: 3);
   static const Duration _optionalStartupTimeout = Duration(seconds: 4);
 
   final FirebaseAuth _auth;
@@ -40,6 +40,7 @@ class IdentityRepository {
   final DeviceIdentityStore _deviceIdentityStore;
   final ProfilePhotoStorage _profilePhotoStorage;
   IdentitySession? _cachedSession;
+  Future<void>? _identityRefresh;
   final ValueNotifier<IdentitySession?> _sessionNotifier = ValueNotifier(null);
   bool _disposed = false;
 
@@ -57,32 +58,23 @@ class IdentityRepository {
       'Google authentication',
     );
     final now = _nowSeconds();
+    final cachedSession = _cachedSession;
 
-    // None of these four reads depend on each other, so kick them all off
-    // together instead of awaiting one at a time — Dart futures start
-    // running the moment they're created, so assigning them to locals
-    // before awaiting runs them concurrently and can roughly halve (or
-    // better) the time this step takes on a typical connection.
-    final localDeviceFuture = _requiredStartupStep(
+    if (cachedSession?.userId == firebaseUser.uid) {
+      _scheduleIdentityRefresh(
+        userId: firebaseUser.uid,
+        localDevice: LocalDeviceIdentity(
+          installId: cachedSession!.device.installId,
+          deviceId: cachedSession.device.deviceId,
+        ),
+        now: now,
+      );
+      return cachedSession;
+    }
+
+    final localDevice = await _requiredStartupStep(
       _deviceIdentityStore.getOrCreate(),
       'local device identity setup',
-    );
-    final appVersionFuture = _optionalStartupStep(
-      _readAppVersion(),
-      fallback: 'unknown',
-    );
-    final permissionsFuture = _readPermissionDiagnostics();
-    final fcmTokenFuture = Platform.isAndroid
-        ? _optionalStartupValue(AndroidVoiceNudgeBridge().getFcmToken())
-        : Future<String?>.value(null);
-
-    final localDevice = await localDeviceFuture;
-    final appVersion = await appVersionFuture;
-    final permissions = await permissionsFuture;
-    final fcmToken = await fcmTokenFuture;
-    debugPrint(
-      '[OneOneFCM][DART-03] Identity startup registrationAvailable='
-      '${fcmToken != null}',
     );
 
     final localSession = IdentitySession(
@@ -100,56 +92,82 @@ class IdentityRepository {
       device: UserDeviceRecord(
         deviceId: localDevice.deviceId,
         platform: Platform.isAndroid ? 'android' : Platform.operatingSystem,
-        appVersion: appVersion,
+        appVersion: 'unknown',
         installId: localDevice.installId,
-        micPermissionGranted: permissions.micPermissionGranted,
-        notificationPermissionGranted:
-            permissions.notificationPermissionGranted,
-        batteryOptimizationIgnored: permissions.batteryOptimizationIgnored,
+        micPermissionGranted: false,
+        notificationPermissionGranted: false,
+        batteryOptimizationIgnored: false,
         deviceState: 'active',
         createdAt: now,
         updatedAt: now,
         lastSeenAt: now,
-        fcmToken: fcmToken,
+        fcmToken: null,
       ),
       settings: UserSettingsRecord.defaults(now),
     );
 
     _publishSession(localSession);
-    final syncedSession = await _optionalStartupValue(
-      _syncRemoteIdentityState(
-        userId: firebaseUser.uid,
-        localDevice: localDevice,
-        appVersion: appVersion,
-        permissions: permissions,
-        fcmToken: fcmToken,
-        now: now,
-      ),
-    );
-
-    if (syncedSession != null) {
-      debugPrint(
-        '[OneOneFCM][DART-05] Device registration synchronized to Firebase',
-      );
-      return syncedSession;
-    }
-
-    debugPrint(
-      '[OneOneFCM][DART-W1] Initial device sync did not complete; retry queued',
-    );
-
-    unawaited(
-      _syncRemoteIdentityState(
-        userId: firebaseUser.uid,
-        localDevice: localDevice,
-        appVersion: appVersion,
-        permissions: permissions,
-        fcmToken: fcmToken,
-        now: now,
-      ),
+    _scheduleIdentityRefresh(
+      userId: firebaseUser.uid,
+      localDevice: localDevice,
+      now: now,
     );
 
     return localSession;
+  }
+
+  void _scheduleIdentityRefresh({
+    required String userId,
+    required LocalDeviceIdentity localDevice,
+    required int now,
+  }) {
+    if (_identityRefresh != null) return;
+    _identityRefresh = _refreshIdentity(
+      userId: userId,
+      localDevice: localDevice,
+      now: now,
+    ).whenComplete(() => _identityRefresh = null);
+    unawaited(_identityRefresh);
+  }
+
+  Future<void> _refreshIdentity({
+    required String userId,
+    required LocalDeviceIdentity localDevice,
+    required int now,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    final appVersionFuture = _optionalStartupStep(
+      _readAppVersion(),
+      fallback: 'unknown',
+    );
+    final permissionsFuture = _readPermissionDiagnostics();
+    final fcmTokenFuture = Platform.isAndroid
+        ? _optionalStartupValue(AndroidVoiceNudgeBridge().getFcmToken())
+        : Future<String?>.value(null);
+
+    final appVersion = await appVersionFuture;
+    final permissions = await permissionsFuture;
+    final fcmToken = await fcmTokenFuture;
+    logStartupMilestone('identity diagnostics ready', stopwatch);
+    debugPrint(
+      '[OneOneFCM][DART-03] Identity registration available='
+      '${fcmToken != null}',
+    );
+
+    final syncedSession = await _syncRemoteIdentityState(
+      userId: userId,
+      localDevice: localDevice,
+      appVersion: appVersion,
+      permissions: permissions,
+      fcmToken: fcmToken,
+      now: now,
+    );
+    logStartupMilestone('remote identity sync finished', stopwatch);
+    debugPrint(
+      syncedSession == null
+          ? '[OneOneFCM][DART-W1] Background identity sync deferred'
+          : '[OneOneFCM][DART-05] Device registration synchronized to Firebase',
+    );
   }
 
   Future<IdentitySession> updateDisplayName(String displayName) async {
@@ -541,16 +559,10 @@ class IdentityRepository {
       FlutterForegroundTask.isIgnoringBatteryOptimizations,
     );
     final micStatusFuture = _optionalStartupValue(Permission.microphone.status);
-    // Device metadata is not stored in the Phase 3 ERD. This call is kept
-    // as a plugin smoke path for later diagnostics.
-    final androidInfoFuture = Platform.isAndroid
-        ? _optionalStartupValue(DeviceInfoPlugin().androidInfo)
-        : null;
 
     final notificationPermission = await notificationPermissionFuture;
     final batteryOptimizationIgnored = await batteryOptimizationFuture ?? false;
     final micStatus = await micStatusFuture ?? PermissionStatus.denied;
-    if (androidInfoFuture != null) await androidInfoFuture;
 
     return _PermissionDiagnostics(
       micPermissionGranted: micStatus.isGranted,

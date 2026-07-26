@@ -11,6 +11,7 @@ import 'accent_theme.dart';
 import 'firebase_setup_blocked_screen.dart';
 import 'google_auth_screen.dart';
 import 'startup_gate_screen.dart';
+import 'startup_performance.dart';
 
 class OneOneApp extends StatelessWidget {
   const OneOneApp({super.key});
@@ -109,7 +110,14 @@ class _FirebaseGate extends StatefulWidget {
 }
 
 class _FirebaseGateState extends State<_FirebaseGate> {
-  late final Future<FirebaseApp> _firebaseInit = Firebase.initializeApp();
+  late final Future<FirebaseApp> _firebaseInit = _initializeFirebase();
+
+  Future<FirebaseApp> _initializeFirebase() async {
+    final stopwatch = Stopwatch()..start();
+    final app = await Firebase.initializeApp();
+    logStartupMilestone('Firebase ready', stopwatch);
+    return app;
+  }
 
   @override
   Widget build(BuildContext context) {

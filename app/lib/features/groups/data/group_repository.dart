@@ -6,31 +6,6 @@ import '../models/group_invite_result.dart';
 import '../models/group_member_summary.dart';
 import '../models/group_summary.dart';
 
-enum GroupEntryKind { noGroups, home, waiting }
-
-class GroupEntryResolution {
-  const GroupEntryResolution._({
-    required this.kind,
-    this.group,
-    this.groups = const [],
-  });
-
-  const GroupEntryResolution.noGroups()
-    : this._(kind: GroupEntryKind.noGroups);
-
-  const GroupEntryResolution.home({required List<GroupSummary> groups})
-    : this._(kind: GroupEntryKind.home, groups: groups);
-
-  const GroupEntryResolution.waiting({
-    required GroupSummary group,
-    required List<GroupSummary> groups,
-  }) : this._(kind: GroupEntryKind.waiting, group: group, groups: groups);
-
-  final GroupEntryKind kind;
-  final GroupSummary? group;
-  final List<GroupSummary> groups;
-}
-
 class GroupRepository {
   GroupRepository({ApiClient? apiClient, FirebaseDatabase? database})
     : _apiClient = apiClient ?? ApiClient(),
@@ -100,20 +75,20 @@ class GroupRepository {
       }
     }
 
-    final groups = <GroupSummary>[];
-    for (final groupId in groupIds) {
-      final groupSnapshot = await _database.ref('groups/$groupId').get();
-      if (groupSnapshot.value is Map<Object?, Object?>) {
-        groups.add(
-          GroupSummary.fromJson(
+    final groups = await Future.wait(
+      groupIds.map((groupId) async {
+        final groupSnapshot = await _database.ref('groups/$groupId').get();
+        if (groupSnapshot.value is Map<Object?, Object?>) {
+          return GroupSummary.fromJson(
             groupId,
             groupSnapshot.value! as Map<Object?, Object?>,
-          ),
-        );
-      }
-    }
+          );
+        }
+        return null;
+      }),
+    );
 
-    return groups;
+    return groups.whereType<GroupSummary>().toList();
   }
 
   Future<List<GroupMemberSummary>> loadGroupMembers(String groupId) async {
@@ -124,39 +99,37 @@ class GroupRepository {
     }
 
     final members = snapshot.value! as Map<Object?, Object?>;
-    final result = <GroupMemberSummary>[];
+    final result = await Future.wait(
+      members.entries.map((entry) async {
+        final rawMember = entry.value;
+        if (rawMember is! Map<Object?, Object?>) return null;
 
-    for (final entry in members.entries) {
-      final rawMember = entry.value;
-      if (rawMember is! Map<Object?, Object?>) continue;
+        final userId = entry.key.toString();
+        final data = rawMember;
+        final userSnapshot = await _database.ref('users/$userId').get();
+        String displayName = userId;
+        String? profilePhotoUrl;
+        String? profilePhotoBase64;
 
-      final userId = entry.key.toString();
-      final data = rawMember;
-      final userSnapshot = await _database.ref('users/$userId').get();
-      String displayName = userId;
-      String? profilePhotoUrl;
-      String? profilePhotoBase64;
+        if (userSnapshot.value is Map<Object?, Object?>) {
+          final userData = userSnapshot.value! as Map<Object?, Object?>;
+          displayName = userData['displayName']?.toString() ?? userId;
+          profilePhotoUrl = userData['profilePhotoUrl']?.toString();
+          profilePhotoBase64 = userData['profilePhotoBase64']?.toString();
+        }
 
-      if (userSnapshot.value is Map<Object?, Object?>) {
-        final userData = userSnapshot.value! as Map<Object?, Object?>;
-        displayName = userData['displayName']?.toString() ?? userId;
-        profilePhotoUrl = userData['profilePhotoUrl']?.toString();
-        profilePhotoBase64 = userData['profilePhotoBase64']?.toString();
-      }
-
-      result.add(
-        GroupMemberSummary(
+        return GroupMemberSummary(
           userId: userId,
           displayName: displayName,
           role: data['role']?.toString() ?? 'member',
           memberState: data['memberState']?.toString() ?? 'active',
           profilePhotoUrl: profilePhotoUrl,
           profilePhotoBase64: profilePhotoBase64,
-        ),
-      );
-    }
+        );
+      }),
+    );
 
-    return result;
+    return result.whereType<GroupMemberSummary>().toList();
   }
 
   Future<int> countActiveMembers(String groupId) async {
@@ -176,26 +149,5 @@ class GroupRepository {
     }
 
     return count;
-  }
-
-  Future<GroupEntryResolution> resolveGroupEntry(String userId) async {
-    final groups = await loadGroupsForUser(userId);
-    if (groups.isEmpty) {
-      return const GroupEntryResolution.noGroups();
-    }
-
-    GroupSummary? soloGroup;
-    for (final group in groups) {
-      final memberCount = await countActiveMembers(group.groupId);
-      if (memberCount > 1) {
-        return GroupEntryResolution.home(groups: groups);
-      }
-      soloGroup ??= group;
-    }
-
-    return GroupEntryResolution.waiting(
-      group: soloGroup!,
-      groups: groups,
-    );
   }
 }

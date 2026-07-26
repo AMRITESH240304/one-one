@@ -8,14 +8,16 @@ import '../../app/app_config.dart';
 class ApiClient {
   ApiClient({FirebaseAuth? auth, http.Client? httpClient, String? baseUrl})
     : _auth = auth ?? FirebaseAuth.instance,
-      _httpClient = httpClient ?? http.Client(),
+      _httpClient = httpClient,
       _baseUrl = (baseUrl ?? AppConfig.apiBaseUrl).replaceAll(
         RegExp(r'/$'),
         '',
       );
 
+  static const _requestTimeout = Duration(seconds: 15);
+
   final FirebaseAuth _auth;
-  final http.Client _httpClient;
+  final http.Client? _httpClient;
   final String _baseUrl;
 
   Future<Map<String, dynamic>> postJson(
@@ -28,18 +30,21 @@ class ApiClient {
       throw StateError('Cannot call backend before Firebase sign-in.');
     }
 
-    final response = await _httpClient.post(
-      Uri.parse('$_baseUrl$path'),
-      headers: {
-        'authorization': 'Bearer $token',
-        'content-type': 'application/json',
-      },
-      body: jsonEncode(body),
-    );
+    final uri = Uri.parse('$_baseUrl$path');
+    final headers = {
+      'authorization': 'Bearer $token',
+      'content-type': 'application/json',
+    };
+    final encodedBody = jsonEncode(body);
+    final response = await (_httpClient?.post(
+              uri,
+              headers: headers,
+              body: encodedBody,
+            ) ??
+            http.post(uri, headers: headers, body: encodedBody))
+        .timeout(_requestTimeout);
 
-    final responseBody = response.body.isEmpty
-        ? <String, dynamic>{}
-        : jsonDecode(response.body) as Map<String, dynamic>;
+    final responseBody = decodeJsonObject(response.body);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ApiException(
@@ -63,18 +68,20 @@ class ApiClient {
       throw StateError('Cannot call backend before Firebase sign-in.');
     }
 
-    final response = await _httpClient.post(
-      Uri.parse('$_baseUrl$path'),
-      headers: {
-        'authorization': 'Bearer $token',
-        'content-type': contentType,
-        ...headers,
-      },
-      body: bytes,
-    );
-    final responseBody = response.body.isEmpty
-        ? <String, dynamic>{}
-        : jsonDecode(response.body) as Map<String, dynamic>;
+    final uri = Uri.parse('$_baseUrl$path');
+    final requestHeaders = {
+      'authorization': 'Bearer $token',
+      'content-type': contentType,
+      ...headers,
+    };
+    final response = await (_httpClient?.post(
+              uri,
+              headers: requestHeaders,
+              body: bytes,
+            ) ??
+            http.post(uri, headers: requestHeaders, body: bytes))
+        .timeout(_requestTimeout);
+    final responseBody = decodeJsonObject(response.body);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ApiException(
         statusCode: response.statusCode,
@@ -92,11 +99,14 @@ class ApiClient {
     List<int> bytes, {
     required Map<String, String> headers,
   }) async {
-    final response = await _httpClient.put(
-      Uri.parse(absoluteUrl),
-      headers: headers,
-      body: bytes,
-    );
+    final uri = Uri.parse(absoluteUrl);
+    final response = await (_httpClient?.put(
+              uri,
+              headers: headers,
+              body: bytes,
+            ) ??
+            http.put(uri, headers: headers, body: bytes))
+        .timeout(_requestTimeout);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ApiException(
         statusCode: response.statusCode,
@@ -106,6 +116,18 @@ class ApiClient {
             : response.body,
       );
     }
+  }
+}
+
+Map<String, dynamic> decodeJsonObject(String body) {
+  if (body.isEmpty) return <String, dynamic>{};
+  try {
+    final decoded = jsonDecode(body);
+    return decoded is Map<String, dynamic>
+        ? decoded
+        : <String, dynamic>{};
+  } on FormatException {
+    return <String, dynamic>{};
   }
 }
 

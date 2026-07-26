@@ -12,8 +12,12 @@ class DeviceIdentityStore {
     final installId = prefs.getString(_installIdKey) ?? uuid.v4();
     final deviceId = prefs.getString(_deviceIdKey) ?? uuid.v4();
 
-    await prefs.setString(_installIdKey, installId);
-    await prefs.setString(_deviceIdKey, deviceId);
+    await Future.wait([
+      if (!prefs.containsKey(_installIdKey))
+        prefs.setString(_installIdKey, installId),
+      if (!prefs.containsKey(_deviceIdKey))
+        prefs.setString(_deviceIdKey, deviceId),
+    ]);
 
     return LocalDeviceIdentity(installId: installId, deviceId: deviceId);
   }

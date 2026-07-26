@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:one_one_app/features/groups/group_service_readiness.dart';
 import 'package:one_one_app/features/groups/models/group_member_summary.dart';
+import 'package:one_one_app/features/online/models/member_availability.dart';
 
 void main() {
   const owner = GroupMemberSummary(
@@ -46,6 +47,72 @@ void main() {
       groupHasServicePeer(
         members: const [owner, inactiveFriend],
         currentUserId: 'owner',
+      ),
+      isFalse,
+    );
+  });
+
+  test('nudge is shown only while an active friend is offline', () {
+    const friend = GroupMemberSummary(
+      userId: 'friend',
+      displayName: 'Friend',
+      role: 'member',
+      memberState: 'active',
+    );
+    const members = [owner, friend];
+
+    expect(
+      groupNeedsNudge(
+        members: members,
+        currentUserId: 'owner',
+        availability: const {},
+      ),
+      isTrue,
+    );
+    expect(
+      groupNeedsNudge(
+        members: members,
+        currentUserId: 'owner',
+        availability: const {
+          'friend': MemberAvailability(
+            desiredState: 'online',
+            effectiveState: 'live',
+            canReceiveLiveAudio: true,
+          ),
+        },
+      ),
+      isFalse,
+    );
+  });
+
+  test('unchanged membership snapshots do not trigger a reload', () {
+    const friend = GroupMemberSummary(
+      userId: 'friend',
+      displayName: 'Friend',
+      role: 'member',
+      memberState: 'active',
+    );
+    const members = [owner, friend];
+    final unchanged = {
+      'owner': {'role': 'owner', 'memberState': 'active'},
+      'friend': {'role': 'member', 'memberState': 'active'},
+    };
+    final changed = {
+      'owner': {'role': 'owner', 'memberState': 'active'},
+      'friend': {'role': 'member', 'memberState': 'removed'},
+    };
+
+    expect(
+      groupMembershipMatchesSnapshot(
+        members: members,
+        snapshotValue: unchanged,
+      ),
+      isTrue,
+    );
+    expect(
+      groupMembershipMatchesSnapshot(
+        members: members,
+        snapshotValue: changed,
       ),
       isFalse,
     );

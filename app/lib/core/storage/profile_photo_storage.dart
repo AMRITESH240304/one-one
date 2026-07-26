@@ -15,10 +15,11 @@ class ProfilePhotoStorageException implements Exception {
 }
 
 class ProfilePhotoStorage {
-  ProfilePhotoStorage({http.Client? httpClient})
-    : _httpClient = httpClient ?? http.Client();
+  ProfilePhotoStorage({http.Client? httpClient}) : _httpClient = httpClient;
 
-  final http.Client _httpClient;
+  static const _requestTimeout = Duration(seconds: 20);
+
+  final http.Client? _httpClient;
 
   Future<String> uploadProfilePhoto({
     required String userId,
@@ -45,8 +46,11 @@ class ProfilePhotoStorage {
       http.MultipartFile.fromBytes('file', imageBytes, filename: 'profile.jpg'),
     );
 
-    final streamedResponse = await _httpClient.send(request);
-    final responseBody = await streamedResponse.stream.bytesToString();
+    final streamedResponse = await (_httpClient?.send(request) ?? request.send())
+        .timeout(_requestTimeout);
+    final responseBody = await streamedResponse.stream
+        .bytesToString()
+        .timeout(_requestTimeout);
 
     if (streamedResponse.statusCode < 200 ||
         streamedResponse.statusCode >= 300) {

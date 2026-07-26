@@ -51,6 +51,8 @@ object VoiceNudgeNotifications {
         senderName: String,
         status: String,
         ongoing: Boolean,
+        cachedAudioAvailable: Boolean = false,
+        isPlaying: Boolean = false,
     ): Notification {
         ensureChannels(context)
         val openIntent = Intent(context, MainActivity::class.java).apply {
@@ -68,7 +70,7 @@ object VoiceNudgeNotifications {
             @Suppress("DEPRECATION")
             Notification.Builder(context)
         }
-        return builder
+        val configured = builder
             .setSmallIcon(R.drawable.ic_voice_nudge)
             .setContentTitle("$senderName nudged you")
             .setContentText(status)
@@ -79,6 +81,29 @@ object VoiceNudgeNotifications {
             .setContentIntent(contentIntent)
             .setOngoing(ongoing)
             .setAutoCancel(!ongoing)
+        if (cachedAudioAvailable) {
+            configured
+                .addAction(
+                    Notification.Action.Builder(
+                        if (isPlaying) {
+                            android.R.drawable.ic_media_pause
+                        } else {
+                            android.R.drawable.ic_media_play
+                        },
+                        if (isPlaying) "Pause" else "Play",
+                        playbackIntent(
+                            context,
+                            eventId,
+                            groupId,
+                            responseUrl,
+                            senderName,
+                            isPlaying,
+                        ),
+                    ).build(),
+                )
+                .setDeleteIntent(cacheDeleteIntent(context, eventId))
+        }
+        return configured
             .addNudgeActions(
                 context = context,
                 eventId = eventId,
@@ -309,6 +334,61 @@ object VoiceNudgeNotifications {
         putExtra(VoiceNudgeContract.extraResponseUrl, responseUrl)
         putExtra(VoiceNudgeContract.extraSenderName, senderName)
         putExtra(VoiceNudgeContract.extraNotificationId, notificationId)
+    }
+
+    private fun playbackIntent(
+        context: Context,
+        eventId: String,
+        groupId: String,
+        responseUrl: String?,
+        senderName: String,
+        isPlaying: Boolean,
+    ): PendingIntent {
+        val action = if (isPlaying) {
+            VoiceNudgeContract.actionPauseCachedAudio
+        } else {
+            VoiceNudgeContract.actionPlayCachedAudio
+        }
+        val intent = Intent(context, VoiceNudgePlaybackService::class.java).apply {
+            this.action = action
+            putExtra(VoiceNudgeContract.extraKind, VoiceNudgeContract.kindVoice)
+            putExtra(VoiceNudgeContract.extraEventId, eventId)
+            putExtra(VoiceNudgeContract.extraGroupId, groupId)
+            putExtra(VoiceNudgeContract.extraResponseUrl, responseUrl)
+            putExtra(VoiceNudgeContract.extraSenderName, senderName)
+        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        return if (
+            !isPlaying &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+        ) {
+            PendingIntent.getForegroundService(
+                context,
+                requestCode(eventId, action),
+                intent,
+                flags,
+            )
+        } else {
+            PendingIntent.getService(
+                context,
+                requestCode(eventId, action),
+                intent,
+                flags,
+            )
+        }
+    }
+
+    private fun cacheDeleteIntent(context: Context, eventId: String): PendingIntent {
+        val intent = Intent(context, VoiceNudgeCacheDismissReceiver::class.java).apply {
+            action = VoiceNudgeContract.actionDismissCachedAudio
+            putExtra(VoiceNudgeContract.extraEventId, eventId)
+        }
+        return PendingIntent.getBroadcast(
+            context,
+            requestCode(eventId, "dismiss_audio"),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
     }
 
     private fun requestCode(eventId: String, action: String): Int =

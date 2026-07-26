@@ -33,6 +33,9 @@ object VoiceNudgeContract {
     const val actionConnect = "app.oneone.action.CONNECT_NUDGE"
     const val actionDecline = "app.oneone.action.DECLINE_NUDGE"
     const val actionSnooze = "app.oneone.action.SNOOZE_NUDGE"
+    const val actionPlayCachedAudio = "app.oneone.action.PLAY_CACHED_NUDGE"
+    const val actionPauseCachedAudio = "app.oneone.action.PAUSE_CACHED_NUDGE"
+    const val actionDismissCachedAudio = "app.oneone.action.DISMISS_CACHED_NUDGE"
 }
 
 object VoiceNudgeTokenStore {
