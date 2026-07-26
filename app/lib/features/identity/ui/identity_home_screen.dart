@@ -2018,13 +2018,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final warnings = _setupWarnings();
     final items = _carouselItems;
     final focusedGroup = _selectedGroup;
-    final showNudge =
-        focusedGroup != null &&
-        groupNeedsNudge(
-          members: _members,
-          currentUserId: _session.userId,
-          availability: _availability,
-        );
     // Local session is the source of truth — remote availability can lag after goAway.
     final live = _isOnline && (_state == 'live' || _state == 'talking');
     final inviteAction = _busy || focusedGroup == null
@@ -2056,8 +2049,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                   showNetworkStrength: _isOnline,
                   localConnectionQuality: _effectiveLocalConnectionQuality,
                   statusLabel: _presenceStatusLabel,
-                  showNudge: showNudge,
-                  onNudge: _busy ? null : _openNudges,
                 ),
                 SizedBox(height: 8.h),
                 _FriendsStrip(
@@ -2089,6 +2080,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     handRaiseBusy: _handRaiseBusy,
                     handRaiseEnabled: _isOnline,
                     onHandRaise: _toggleHandRaise,
+                    showNudge: groupNeedsNudge(
+                      members: _members,
+                      currentUserId: _session.userId,
+                      availability: _availability,
+                    ),
+                    onNudge: _busy ? null : _openNudges,
                     showReaction:
                         _canSendInCallReaction &&
                         _speakingUserIds.any((id) => id != _session.userId),
@@ -2500,8 +2497,6 @@ class _TopChrome extends StatelessWidget {
     required this.showNetworkStrength,
     required this.localConnectionQuality,
     required this.statusLabel,
-    required this.showNudge,
-    required this.onNudge,
   });
 
   final VoidCallback onSettings;
@@ -2514,15 +2509,13 @@ class _TopChrome extends StatelessWidget {
   final bool showNetworkStrength;
   final ConnectionQuality localConnectionQuality;
   final String statusLabel;
-  final bool showNudge;
-  final VoidCallback? onNudge;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.fromLTRB(12.w, 4.h, 12.w, 0),
       child: SizedBox(
-        height: 64.h,
+        height: 52.h,
         child: Stack(
           alignment: Alignment.center,
           children: [
@@ -2579,39 +2572,26 @@ class _TopChrome extends StatelessWidget {
             ),
             Align(
               alignment: Alignment.centerRight,
-              child: Row(
+              child: Column(
                 mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      _StatusToggle(
-                        busy: busy,
-                        online: online,
-                        enabled: enabled,
-                        onToggle: onTogglePresence,
-                      ),
-                      SizedBox(height: 3.h),
-                      Text(
-                        statusLabel,
-                        style: TextStyle(
-                          color: const Color.fromRGBO(255, 255, 255, 0.65),
-                          fontSize: 10.sp,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.2,
-                        ),
-                      ),
-                    ],
+                  _StatusToggle(
+                    busy: busy,
+                    online: online,
+                    enabled: enabled,
+                    onToggle: onTogglePresence,
                   ),
-                  if (showNudge) ...[
-                    SizedBox(width: 8.w),
-                    _GlassIconButton(
-                      tooltip: 'Nudge offline friends',
-                      icon: Icons.waving_hand_rounded,
-                      onPressed: onNudge,
+                  SizedBox(height: 3.h),
+                  Text(
+                    statusLabel,
+                    style: TextStyle(
+                      color: const Color.fromRGBO(255, 255, 255, 0.65),
+                      fontSize: 10.sp,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.2,
                     ),
-                  ],
+                  ),
                 ],
               ),
             ),
@@ -3111,6 +3091,8 @@ class _CarouselCaption extends StatelessWidget {
     required this.handRaiseBusy,
     required this.handRaiseEnabled,
     required this.onHandRaise,
+    required this.showNudge,
+    required this.onNudge,
     required this.showReaction,
     required this.reactionBusy,
     required this.onReaction,
@@ -3123,6 +3105,8 @@ class _CarouselCaption extends StatelessWidget {
   final bool handRaiseBusy;
   final bool handRaiseEnabled;
   final VoidCallback onHandRaise;
+  final bool showNudge;
+  final VoidCallback? onNudge;
   final bool showReaction;
   final bool reactionBusy;
   final VoidCallback onReaction;
@@ -3174,7 +3158,21 @@ class _CarouselCaption extends StatelessWidget {
           height: 48,
           child: Row(
             children: [
-              const Expanded(child: SizedBox.shrink()),
+              Expanded(
+                child: Center(
+                  child: Visibility(
+                    visible: showNudge,
+                    maintainSize: true,
+                    maintainAnimation: true,
+                    maintainState: true,
+                    child: _GlassIconButton(
+                      tooltip: 'Nudge offline friends',
+                      icon: Icons.waving_hand_rounded,
+                      onPressed: onNudge,
+                    ),
+                  ),
+                ),
+              ),
               Expanded(
                 flex: 2,
                 child: Center(
