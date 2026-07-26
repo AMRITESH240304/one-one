@@ -1,5 +1,13 @@
 {
   "projects": {
     "default": "oneone-3adb5"
+  },
+  "targets": {},
+  "etags": {
+    "oneone-3adb5": {
+      "extensionInstances": {
+        "auto-stop-billing": "38966f1f12331539e1df1aa8e6ac2cd3a50a4b224f73b23e6b7f55d6abbceb11"
+      }
+    }
   }
 }

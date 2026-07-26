@@ -7,5 +7,8 @@
   },
   "remoteconfig": {
     "template": "firebase/remote-config.template.json"
+  },
+  "extensions": {
+    "auto-stop-billing": "kurtweston/functions-auto-stop-billing@2.0.0"
   }
 }
