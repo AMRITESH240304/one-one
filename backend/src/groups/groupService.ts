@@ -356,8 +356,15 @@ export async function removeGroupMember(input: RemoveGroupMemberInput) {
   const db = getRealtimeDatabase();
   const memberRef = db.ref(`groupMembers/${input.groupId}/${input.memberUserId}`);
   const now = nowSeconds();
+  // RTDB transactions often invoke the handler first with null (optimistic
+  // local guess). Returning undefined there aborts with no retry — which left
+  // members stuck as active while cleanup still wiped userGroups. Returning
+  // null on null lets the SDK retry with the real server value.
   const result = await memberRef.transaction((current) => {
-    if (!isRecord(current) || (current.memberState ?? "active") !== "active") return;
+    if (current === null) return null;
+    if (!isRecord(current) || (current.memberState ?? "active") !== "active") {
+      return;
+    }
     if (current.role === "owner") return;
     return {
       ...current,
@@ -370,22 +377,33 @@ export async function removeGroupMember(input: RemoveGroupMemberInput) {
 
   if (!result.committed) {
     const current = await memberRef.get();
-    if (current.child("role").val() === "owner") {
+    const stillActive =
+      current.exists() &&
+      (current.child("memberState").val() ?? "active") === "active";
+    if (stillActive && current.child("role").val() === "owner") {
       throw new HttpError(409, "cannot_remove_owner", "The group owner cannot be removed.");
     }
+    if (stillActive) {
+      throw new HttpError(
+        409,
+        "member_remove_failed",
+        "Could not remove this member. Please try again."
+      );
+    }
+    // Already left/removed — still sweep leftover session state.
+    await cleanupMemberState(input.groupId, input.memberUserId, "removed_by_owner");
+    return { removed: true, alreadyRemoved: true };
   }
 
   await cleanupMemberState(input.groupId, input.memberUserId, "removed_by_owner");
-  if (result.committed) {
-    await notifyUsers(
-      [input.memberUserId],
-      "Removed from group",
-      `You were removed from ${group.name}.`,
-      { type: "group_removed", groupId: input.groupId }
-    );
-  }
+  await notifyUsers(
+    [input.memberUserId],
+    "Removed from group",
+    `You were removed from ${group.name}.`,
+    { type: "group_removed", groupId: input.groupId }
+  );
 
-  return { removed: true, alreadyRemoved: !result.committed };
+  return { removed: true, alreadyRemoved: false };
 }
 
 export async function leaveGroup(input: GroupMemberActionInput) {
@@ -410,8 +428,12 @@ export async function leaveGroup(input: GroupMemberActionInput) {
   }
 
   const now = nowSeconds();
+  // Same optimistic-null handling as removeGroupMember — see comment there.
   const result = await memberRef.transaction((current) => {
-    if (!isRecord(current) || (current.memberState ?? "active") !== "active") return;
+    if (current === null) return null;
+    if (!isRecord(current) || (current.memberState ?? "active") !== "active") {
+      return;
+    }
     if (current.role === "owner") return;
     return {
       ...current,
@@ -420,8 +442,31 @@ export async function leaveGroup(input: GroupMemberActionInput) {
     };
   });
 
+  if (!result.committed) {
+    const current = await memberRef.get();
+    const stillActive =
+      current.exists() &&
+      (current.child("memberState").val() ?? "active") === "active";
+    if (stillActive && current.child("role").val() === "owner") {
+      throw new HttpError(
+        409,
+        "owner_must_delete_group",
+        "Owners must delete the group. Ownership transfer is not supported yet."
+      );
+    }
+    if (stillActive) {
+      throw new HttpError(
+        409,
+        "member_leave_failed",
+        "Could not leave this group. Please try again."
+      );
+    }
+    await cleanupMemberState(input.groupId, input.userId, "member_left");
+    return { left: true, alreadyLeft: true };
+  }
+
   await cleanupMemberState(input.groupId, input.userId, "member_left");
-  return { left: true, alreadyLeft: !result.committed };
+  return { left: true, alreadyLeft: false };
 }
 
 export async function deleteGroup(input: GroupMemberActionInput) {
@@ -884,7 +929,11 @@ async function disconnectLiveKitMember(groupId: string, userId: string) {
         )
     );
   } catch (error) {
-    logger.warn({ error, groupId, userId }, "LiveKit member disconnect failed");
+    // Empty / never-created rooms return 404 — expected when the member was
+    // not in an active LiveKit session. Only warn on unexpected failures.
+    if (!isLiveKitNotFound(error)) {
+      logger.warn({ error, groupId, userId }, "LiveKit member disconnect failed");
+    }
   }
 }
 
@@ -902,8 +951,16 @@ async function disconnectLiveKitRoom(roomName: string) {
     );
     await client.deleteRoom(roomName);
   } catch (error) {
-    logger.warn({ error, roomName }, "LiveKit room deletion failed");
+    if (!isLiveKitNotFound(error)) {
+      logger.warn({ error, roomName }, "LiveKit room deletion failed");
+    }
   }
+}
+
+function isLiveKitNotFound(error: unknown) {
+  if (!isRecord(error)) return false;
+  const status = error.status ?? error.code;
+  return status === 404 || status === "not_found";
 }
 
 function defaultAvailability(now: number) {
