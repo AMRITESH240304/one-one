@@ -21,6 +21,7 @@ class OnlineRepository {
   Future<OnlineSession> goOnline({
     required IdentitySession identity,
     required GroupSummary group,
+    String connectionMode = MemberAvailability.walkieTalkieMode,
   }) async {
     await _requestOnlinePermissions();
 
@@ -81,6 +82,7 @@ class OnlineRepository {
         'serviceState': 'starting',
         'livekitConnectionState': 'connecting',
         'canReceiveLiveAudio': false,
+        'connectionMode': connectionMode,
         'lastHeartbeatAt': now,
         'staleAfterAt': now + 30,
         'updatedAt': now,
@@ -141,6 +143,21 @@ class OnlineRepository {
     });
   }
 
+  /// Switches a member's own connection between walkie-talkie (push-to-talk)
+  /// and call (always-on mic). This is a per-user setting, not a group-wide
+  /// mode: it only ever writes the caller's own availability entry.
+  Future<void> setConnectionMode(
+    OnlineSession session, {
+    required String connectionMode,
+  }) async {
+    await _database.ref().update({
+      'memberAvailability/${session.groupId}/${session.userId}/connectionMode':
+          connectionMode,
+      'memberAvailability/${session.groupId}/${session.userId}/updatedAt':
+          _nowSeconds(),
+    });
+  }
+
   Future<void> goAway(
     OnlineSession session, {
     String reason = 'user_away',
@@ -179,6 +196,7 @@ class OnlineRepository {
         'serviceState': 'stopped',
         'livekitConnectionState': 'disconnected',
         'canReceiveLiveAudio': false,
+        'connectionMode': MemberAvailability.walkieTalkieMode,
         'lastHeartbeatAt': now,
         'staleAfterAt': now,
         'updatedAt': now,
@@ -218,6 +236,7 @@ class OnlineRepository {
         'serviceState': 'stopped',
         'livekitConnectionState': 'disconnected',
         'canReceiveLiveAudio': false,
+        'connectionMode': MemberAvailability.walkieTalkieMode,
         'lastHeartbeatAt': 0,
         'staleAfterAt': 0,
         'updatedAt': now,

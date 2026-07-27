@@ -81,6 +81,10 @@ class _EmojiBurstEffectState extends State<_EmojiBurstEffect>
   @override
   Widget build(BuildContext context) {
     final config = widget.burst.config;
+    final name = widget.burst.senderName.trim().isEmpty
+        ? 'friend'
+        : widget.burst.senderName.trim().toLowerCase();
+
     return Positioned.fill(
       child: LayoutBuilder(
         builder: (context, constraints) {
@@ -88,18 +92,54 @@ class _EmojiBurstEffectState extends State<_EmojiBurstEffect>
           final height = constraints.maxHeight;
           return AnimatedBuilder(
             animation: _controller,
-            builder: (context, _) => Stack(
-              children: [
-                for (final particle in _particles)
-                  particle.build(
-                    emoji: widget.burst.emoji,
-                    config: config,
-                    overallProgress: _controller.value,
-                    width: width,
-                    height: height,
+            builder: (context, _) {
+              // Name stays readable through most of the burst, then fades
+              // with the last particles so attribution doesn't linger alone.
+              final t = _controller.value;
+              final nameOpacity = t < 0.08
+                  ? t / 0.08
+                  : t > 0.72
+                  ? (1 - (t - 0.72) / 0.28).clamp(0.0, 1.0)
+                  : 1.0;
+              final originY = height * config.originHeightFraction;
+
+              return Stack(
+                children: [
+                  for (final particle in _particles)
+                    particle.build(
+                      emoji: widget.burst.emoji,
+                      config: config,
+                      overallProgress: t,
+                      width: width,
+                      height: height,
+                    ),
+                  // Sender label anchored just under the spawn point so you
+                  // can tell who fired the burst without crowding the stream.
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: originY + 6.h,
+                    child: IgnorePointer(
+                      child: Opacity(
+                        opacity: nameOpacity,
+                        child: Text(
+                          name,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 11.sp,
+                            fontWeight: FontWeight.w600,
+                            shadows: const [
+                              Shadow(color: Colors.black, blurRadius: 8),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
-              ],
-            ),
+                ],
+              );
+            },
           );
         },
       ),

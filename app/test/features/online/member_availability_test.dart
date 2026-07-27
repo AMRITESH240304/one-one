@@ -57,5 +57,40 @@ void main() {
 
       expect(availability.isLiveAt(100), isFalse);
     });
+
+    test('connecting state counts as in-session for alone-member grace', () {
+      final availability = MemberAvailability.fromJson({
+        'desiredState': 'online',
+        'effectiveState': 'connecting',
+        'canReceiveLiveAudio': false,
+        'staleAfterAt': 130,
+      });
+
+      expect(availability.isInVoiceSessionAt(100), isTrue);
+      expect(availability.isLiveAt(100), isFalse);
+    });
+
+    test('stale connecting state is not in-session', () {
+      final availability = MemberAvailability.fromJson({
+        'desiredState': 'online',
+        'effectiveState': 'connecting',
+        'canReceiveLiveAudio': false,
+        'staleAfterAt': 100,
+      });
+
+      expect(availability.isInVoiceSessionAt(100), isFalse);
+      expect(availability.isInVoiceSessionAt(101), isFalse);
+    });
+
+    test('away state is not in-session', () {
+      final availability = MemberAvailability.fromJson({
+        'desiredState': 'away',
+        'effectiveState': 'away',
+        'canReceiveLiveAudio': false,
+        'staleAfterAt': 130,
+      });
+
+      expect(availability.isInVoiceSessionAt(100), isFalse);
+    });
   });
 }

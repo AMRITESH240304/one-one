@@ -973,6 +973,10 @@ function defaultAvailability(now: number) {
     serviceState: "stopped",
     livekitConnectionState: "disconnected",
     canReceiveLiveAudio: false,
+    // Placeholder until the member actually connects — the client decides
+    // the real starting mode in OnlineRepository.goOnline (walkie-talkie by
+    // default, or call mode if peers are already connected that way).
+    connectionMode: "walkieTalkie",
     lastHeartbeatAt: now,
     staleAfterAt: now,
     updatedAt: now

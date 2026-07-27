@@ -16,11 +16,13 @@ class GroupManagementScreen extends StatefulWidget {
     super.key,
     required this.group,
     required this.currentUserId,
+    required this.initialMembers,
     required this.onInvite,
   });
 
   final GroupSummary group;
   final String currentUserId;
+  final List<GroupMemberSummary> initialMembers;
   final Future<void> Function() onInvite;
 
   @override
@@ -30,19 +32,25 @@ class GroupManagementScreen extends StatefulWidget {
 class _GroupManagementScreenState extends State<GroupManagementScreen> {
   final GroupRepository _repository = GroupRepository();
   StreamSubscription<DatabaseEvent>? _membersSubscription;
-  List<GroupMemberSummary> _members = const [];
-  bool _loading = true;
+  late List<GroupMemberSummary> _members;
   bool _busy = false;
+  String? _removingUserId;
 
   bool get _isOwner => widget.group.ownerUserId == widget.currentUserId;
 
   @override
   void initState() {
     super.initState();
+    // Home already loaded these — don't hit the members API again on open.
+    _members = List<GroupMemberSummary>.unmodifiable(
+      widget.initialMembers
+          .where((member) => member.memberState == 'active')
+          .toList(growable: false),
+    );
     _membersSubscription = AppDatabase.instance()
         .ref('groupMembers/${widget.group.groupId}')
         .onValue
-        .listen((_) => unawaited(_loadMembers()));
+        .listen(_onMembersSnapshot);
   }
 
   @override
@@ -51,23 +59,37 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
     super.dispose();
   }
 
-  Future<void> _loadMembers() async {
-    try {
-      final members = await _repository.loadGroupMembers(widget.group.groupId);
-      if (!mounted) return;
-      if (members.every((member) => member.userId != widget.currentUserId) &&
-          !_busy) {
-        Navigator.of(context).pop(GroupManagementOutcome.membershipEnded);
-        return;
-      }
-      setState(() {
-        _members = members;
-        _loading = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _loading = false);
+  /// Sync local rows from RTDB without an API round-trip — drop anyone who
+  /// is no longer active, and leave if we ourselves were removed.
+  void _onMembersSnapshot(DatabaseEvent event) {
+    if (!mounted || _busy) return;
+
+    final activeIds = _activeMemberIds(event.snapshot.value);
+    if (!activeIds.contains(widget.currentUserId)) {
+      Navigator.of(context).pop(GroupManagementOutcome.membershipEnded);
+      return;
     }
+
+    final next = _members
+        .where((member) => activeIds.contains(member.userId))
+        .toList(growable: false);
+    if (next.length == _members.length &&
+        next.every((member) => _members.any((m) => m.userId == member.userId))) {
+      return;
+    }
+    setState(() => _members = next);
+  }
+
+  Set<String> _activeMemberIds(Object? snapshotValue) {
+    if (snapshotValue is! Map<Object?, Object?>) return {};
+    final ids = <String>{};
+    for (final entry in snapshotValue.entries) {
+      final raw = entry.value;
+      if (raw is! Map<Object?, Object?>) continue;
+      if ((raw['memberState']?.toString() ?? 'active') != 'active') continue;
+      ids.add(entry.key.toString());
+    }
+    return ids;
   }
 
   Future<bool> _confirm({
@@ -77,12 +99,31 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
   }) async {
     return await showDialog<bool>(
           context: context,
+          barrierColor: Colors.black87,
           builder: (dialogContext) => AlertDialog(
-            title: Text(title),
-            content: message == null ? null : Text(message),
+            backgroundColor: const Color(0xff1b1b1b),
+            surfaceTintColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            title: Text(
+              title,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            content: message == null
+                ? null
+                : Text(
+                    message,
+                    style: const TextStyle(color: Colors.white70, height: 1.4),
+                  ),
+            actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(dialogContext, false),
+                style: TextButton.styleFrom(foregroundColor: Colors.white70),
                 child: const Text('Cancel'),
               ),
               FilledButton(
@@ -90,6 +131,7 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
                 style: FilledButton.styleFrom(
                   backgroundColor: const Color(0xffb3261e),
                   foregroundColor: Colors.white,
+                  minimumSize: const Size(96, 44),
                 ),
                 child: Text(action),
               ),
@@ -101,16 +143,38 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
 
   Future<void> _remove(GroupMemberSummary member) async {
     final confirmed = await _confirm(
-      title: 'Remove ${member.displayName} from this group?',
+      title: 'Remove ${member.displayName}?',
+      message: 'They will lose access to this group immediately.',
       action: 'Remove',
     );
     if (!confirmed || !mounted) return;
-    final succeeded = await _run(
-      () => _repository.removeMember(widget.group.groupId, member.userId),
-    );
-    // Don't rely solely on the RTDB listener — force a fresh member list so
-    // the removed row disappears even if the realtime event is delayed.
-    if (succeeded && mounted) await _loadMembers();
+
+    setState(() {
+      _busy = true;
+      _removingUserId = member.userId;
+    });
+    try {
+      await _repository.removeMember(widget.group.groupId, member.userId);
+      if (!mounted) return;
+      setState(() {
+        _members = _members
+            .where((item) => item.userId != member.userId)
+            .toList(growable: false);
+      });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.toString())),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _removingUserId = null;
+        });
+      }
+    }
   }
 
   Future<void> _invite() async {
@@ -120,10 +184,13 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
   Future<void> _leave() async {
     final confirmed = await _confirm(
       title: 'Leave this group?',
+      message: 'You can rejoin later with a new invite.',
       action: 'Leave',
     );
     if (!confirmed || !mounted) return;
-    final succeeded = await _run(() => _repository.leaveGroup(widget.group.groupId));
+    final succeeded = await _run(
+      () => _repository.leaveGroup(widget.group.groupId),
+    );
     if (succeeded && mounted) {
       Navigator.of(context).pop(GroupManagementOutcome.membershipEnded);
     }
@@ -136,7 +203,9 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
       action: 'Delete',
     );
     if (!confirmed || !mounted) return;
-    final succeeded = await _run(() => _repository.deleteGroup(widget.group.groupId));
+    final succeeded = await _run(
+      () => _repository.deleteGroup(widget.group.groupId),
+    );
     if (succeeded && mounted) {
       Navigator.of(context).pop(GroupManagementOutcome.groupDeleted);
     }
@@ -162,110 +231,145 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xff101010),
-      appBar: AppBar(
-        title: const Text('Group Management'),
-        backgroundColor: const Color(0xff101010),
-        foregroundColor: Colors.white,
-        surfaceTintColor: Colors.transparent,
-      ),
-      body: SafeArea(
-        top: false,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
-          children: [
-            Text(
-              widget.group.name,
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              _isOwner ? 'You own this group.' : 'You are a member.',
-              style: const TextStyle(color: Colors.white60),
-            ),
-            const SizedBox(height: 28),
-            const _SectionTitle('Group members'),
-            const SizedBox(height: 12),
-            DecoratedBox(
-              decoration: BoxDecoration(
-                color: const Color(0xff1b1b1b),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white12),
-              ),
-              child: _loading
-                  ? const Padding(
-                      padding: EdgeInsets.all(28),
-                      child: Center(child: CircularProgressIndicator()),
-                    )
-                  : Column(
-                      children: [
-                        for (var index = 0; index < _members.length; index++) ...[
-                          _MemberRow(
-                            member: _members[index],
-                            isCurrentUser:
-                                _members[index].userId == widget.currentUserId,
-                            onRemove:
-                                _isOwner &&
-                                    _members[index].role != 'owner' &&
-                                    !_busy
-                                ? () => _remove(_members[index])
-                                : null,
-                          ),
-                          if (index != _members.length - 1)
-                            const Divider(height: 1, indent: 68),
-                        ],
-                      ],
+    final removing = _removingUserId != null;
+
+    return Stack(
+      children: [
+        Scaffold(
+          backgroundColor: const Color(0xff101010),
+          appBar: AppBar(
+            title: const Text('Group Management'),
+            backgroundColor: const Color(0xff101010),
+            foregroundColor: Colors.white,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            scrolledUnderElevation: 0,
+          ),
+          body: SafeArea(
+            top: false,
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+              children: [
+                Text(
+                  widget.group.name,
+                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _isOwner ? 'You own this group.' : 'You are a member.',
+                  style: const TextStyle(color: Colors.white60),
+                ),
+                const SizedBox(height: 28),
+                const _SectionTitle('Group members'),
+                const SizedBox(height: 12),
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xff1b1b1b),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.09),
                     ),
-            ),
-            const SizedBox(height: 28),
-            const _SectionTitle('Actions'),
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: _busy ? null : _invite,
-              style: FilledButton.styleFrom(
-                minimumSize: const Size.fromHeight(52),
-              ),
-              icon: const Icon(Icons.person_add_alt_1_outlined),
-              label: const Text('Invite Members'),
-            ),
-            const SizedBox(height: 12),
-            if (_isOwner)
-              OutlinedButton.icon(
-                onPressed: _busy ? null : _delete,
-                style: OutlinedButton.styleFrom(
-                  minimumSize: const Size.fromHeight(52),
-                  foregroundColor: const Color(0xffff8a80),
-                  side: const BorderSide(color: Color(0x66ff8a80)),
+                  ),
+                  child: _members.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.all(28),
+                          child: Center(
+                            child: Text(
+                              'No members yet.',
+                              style: TextStyle(color: Colors.white54),
+                            ),
+                          ),
+                        )
+                      : Column(
+                          children: [
+                            for (var index = 0;
+                                index < _members.length;
+                                index++) ...[
+                              _MemberRow(
+                                member: _members[index],
+                                isCurrentUser: _members[index].userId ==
+                                    widget.currentUserId,
+                                removing: _removingUserId ==
+                                    _members[index].userId,
+                                onRemove: _isOwner &&
+                                        _members[index].role != 'owner' &&
+                                        !_busy
+                                    ? () => _remove(_members[index])
+                                    : null,
+                              ),
+                              if (index != _members.length - 1)
+                                const Divider(height: 1, indent: 68),
+                            ],
+                          ],
+                        ),
                 ),
-                icon: const Icon(Icons.delete_outline),
-                label: const Text('Delete Group'),
-              )
-            else
-              OutlinedButton.icon(
-                onPressed: _busy ? null : _leave,
-                style: OutlinedButton.styleFrom(
-                  minimumSize: const Size.fromHeight(52),
-                  foregroundColor: const Color(0xffff8a80),
-                  side: const BorderSide(color: Color(0x66ff8a80)),
+                const SizedBox(height: 28),
+                const _SectionTitle('Actions'),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: _busy ? null : _invite,
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(52),
+                  ),
+                  icon: const Icon(Icons.person_add_alt_1_outlined),
+                  label: const Text('Invite Members'),
                 ),
-                icon: const Icon(Icons.logout),
-                label: const Text('Leave Group'),
-              ),
-            if (_isOwner) ...[
-              const SizedBox(height: 12),
-              const Text(
-                'Owners cannot leave. Delete the group instead. Ownership transfer can be added later.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-            ],
-          ],
+                const SizedBox(height: 12),
+                if (_isOwner)
+                  OutlinedButton.icon(
+                    onPressed: _busy ? null : _delete,
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size.fromHeight(52),
+                      foregroundColor: const Color(0xffff8a80),
+                      side: const BorderSide(color: Color(0x66ff8a80)),
+                    ),
+                    icon: const Icon(Icons.delete_outline),
+                    label: const Text('Delete Group'),
+                  )
+                else
+                  OutlinedButton.icon(
+                    onPressed: _busy ? null : _leave,
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size.fromHeight(52),
+                      foregroundColor: const Color(0xffff8a80),
+                      side: const BorderSide(color: Color(0x66ff8a80)),
+                    ),
+                    icon: const Icon(Icons.logout),
+                    label: const Text('Leave Group'),
+                  ),
+                if (_isOwner) ...[
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Owners cannot leave. Delete the group instead. Ownership transfer can be added later.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
-      ),
+        if (removing)
+          const Positioned.fill(
+            child: ModalBarrier(
+              dismissible: false,
+              color: Color(0x88000000),
+            ),
+          ),
+        if (removing)
+          const Center(
+            child: SizedBox.square(
+              dimension: 36,
+              child: CircularProgressIndicator(
+                strokeWidth: 3,
+                color: Colors.white,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -274,11 +378,13 @@ class _MemberRow extends StatelessWidget {
   const _MemberRow({
     required this.member,
     required this.isCurrentUser,
+    required this.removing,
     required this.onRemove,
   });
 
   final GroupMemberSummary member;
   final bool isCurrentUser;
+  final bool removing;
   final VoidCallback? onRemove;
 
   @override
@@ -300,14 +406,19 @@ class _MemberRow extends StatelessWidget {
       subtitle: member.role == 'owner'
           ? const Text('Owner', style: TextStyle(color: Colors.white54))
           : null,
-      trailing: onRemove == null
-          ? null
-          : IconButton(
-              tooltip: 'Remove ${member.displayName}',
-              onPressed: onRemove,
-              icon: const Icon(Icons.person_remove_outlined),
-              color: const Color(0xffff8a80),
-            ),
+      trailing: removing
+          ? const SizedBox.square(
+              dimension: 22,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : onRemove == null
+              ? null
+              : IconButton(
+                  tooltip: 'Remove ${member.displayName}',
+                  onPressed: onRemove,
+                  icon: const Icon(Icons.person_remove_outlined),
+                  color: const Color(0xffff8a80),
+                ),
     );
   }
 }

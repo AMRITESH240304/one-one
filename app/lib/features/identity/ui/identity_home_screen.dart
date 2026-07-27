@@ -126,6 +126,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   bool _talkPressed = false;
   bool _handRaiseBusy = false;
   bool _reactionBusy = false;
+  // Per-user connection style for the *local* user's own connection — never
+  // a group-wide mode. Defaults to walkie-talkie; see _toggleConnectionMode
+  // and the startInCallMode logic in _goOnline for how it changes.
+  String _connectionMode = MemberAvailability.walkieTalkieMode;
+  bool _connectionModeBusy = false;
   String _state = 'away';
   String? _message;
   ConnectionQuality _localConnectionQuality = ConnectionQuality.unknown;
@@ -271,6 +276,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (_onlineSession == null) return;
     switch (action) {
       case VoicePipAction.toggleMicrophone:
+        // Call mode's mic is always on by design — the PiP quick-action is
+        // only meaningful for the walkie-talkie push-to-talk lock.
+        if (_isCallMode) return;
         if (_talkSession == null) {
           await _startTalking();
         } else {
@@ -284,7 +292,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     unawaited(
       _voicePipBridge.setSessionState(
         active: _onlineSession != null,
-        isTalking: _talkSession != null,
+        isTalking: _talkSession != null || _isCallMode,
       ),
     );
   }
@@ -709,12 +717,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   /// Implements "automatic offline handling with a grace period": while
-  /// this device is online, watch for every other member dropping off
-  /// availability (a real disconnect, or Firebase's onDisconnect hook
-  /// firing). If nobody else is live for [PresenceConfig.disconnectGracePeriod],
-  /// this device is taken offline automatically and the user is told why.
-  /// A peer reconnecting before the timer fires cancels it — the session is
-  /// restored with no other action needed.
+  /// this device is online, watch for the group dropping to exactly one
+  /// online member. If nobody else is in (or rejoining) the room for
+  /// [PresenceConfig.disconnectGracePeriod], this device is taken offline.
+  ///
+  /// The countdown only runs while we remain alone uninterrupted. Any other
+  /// member rejoining — including still-connecting — cancels/resets it; a
+  /// later drop back to one member starts a fresh minute.
   void _evaluatePeerPresenceForAutoOffline(
     Map<String, MemberAvailability> availability,
   ) {
@@ -725,11 +734,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
 
-    final anyPeerLive = availability.entries.any(
-      (entry) => entry.key != _session.userId && entry.value.isLive,
-    );
+    final anyPeerInSession = _anyOtherMemberInVoiceSession(availability);
 
-    if (anyPeerLive) {
+    if (anyPeerInSession) {
       _peerWasLiveWithMe = true;
       if (_peerDisconnectGraceTimer != null) {
         _peerDisconnectGraceTimer?.cancel();
@@ -747,11 +754,22 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _peerDisconnectGraceTimer = Timer(PresenceConfig.disconnectGracePeriod, () {
       _peerDisconnectGraceTimer = null;
       if (!mounted || !_isOnline) return;
+      // Re-check at fire time: a rejoin may have landed after the last
+      // evaluation (or while this callback was already queued).
+      if (_anyOtherMemberInVoiceSession(_availability)) return;
       unawaited(_goAway());
       _showPresenceSnackbar(
         'The other participant has gone offline. You are now offline.',
       );
     });
+  }
+
+  bool _anyOtherMemberInVoiceSession(
+    Map<String, MemberAvailability> availability,
+  ) {
+    return availability.entries.any(
+      (entry) => entry.key != _session.userId && entry.value.isInVoiceSession,
+    );
   }
 
   /// Marks the last time voice activity was detected (local or remote) and
@@ -955,7 +973,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         .map((item) => item.staleAfterAt)
         .whereType<int>()
         .where((expiry) => expiry > now);
-    if (futureExpiries.isEmpty) return;
+    if (futureExpiries.isEmpty) {
+      // Everyone already stale (or no heartbeats) — still re-evaluate so a
+      // lone-member grace timer can start without waiting for another RTDB
+      // write.
+      if (_onlineSession != null) {
+        _evaluatePeerPresenceForAutoOffline(_availability);
+      }
+      return;
+    }
 
     final nextExpiry = futureExpiries.reduce((a, b) => a < b ? a : b);
     _availabilityExpiryTimer = Timer(
@@ -963,6 +989,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       () {
         if (!mounted) return;
         setState(() {});
+        if (_onlineSession != null) {
+          _evaluatePeerPresenceForAutoOffline(_availability);
+        }
         _scheduleAvailabilityExpiryRefresh();
       },
     );
@@ -1307,13 +1336,31 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
 
+    // If peers are already connected to each other in call mode, join
+    // directly into call mode with them rather than defaulting to
+    // walkie-talkie — this is only ever the starting point, though: the
+    // user can still tap the call-mode button to switch back at any time.
+    final startInCallMode = _availability.entries.any(
+      (entry) =>
+          entry.key != _session.userId &&
+          entry.value.isLive &&
+          entry.value.isCallMode,
+    );
+    final startingConnectionMode = startInCallMode
+        ? MemberAvailability.callMode
+        : MemberAvailability.walkieTalkieMode;
+
     OnlineSession? createdSession;
     try {
       createdSession = await _onlineRepository.goOnline(
         identity: _session,
         group: group,
+        connectionMode: startingConnectionMode,
       );
       await _connectLiveKit(createdSession);
+      if (startInCallMode) {
+        await _setMicrophoneEnabled(true);
+      }
       await _onlineRepository.markLive(createdSession);
       _heartbeatTimer?.cancel();
       _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -1331,6 +1378,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       if (!mounted) return;
       setState(() {
         _onlineSession = createdSession;
+        _connectionMode = startingConnectionMode;
         _state = 'live';
         _message = LiveKitStatus.live;
       });
@@ -1416,6 +1464,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _speakingUserIds = const {};
         _floatingReactions = const [];
         _state = 'away';
+        _connectionMode = MemberAvailability.walkieTalkieMode;
         _message = LiveKitStatus.away;
       });
       _syncPipSessionState();
@@ -1571,6 +1620,48 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       });
     } finally {
       if (mounted) setState(() => _handRaiseBusy = false);
+    }
+  }
+
+  /// Toggles the local user's own connection between walkie-talkie
+  /// (push-to-talk) and call (always-on mic). Purely per-user: it never
+  /// touches anyone else's connection or availability.
+  Future<void> _toggleConnectionMode() async {
+    final session = _onlineSession;
+    if (session == null ||
+        _connectionModeBusy ||
+        !_isViewingActiveGroup ||
+        _busy) {
+      return;
+    }
+
+    final switchingToCallMode = !_isCallMode;
+    final nextMode = switchingToCallMode
+        ? MemberAvailability.callMode
+        : MemberAvailability.walkieTalkieMode;
+
+    setState(() => _connectionModeBusy = true);
+    try {
+      // Switching modes mid-press shouldn't leave a dangling talk lock.
+      final activeTalk = _talkSession;
+      if (activeTalk != null) {
+        await _stopTalking(reason: 'connection_mode_changed');
+      }
+
+      await _setMicrophoneEnabled(switchingToCallMode);
+      await _onlineRepository.setConnectionMode(
+        session,
+        connectionMode: nextMode,
+      );
+
+      if (!mounted) return;
+      setState(() => _connectionMode = nextMode);
+      _syncPipSessionState();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _message = 'Couldn\u2019t switch connection mode.');
+    } finally {
+      if (mounted) setState(() => _connectionModeBusy = false);
     }
   }
 
@@ -1975,6 +2066,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _talkPressed = false;
         _speakingUserIds = const {};
         _state = 'away';
+        _connectionMode = MemberAvailability.walkieTalkieMode;
         _message = message;
       });
       _syncPipSessionState();
@@ -2072,6 +2164,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         builder: (_) => GroupManagementScreen(
           group: group,
           currentUserId: _session.userId,
+          initialMembers: _members,
           onInvite: () => _createInviteForGroup(group),
         ),
       ),
@@ -2177,6 +2270,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   bool get _isOnline => _onlineSession != null;
   bool get _isViewingActiveGroup =>
       _onlineSession?.groupId == _selectedGroup?.groupId;
+  bool get _isCallMode => _connectionMode == MemberAvailability.callMode;
 
   bool get _serviceReady =>
       groupHasServicePeer(members: _members, currentUserId: _session.userId);
@@ -2377,6 +2471,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                                 viewingActiveGroup && _canSendInCallReaction,
                             reactionBusy: _reactionBusy,
                             onReaction: _openReactionComposer,
+                            callModeActive: _isCallMode,
+                            callModeEnabled:
+                                viewingActiveGroup && !_connectionModeBusy,
+                            onToggleCallMode: _toggleConnectionMode,
                             groupName: focusedGroup.name,
                             onTapName: _groups.length > 1
                                 ? _openGroupPicker
@@ -2389,8 +2487,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                             items: items,
                             index: _carouselIndex,
                             connectedGroupId: _onlineSession?.groupId,
-                            talkEnabled: viewingActiveGroup && !_busy,
-                            talkActive: _talkSession != null,
+                            talkEnabled:
+                                viewingActiveGroup && !_busy && !_isCallMode,
+                            talkActive:
+                                _talkSession != null ||
+                                (_isCallMode &&
+                                    _speakingUserIds.contains(
+                                      _session.userId,
+                                    )),
                             talkBusy: _talkBusy,
                             accent: accent,
                             onSelected: (index) {
@@ -2413,7 +2517,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                         SizedBox(height: 18.h),
                         Text(
                           viewingActiveGroup
-                              ? 'Tap to Talk'
+                              ? (_isCallMode
+                                    ? 'In a call — mic always on'
+                                    : 'Tap to Talk')
                               : _isOnline
                               ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
                               : !_serviceReady
@@ -3280,6 +3386,9 @@ class _CarouselCaption extends StatelessWidget {
     required this.showReaction,
     required this.reactionBusy,
     required this.onReaction,
+    required this.callModeActive,
+    required this.callModeEnabled,
+    required this.onToggleCallMode,
     required this.groupName,
     required this.onTapName,
   });
@@ -3294,6 +3403,12 @@ class _CarouselCaption extends StatelessWidget {
   final bool showReaction;
   final bool reactionBusy;
   final VoidCallback onReaction;
+  // Conversation mode: whether the local user is currently in call mode
+  // (always-on mic) rather than the default walkie-talkie (push-to-talk).
+  // This reflects only the local user's own connection.
+  final bool callModeActive;
+  final bool callModeEnabled;
+  final VoidCallback onToggleCallMode;
   final String? groupName;
   final VoidCallback? onTapName;
 
@@ -3372,6 +3487,22 @@ class _CarouselCaption extends StatelessWidget {
                   tooltip: 'Send a keyboard reaction',
                   icon: Icons.keyboard_rounded,
                   onPressed: reactionBusy || !showReaction ? null : onReaction,
+                ),
+              ),
+              SizedBox(width: 4.w),
+              Opacity(
+                opacity: callModeEnabled ? 1 : 0.45,
+                // Icon always shows the mode a tap would switch TO, not the
+                // current mode.
+                child: _RowActionIcon(
+                  tooltip: callModeActive
+                      ? 'Switch to walkie-talkie'
+                      : 'Switch to call mode',
+                  icon: callModeActive
+                      ? Icons.settings_voice_rounded
+                      : Icons.call_rounded,
+                  selected: callModeActive,
+                  onPressed: callModeEnabled ? onToggleCallMode : null,
                 ),
               ),
             ],
