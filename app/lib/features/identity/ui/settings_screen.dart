@@ -1,12 +1,10 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../app/accent_theme.dart';
-import '../../../dev/crashlytics_test_page.dart';
 import '../data/identity_repository.dart';
 import '../models/identity_session.dart';
 import 'legal_document_screen.dart';
@@ -695,21 +693,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ],
               ),
               const SizedBox(height: 28),
-              if (kDebugMode) ...[
-                const _SectionTitle('Developer'),
-                const SizedBox(height: 12),
-                _SettingsSurface(
-                  padding: EdgeInsets.zero,
-                  children: [
-                    _NavigationRow(
-                      icon: Icons.bug_report_outlined,
-                      label: 'Crashlytics test',
-                      onTap: () => CrashlyticsTestPage.open(context),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 28),
-              ],
               const _SectionTitle('Legal'),
               const SizedBox(height: 12),
               _SettingsSurface(

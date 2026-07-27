@@ -296,9 +296,16 @@ class _StartupGateScreenState extends State<StartupGateScreen>
       );
       _pendingInviteMessage = 'Group joined from invite link.';
       return groupId;
-    } catch (error) {
+    } catch (error, stack) {
       debugPrint(
         '[OneOneInvite] Pending invite failed ${error.runtimeType}: $error',
+      );
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'pending_invite_join_failed',
+        ),
       );
       if (error is ApiException &&
           const {
