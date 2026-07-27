@@ -204,6 +204,26 @@ class OnlineRepository {
     });
   }
 
+  /// Asks the backend to push a "you're offline" alert to this user's devices
+  /// after an involuntary leave (peer left, inactivity, usage cap, network).
+  Future<void> notifyGoneOffline({
+    required OnlineSession session,
+    required String reason,
+  }) async {
+    try {
+      await _apiClient.postJson(
+        '/v1/groups/${session.groupId}/notifications/gone-offline',
+        {
+          'deviceId': session.deviceId,
+          'reason': reason,
+        },
+      );
+    } catch (_) {
+      // Best-effort — RTDB presence is already away; missing the push is
+      // non-fatal (foreground snackbars still cover the same cases).
+    }
+  }
+
   Future<void> _scheduleAwayOnDisconnect(OnlineSession session) async {
     final now = _nowSeconds();
     final availabilityRef = _database.ref(

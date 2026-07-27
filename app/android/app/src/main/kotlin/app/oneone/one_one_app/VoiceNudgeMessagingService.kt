@@ -43,6 +43,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 showGroupLifecycleNotification(message)
                 return
             }
+            VoiceNudgeContract.kindGoneOffline -> {
+                showGoneOfflineNotification(message)
+                return
+            }
             VoiceNudgeContract.kindPush -> {
                 showActionableNotification(message)
                 return
@@ -160,6 +164,30 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                     message.data["body"] ?: "Your group membership changed.",
                     groupId,
                 ),
+            )
+        } catch (error: SecurityException) {
+            VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
+        }
+    }
+
+    private fun showGoneOfflineNotification(message: RemoteMessage) {
+        val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val groupId = message.data["groupId"]
+        try {
+            manager.notify(
+                VoiceNudgeNotifications.idFor(
+                    message.messageId ?: "gone_offline_${message.sentTime}",
+                ),
+                VoiceNudgeNotifications.buildGeneral(
+                    this,
+                    message.data["title"] ?: "You're offline",
+                    message.data["body"] ?: "You are now offline.",
+                    groupId,
+                ),
+            )
+            Log.i(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-08] Gone-offline notification displayed reason=${message.data["reason"]}",
             )
         } catch (error: SecurityException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)

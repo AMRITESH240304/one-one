@@ -131,6 +131,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   // and the startInCallMode logic in _goOnline for how it changes.
   String _connectionMode = MemberAvailability.walkieTalkieMode;
   bool _connectionModeBusy = false;
+  // Caps continuous call mode at PresenceConfig.callModeTimeout; cancelled
+  // whenever the local user leaves call mode (manual toggle, go-away, etc.).
+  Timer? _callModeTimeoutTimer;
   String _state = 'away';
   String? _message;
   ConnectionQuality _localConnectionQuality = ConnectionQuality.unknown;
@@ -241,6 +244,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _heartbeatTimer?.cancel();
     _peerDisconnectGraceTimer?.cancel();
     _inactivityTimer?.cancel();
+    _callModeTimeoutTimer?.cancel();
     _usagePersistTimer?.cancel();
     // Persist final usage before disposal.
     if (_todayOnlineSeconds > 0 && _onlineSession != null) {
@@ -476,6 +480,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _peerDisconnectGraceTimer = null;
     _inactivityTimer?.cancel();
     _inactivityTimer = null;
+    _callModeTimeoutTimer?.cancel();
+    _callModeTimeoutTimer = null;
     _usagePersistTimer?.cancel();
     _usagePersistTimer = null;
     await _disconnectLiveKit();
@@ -486,6 +492,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _talkPressed = false;
       _speakingUserIds = const {};
       _state = 'away';
+      _connectionMode = MemberAvailability.walkieTalkieMode;
     });
     _syncPipSessionState();
   }
@@ -757,7 +764,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       // Re-check at fire time: a rejoin may have landed after the last
       // evaluation (or while this callback was already queued).
       if (_anyOtherMemberInVoiceSession(_availability)) return;
-      unawaited(_goAway());
+      unawaited(_goAway(reason: 'peer_left'));
       _showPresenceSnackbar(
         'The other participant has gone offline. You are now offline.',
       );
@@ -798,7 +805,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _scheduleInactivityCheck();
         return;
       }
-      unawaited(_goAway());
+      unawaited(_goAway(reason: 'inactivity'));
       _showPresenceSnackbar(
         'Room closed due to inactivity. Send a nudge to go online again.',
       );
@@ -865,7 +872,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       }
       // If cap is exceeded mid-session, force offline.
       if (_todayOnlineSeconds >= PresenceConfig.dailyUsageCap.inSeconds) {
-        unawaited(_goAway());
+        unawaited(_goAway(reason: 'daily_usage_cap'));
         _showPresenceSnackbar(
           'Daily usage limit reached (${PresenceConfig.dailyUsageCap.inMinutes} min). '
           'You can go online again tomorrow.',
@@ -1383,6 +1390,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _message = LiveKitStatus.live;
       });
       _syncPipSessionState();
+      if (startInCallMode) {
+        _scheduleCallModeTimeout();
+      } else {
+        _cancelCallModeTimeout();
+      }
       _scheduleInactivityCheck();
       _startUsageTracking();
     } catch (error) {
@@ -1426,7 +1438,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
   }
 
-  Future<void> _goAway() async {
+  Future<void> _goAway({String reason = 'user_away'}) async {
     final session = _onlineSession;
     if (session == null) {
       setState(() => _state = 'away');
@@ -1446,6 +1458,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _inactivityTimer?.cancel();
       _inactivityTimer = null;
       _lastVoiceActivityAt = null;
+      _callModeTimeoutTimer?.cancel();
+      _callModeTimeoutTimer = null;
       _usagePersistTimer?.cancel();
       _usagePersistTimer = null;
       // Persist final usage when going away.
@@ -1455,8 +1469,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       }
       _peerWasLiveWithMe = false;
       await _disconnectLiveKit();
-      await _onlineRepository.goAway(session);
+      await _onlineRepository.goAway(session, reason: reason);
       await _clearOwnHandRaise(groupId: session.groupId);
+      if (_shouldNotifyGoneOffline(reason)) {
+        unawaited(
+          _onlineRepository.notifyGoneOffline(session: session, reason: reason),
+        );
+      }
       if (!mounted) return;
       setState(() {
         _onlineSession = null;
@@ -1469,6 +1488,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       });
       _syncPipSessionState();
     });
+  }
+
+  /// True for leaves the user did not explicitly request — peer left after a
+  /// nudge/elsewhere leave, inactivity, or daily cap. Manual toggle and group
+  /// switches stay silent.
+  bool _shouldNotifyGoneOffline(String reason) {
+    return reason == 'peer_left' ||
+        reason == 'inactivity' ||
+        reason == 'daily_usage_cap' ||
+        reason == 'network_loss';
   }
 
   Future<void> _startTalking() async {
@@ -1656,6 +1685,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
       if (!mounted) return;
       setState(() => _connectionMode = nextMode);
+      if (switchingToCallMode) {
+        _scheduleCallModeTimeout();
+      } else {
+        _cancelCallModeTimeout();
+      }
       _syncPipSessionState();
     } catch (error) {
       if (!mounted) return;
@@ -1663,6 +1697,92 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     } finally {
       if (mounted) setState(() => _connectionModeBusy = false);
     }
+  }
+
+  /// Starts (or restarts) the continuous call-mode cap. Fires
+  /// [_exitCallModeDueToTimeout] after [PresenceConfig.callModeTimeout].
+  void _scheduleCallModeTimeout() {
+    _callModeTimeoutTimer?.cancel();
+    _callModeTimeoutTimer = Timer(PresenceConfig.callModeTimeout, () {
+      _callModeTimeoutTimer = null;
+      unawaited(_exitCallModeDueToTimeout());
+    });
+  }
+
+  void _cancelCallModeTimeout() {
+    _callModeTimeoutTimer?.cancel();
+    _callModeTimeoutTimer = null;
+  }
+
+  /// Auto-switches the local user back to walkie-talkie after the continuous
+  /// call-mode cap. Keeps them connected to the group — only their mode and
+  /// mic change. Other participants are not notified.
+  Future<void> _exitCallModeDueToTimeout() async {
+    final session = _onlineSession;
+    if (session == null || !_isCallMode || _connectionModeBusy) return;
+
+    setState(() => _connectionModeBusy = true);
+    try {
+      await _setMicrophoneEnabled(false);
+      await _onlineRepository.setConnectionMode(
+        session,
+        connectionMode: MemberAvailability.walkieTalkieMode,
+      );
+      if (!mounted) return;
+      setState(() => _connectionMode = MemberAvailability.walkieTalkieMode);
+      _cancelCallModeTimeout();
+      _syncPipSessionState();
+      _showCallModeTimeoutSnackbar();
+    } catch (_) {
+      // Best-effort; leave local state as-is if the write fails so the user
+      // can still toggle manually.
+      if (!mounted) return;
+      setState(() => _message = 'Couldn\u2019t leave call mode automatically.');
+    } finally {
+      if (mounted) setState(() => _connectionModeBusy = false);
+    }
+  }
+
+  void _showCallModeTimeoutSnackbar() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xff1e1e1e),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14.r),
+            side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+          ),
+          margin: EdgeInsets.fromLTRB(16.w, 0, 16.w, 16.h),
+          duration: const Duration(seconds: 8),
+          content: Row(
+            children: [
+              Icon(
+                Icons.timer_off_outlined,
+                color: Colors.white70,
+                size: 18.sp,
+              ),
+              SizedBox(width: 10.w),
+              Expanded(
+                child: Text(
+                  'Switched back to walkie-talkie after '
+                  '${PresenceConfig.callModeTimeout.inMinutes} min in call mode.',
+                  style: TextStyle(color: Colors.white, fontSize: 13.sp),
+                ),
+              ),
+            ],
+          ),
+          action: SnackBarAction(
+            label: 'Call mode',
+            textColor: const Color(0xfffff1a8),
+            onPressed: () {
+              if (!_isCallMode) unawaited(_toggleConnectionMode());
+            },
+          ),
+        ),
+      );
   }
 
   int get _onlineParticipantCount {
@@ -2057,6 +2177,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _peerDisconnectGraceTimer = null;
     _inactivityTimer?.cancel();
     _inactivityTimer = null;
+    _callModeTimeoutTimer?.cancel();
+    _callModeTimeoutTimer = null;
     _usagePersistTimer?.cancel();
     _usagePersistTimer = null;
     if (mounted) {
@@ -2084,6 +2206,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       await _onlineRepository
           .goAway(session, reason: 'network_loss')
           .timeout(const Duration(seconds: 3));
+      unawaited(
+        _onlineRepository.notifyGoneOffline(
+          session: session,
+          reason: 'network_loss',
+        ),
+      );
     } catch (_) {
       // Firebase onDisconnect was registered before going live and is the
       // server-side fallback when the device cannot write during an outage.

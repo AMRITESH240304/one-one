@@ -129,7 +129,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         target: _target,
         durationSeconds: seconds,
       ),
-      '${seconds}s ring sent',
       kind: NudgeKind.ring,
     );
   }
@@ -139,14 +138,12 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     await _send(
       () =>
           _repository.sendPush(groupId: widget.group.groupId, target: _target),
-      'Notification sent',
       kind: NudgeKind.push,
     );
   }
 
   Future<void> _send(
-    Future<Object?> Function() action,
-    String successMessage, {
+    Future<Object?> Function() action, {
     required NudgeKind kind,
   }) async {
     if (!_canSend) return;
@@ -158,12 +155,12 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     try {
       await action();
       _cooldowns.record(kind);
-      if (mounted) {
-        setState(() {
-          _message = successMessage;
-          _messageIsError = false;
-        });
-      }
+      if (!mounted) return;
+      // Clear busy before pop so PopScope allows the dismiss.
+      setState(() => _busy = false);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) Navigator.of(context).pop();
+      });
     } catch (error) {
       if (!mounted) return;
       final message = error is NudgeDeliveryException
@@ -174,9 +171,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = message;
         _messageIsError = true;
+        _busy = false;
       });
-    } finally {
-      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -269,6 +265,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     }
 
     String? path;
+    var sent = false;
     try {
       path = await _recorder.stop();
       if (!send || path == null) return;
@@ -289,12 +286,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         durationMs: durationMs,
       );
       _cooldowns.record(NudgeKind.voice);
-      if (mounted) {
-        setState(() {
-          _message = 'Voice nudge sent';
-          _messageIsError = false;
-        });
-      }
+      sent = true;
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -318,6 +310,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           _sendingVoice = false;
           _elapsed = Duration.zero;
         });
+        if (sent) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) Navigator.of(context).pop();
+          });
+        }
       }
     }
   }

@@ -16,6 +16,7 @@ import { maxVoiceNudgeBytes } from "../notifications/voiceNudgeValidation.js";
 import { respondToNudge } from "../notifications/nudgeResponseService.js";
 import {
   sendFriendLiveNotification,
+  sendGoneOfflineNotification,
   sendNudgeNotification
 } from "../notifications/notificationService.js";
 
@@ -23,6 +24,11 @@ const friendLiveSchema = z.object({
   deviceId: z.string().min(1),
   serviceSessionId: z.string().min(1),
   livekitSessionId: z.string().min(1)
+});
+
+const goneOfflineSchema = z.object({
+  deviceId: z.string().min(1),
+  reason: z.enum(["peer_left", "inactivity", "daily_usage_cap", "network_loss"])
 });
 
 const nudgeSchema = z.discriminatedUnion("targetScope", [
@@ -107,6 +113,24 @@ export function createNotificationRoutes() {
         deviceId: body.deviceId,
         serviceSessionId: body.serviceSessionId,
         livekitSessionId: body.livekitSessionId
+      });
+
+      response.status(200).json(result);
+    })
+  );
+
+  router.post(
+    "/v1/groups/:groupId/notifications/gone-offline",
+    requireFirebaseAuth,
+    asyncHandler(async (request, response) => {
+      const authRequest = request as AuthenticatedRequest;
+      const groupId = z.string().min(1).parse(request.params.groupId);
+      const body = goneOfflineSchema.parse(request.body);
+      const result = await sendGoneOfflineNotification({
+        groupId,
+        userId: authRequest.auth.uid,
+        deviceId: body.deviceId,
+        reason: body.reason
       });
 
       response.status(200).json(result);

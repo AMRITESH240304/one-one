@@ -30,6 +30,19 @@ export type NudgeInput = {
   targetUserId?: string;
 };
 
+export type GoneOfflineReason =
+  | "peer_left"
+  | "inactivity"
+  | "daily_usage_cap"
+  | "network_loss";
+
+export type GoneOfflineInput = {
+  groupId: string;
+  userId: string;
+  deviceId: string;
+  reason: GoneOfflineReason;
+};
+
 type RecipientDevice = {
   userId: string;
   deviceId: string;
@@ -37,7 +50,31 @@ type RecipientDevice = {
 };
 
 const friendLiveDedupeSeconds = 60;
+const goneOfflineDedupeSeconds = 60;
 const actionableNudgeTtlMs = 10 * 60 * 1000;
+const goneOfflineTtlMs = 10 * 60 * 1000;
+
+const goneOfflineCopy: Record<
+  GoneOfflineReason,
+  { title: string; body: string }
+> = {
+  peer_left: {
+    title: "You're offline",
+    body: "The other participant has gone offline. You are now offline."
+  },
+  inactivity: {
+    title: "You're offline",
+    body: "Room closed due to inactivity. Send a nudge to go online again."
+  },
+  daily_usage_cap: {
+    title: "You're offline",
+    body: "Daily usage limit reached. You can go online again tomorrow."
+  },
+  network_loss: {
+    title: "You're offline",
+    body: "Connection lost. You are now offline."
+  }
+};
 
 export async function sendFriendLiveNotification(input: FriendLiveInput) {
   const db = getRealtimeDatabase();
@@ -130,6 +167,83 @@ export async function sendFriendLiveNotification(input: FriendLiveInput) {
     sent: pushResult.successCount,
     failed: pushResult.failureCount,
     skipped: recipientUserIds.length === 0 ? 1 : 0
+  };
+}
+
+/** Notifies the caller that they were taken offline as a side effect of
+ * presence rules (peer left, inactivity, usage cap, network loss) — not a
+ * manual leave. Delivers to the caller's own devices so background / PiP
+ * users see the transition. */
+export async function sendGoneOfflineNotification(input: GoneOfflineInput) {
+  await requireActiveUser(input.userId);
+  await requireActiveGroup(input.groupId);
+  await requireActiveGroupMember(input.groupId, input.userId);
+  await requireActiveUserDevice(input.userId, input.deviceId);
+
+  const now = nowSeconds();
+  const dedupedEvent = await findRecentNotificationEvent({
+    groupId: input.groupId,
+    senderUserId: input.userId,
+    eventType: "gone_offline",
+    since: now - goneOfflineDedupeSeconds
+  });
+
+  if (dedupedEvent) {
+    return {
+      notificationEventId: dedupedEvent.notificationEventId,
+      eventType: "gone_offline" as const,
+      deduped: true,
+      reason: input.reason,
+      targetDevices: 0,
+      sent: 0,
+      failed: 0
+    };
+  }
+
+  const copy = goneOfflineCopy[input.reason];
+  const recipientDevices = await collectRecipientDevices([input.userId]);
+  const notificationEventId = await createNotificationEvent({
+    groupId: input.groupId,
+    senderUserId: input.userId,
+    eventType: "gone_offline",
+    targetScope: "self",
+    targetUserIds: [input.userId],
+    createdAt: now,
+    metadata: {
+      reason: input.reason,
+      deviceId: input.deviceId
+    }
+  });
+
+  const pushResult = await sendAndroidDataPushes(
+    recipientDevices.map((device) => ({
+      token: device.fcmToken,
+      data: {
+        type: "gone_offline",
+        groupId: input.groupId,
+        reason: input.reason,
+        title: copy.title,
+        body: copy.body,
+        deepLink: `walkie://group/${input.groupId}`
+      }
+    })),
+    goneOfflineTtlMs
+  );
+
+  await writeDeliveries(notificationEventId, recipientDevices, pushResult);
+  await writeStatusEvent(input.groupId, input.userId, "gone_offline_notification_sent", {
+    notificationEventId,
+    reason: input.reason
+  });
+
+  return {
+    notificationEventId,
+    eventType: "gone_offline" as const,
+    deduped: false,
+    reason: input.reason,
+    targetDevices: recipientDevices.length,
+    sent: pushResult.successCount,
+    failed: pushResult.failureCount
   };
 }
 

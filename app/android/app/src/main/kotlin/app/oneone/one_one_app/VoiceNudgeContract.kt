@@ -27,6 +27,7 @@ object VoiceNudgeContract {
     const val kindRing = "ring_nudge"
     const val kindPush = "nudge"
     const val kindFriendLive = "friend_live"
+    const val kindGoneOffline = "gone_offline"
     const val kindResponse = "nudge_response"
 
     const val actionAccept = "app.oneone.action.ACCEPT_NUDGE"
