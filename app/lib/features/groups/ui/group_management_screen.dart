@@ -105,7 +105,12 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
       action: 'Remove',
     );
     if (!confirmed || !mounted) return;
-    await _run(() => _repository.removeMember(widget.group.groupId, member.userId));
+    final succeeded = await _run(
+      () => _repository.removeMember(widget.group.groupId, member.userId),
+    );
+    // Don't rely solely on the RTDB listener — force a fresh member list so
+    // the removed row disappears even if the realtime event is delayed.
+    if (succeeded && mounted) await _loadMembers();
   }
 
   Future<void> _invite() async {
