@@ -1,9 +1,11 @@
 import 'dart:convert';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_performance/firebase_performance.dart';
 import 'package:http/http.dart' as http;
 
 import '../../app/app_config.dart';
+import '../firebase/firebase_performance_service.dart';
 
 class ApiClient {
   ApiClient({FirebaseAuth? auth, http.Client? httpClient, String? baseUrl})
@@ -28,9 +30,14 @@ class ApiClient {
 
     final uri = Uri.parse('$_baseUrl$path');
     final headers = {'authorization': 'Bearer $token'};
-    final response = await (_httpClient?.get(uri, headers: headers) ??
-            http.get(uri, headers: headers))
-        .timeout(_requestTimeout);
+    final response = await _tracedRequest(
+      url: uri.toString(),
+      method: HttpMethod.Get,
+      requestPayloadSize: 0,
+      send: () => (_httpClient?.get(uri, headers: headers) ??
+              http.get(uri, headers: headers))
+          .timeout(_requestTimeout),
+    );
     return _decodeResponse(response);
   }
 
@@ -50,13 +57,18 @@ class ApiClient {
       'content-type': 'application/json',
     };
     final encodedBody = jsonEncode(body);
-    final response = await (_httpClient?.post(
-              uri,
-              headers: headers,
-              body: encodedBody,
-            ) ??
-            http.post(uri, headers: headers, body: encodedBody))
-        .timeout(_requestTimeout);
+    final response = await _tracedRequest(
+      url: uri.toString(),
+      method: HttpMethod.Post,
+      requestPayloadSize: encodedBody.length,
+      send: () => (_httpClient?.post(
+                uri,
+                headers: headers,
+                body: encodedBody,
+              ) ??
+              http.post(uri, headers: headers, body: encodedBody))
+          .timeout(_requestTimeout),
+    );
 
     final responseBody = decodeJsonObject(response.body);
 
@@ -79,9 +91,14 @@ class ApiClient {
 
     final uri = Uri.parse('$_baseUrl$path');
     final headers = {'authorization': 'Bearer $token'};
-    final response = await (_httpClient?.delete(uri, headers: headers) ??
-            http.delete(uri, headers: headers))
-        .timeout(_requestTimeout);
+    final response = await _tracedRequest(
+      url: uri.toString(),
+      method: HttpMethod.Delete,
+      requestPayloadSize: 0,
+      send: () => (_httpClient?.delete(uri, headers: headers) ??
+              http.delete(uri, headers: headers))
+          .timeout(_requestTimeout),
+    );
     return _decodeResponse(response);
   }
 
@@ -102,13 +119,18 @@ class ApiClient {
       'content-type': contentType,
       ...headers,
     };
-    final response = await (_httpClient?.post(
-              uri,
-              headers: requestHeaders,
-              body: bytes,
-            ) ??
-            http.post(uri, headers: requestHeaders, body: bytes))
-        .timeout(_requestTimeout);
+    final response = await _tracedRequest(
+      url: uri.toString(),
+      method: HttpMethod.Post,
+      requestPayloadSize: bytes.length,
+      send: () => (_httpClient?.post(
+                uri,
+                headers: requestHeaders,
+                body: bytes,
+              ) ??
+              http.post(uri, headers: requestHeaders, body: bytes))
+          .timeout(_requestTimeout),
+    );
     final responseBody = decodeJsonObject(response.body);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ApiException(
@@ -128,13 +150,18 @@ class ApiClient {
     required Map<String, String> headers,
   }) async {
     final uri = Uri.parse(absoluteUrl);
-    final response = await (_httpClient?.put(
-              uri,
-              headers: headers,
-              body: bytes,
-            ) ??
-            http.put(uri, headers: headers, body: bytes))
-        .timeout(_requestTimeout);
+    final response = await _tracedRequest(
+      url: uri.toString(),
+      method: HttpMethod.Put,
+      requestPayloadSize: bytes.length,
+      send: () => (_httpClient?.put(
+                uri,
+                headers: headers,
+                body: bytes,
+              ) ??
+              http.put(uri, headers: headers, body: bytes))
+          .timeout(_requestTimeout),
+    );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ApiException(
         statusCode: response.statusCode,
@@ -144,6 +171,29 @@ class ApiClient {
             : response.body,
       );
     }
+  }
+
+  Future<http.Response> _tracedRequest({
+    required String url,
+    required HttpMethod method,
+    required int requestPayloadSize,
+    required Future<http.Response> Function() send,
+  }) {
+    return PerformanceService.httpMetric(
+      url: url,
+      method: method,
+      action: send,
+      onSuccess: (metric, response) {
+        metric.requestPayloadSize = requestPayloadSize;
+        metric.responsePayloadSize = response.contentLength ??
+            response.bodyBytes.length;
+        metric.httpResponseCode = response.statusCode;
+        final contentType = response.headers['content-type'];
+        if (contentType != null && contentType.isNotEmpty) {
+          metric.responseContentType = contentType;
+        }
+      },
+    );
   }
 
   Map<String, dynamic> _decodeResponse(http.Response response) {

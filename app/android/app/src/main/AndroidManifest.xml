@@ -26,6 +26,11 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="walkie_alerts_v2" />
+        <!-- Debug-friendly Performance Monitoring logcat. Safe in release;
+             collection still respects setPerformanceCollectionEnabled. -->
+        <meta-data
+            android:name="firebase_performance_logcat_enabled"
+            android:value="true" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
