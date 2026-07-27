@@ -14,6 +14,7 @@ import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
 import '../../../core/firebase/app_database.dart';
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/firebase/firebase_analytics_service.dart';
 import '../../../core/network/api_client.dart';
 import '../../groups/data/group_repository.dart';
 import '../../groups/data/invite_link_bridge.dart';
@@ -166,6 +167,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _onIdentitySessionChanged,
     );
     AccentThemeController.setAccentKey(_session.settings.accentColorKey);
+    unawaited(
+      AnalyticsService.logScreenView(
+        screenName: 'identity_home',
+        screenClass: 'IdentityHomeScreen',
+      ),
+    );
     _nudgeActionSubscription = AndroidVoiceNudgeBridge.actionSignals.listen((
       _,
     ) {
@@ -1348,6 +1355,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
     if (_todayOnlineSeconds >= PresenceConfig.dailyUsageCap.inSeconds) {
       if (!mounted) return;
+      unawaited(
+        AnalyticsService.logDailyUsageCapReached(groupId: group.groupId),
+      );
       setState(() {
         _busy = false;
         _state = 'away';
@@ -1412,12 +1422,25 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       }
       _scheduleInactivityCheck();
       _startUsageTracking();
+      unawaited(
+        AnalyticsService.logGoOnline(
+          groupId: group.groupId,
+          connectionMode: startingConnectionMode,
+          joinedCallMode: startInCallMode,
+        ),
+      );
+      unawaited(
+        CrashlyticsService.log(
+          'go_online group=${group.groupId} mode=$startingConnectionMode',
+        ),
+      );
     } catch (error, stack) {
       unawaited(
         CrashlyticsService.recordError(
           error,
           stack,
           reason: 'livekit_go_online_failed',
+          feature: 'presence',
         ),
       );
       await _disconnectLiveKit();
@@ -1493,6 +1516,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       await _disconnectLiveKit();
       await _onlineRepository.goAway(session, reason: reason);
       await _clearOwnHandRaise(groupId: session.groupId);
+      unawaited(
+        AnalyticsService.logGoAway(groupId: session.groupId, reason: reason),
+      );
+      unawaited(CrashlyticsService.log('go_away reason=$reason'));
       if (_shouldNotifyGoneOffline(reason)) {
         unawaited(
           _onlineRepository.notifyGoneOffline(session: session, reason: reason),
@@ -1584,12 +1611,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       });
       _syncPipSessionState();
       _recordVoiceActivity();
+      unawaited(AnalyticsService.logTalkStart(groupId: session.groupId));
     } catch (error, stack) {
       unawaited(
         CrashlyticsService.recordError(
           error,
           stack,
           reason: 'talk_start_mic_failed',
+          feature: 'talk',
         ),
       );
       if (startedTalk != null) {
@@ -1637,6 +1666,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         ),
       );
       await _talkRepository.stopTalk(talkSession, reason: reason);
+      unawaited(
+        AnalyticsService.logTalkStop(
+          groupId: talkSession.groupId,
+          reason: reason,
+        ),
+      );
     } catch (error) {
       stopError ??= error;
     }
@@ -1668,6 +1703,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         TalkFeedback.handRaiseChanged(
           raised: nextRaised,
           hapticsEnabled: _session.settings.hapticsEnabled,
+        ),
+      );
+      unawaited(
+        AnalyticsService.logHandRaise(
+          groupId: group.groupId,
+          raised: nextRaised,
         ),
       );
     } catch (error) {
@@ -1720,6 +1761,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _cancelCallModeTimeout();
       }
       _syncPipSessionState();
+      unawaited(
+        AnalyticsService.logConnectionModeChanged(
+          groupId: session.groupId,
+          mode: nextMode,
+        ),
+      );
     } catch (error) {
       if (!mounted) return;
       setState(() => _message = 'Couldn\u2019t switch connection mode.');

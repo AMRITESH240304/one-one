@@ -9,6 +9,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'app/one_one_app.dart';
 import 'app/startup_performance.dart';
 import 'core/firebase/crashlytics_service.dart';
+import 'core/firebase/firebase_analytics_service.dart';
 
 Future<void> main() async {
   await runZonedGuarded(() async {
@@ -23,8 +24,9 @@ Future<void> main() async {
     FlutterForegroundTask.initCommunicationPort();
 
     await Firebase.initializeApp();
-    debugPrint('[Crashlytics] Firebase initialized');
+    debugPrint('[Firebase] initialized');
     await CrashlyticsService.initialize();
+    await AnalyticsService.initialize();
 
     FlutterError.onError = (details) {
       FlutterError.presentError(details);

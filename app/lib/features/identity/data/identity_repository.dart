@@ -13,7 +13,9 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
 import '../../../core/firebase/app_database.dart';
+import '../../../core/firebase/app_telemetry.dart';
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/firebase/firebase_analytics_service.dart';
 import '../../../core/storage/profile_photo_storage.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../models/app_user_profile.dart';
@@ -201,6 +203,7 @@ class IdentityRepository {
         settings: session.settings,
       );
       _publishSession(updatedSession);
+      unawaited(AnalyticsService.logProfileUpdated(field: 'display_name'));
       return updatedSession;
     }
 
@@ -302,6 +305,7 @@ class IdentityRepository {
         settings: settings,
       );
       _publishSession(updatedSession);
+      unawaited(AnalyticsService.logProfileUpdated(field: 'settings'));
       return updatedSession;
     }
 
@@ -343,6 +347,7 @@ class IdentityRepository {
       await _evictProfilePhoto(previousPhotoUrl);
       await _evictProfilePhoto(uploadedPhotoUrl);
       _publishSession(updatedSession);
+      unawaited(AnalyticsService.logProfileUpdated(field: 'profile_photo'));
       return updatedSession;
     }
 
@@ -385,6 +390,13 @@ class IdentityRepository {
       _cachedSession = null;
       _sessionNotifier.value = null;
     }
+    final isNewUser = result.additionalUserInfo?.isNewUser == true;
+    unawaited(
+      isNewUser
+          ? AnalyticsService.logSignUp(method: 'google')
+          : AnalyticsService.logLogin(method: 'google'),
+    );
+    unawaited(CrashlyticsService.log('google_sign_in_success'));
     return user;
   }
 
@@ -394,7 +406,8 @@ class IdentityRepository {
     } finally {
       await _auth.signOut();
       _clearSession();
-      unawaited(CrashlyticsService.setUserIdentifier(null));
+      unawaited(AppTelemetry.clearUser());
+      unawaited(AnalyticsService.logLogout());
       unawaited(CrashlyticsService.log('user_signed_out'));
     }
   }
@@ -420,7 +433,8 @@ class IdentityRepository {
       await GoogleSignIn.instance.signOut();
     }
     _clearSession();
-    unawaited(CrashlyticsService.setUserIdentifier(null));
+    unawaited(AppTelemetry.clearUser());
+    unawaited(AnalyticsService.logAccountDeleted());
     unawaited(CrashlyticsService.log('user_account_deleted'));
   }
 
@@ -666,13 +680,13 @@ class IdentityRepository {
     if (!_disposed) {
       _sessionNotifier.value = session;
     }
-    unawaited(CrashlyticsService.setUserIdentifier(session.userId));
     unawaited(
-      CrashlyticsService.setCustomKeys({
-        'user_id': session.userId,
-        'device_id': session.device.deviceId,
-        'app_version': session.device.appVersion,
-      }),
+      AppTelemetry.identifyUser(
+        userId: session.userId,
+        appVersion: session.device.appVersion,
+        deviceId: session.device.deviceId,
+        environment: kReleaseMode ? 'release' : 'debug',
+      ),
     );
   }
 

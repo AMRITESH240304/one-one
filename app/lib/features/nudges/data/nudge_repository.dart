@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/firebase/firebase_analytics_service.dart';
 import '../../../core/network/api_client.dart';
 
 class NudgeTarget {
@@ -43,7 +44,13 @@ class NudgeRepository {
       '/v1/groups/$groupId/nudges',
       target.json,
     );
-    return _requireAcceptedDelivery(response);
+    final result = _requireAcceptedDelivery(response);
+    await AnalyticsService.logNudgeSent(
+      groupId: groupId,
+      kind: 'push',
+      targetScope: target.targetScope,
+    );
+    return result;
   }
 
   Future<Map<String, dynamic>> sendRing({
@@ -63,7 +70,14 @@ class NudgeRepository {
         'durationSeconds': durationSeconds,
       },
     );
-    return _requireAcceptedDelivery(response);
+    final result = _requireAcceptedDelivery(response);
+    await AnalyticsService.logNudgeSent(
+      groupId: groupId,
+      kind: 'ring',
+      targetScope: target.targetScope,
+      durationMs: durationSeconds * 1000,
+    );
+    return result;
   }
 
   /// Direct-to-GCS upload via signed write URL, then backend finalize/FCM.
@@ -137,7 +151,18 @@ class NudgeRepository {
         'targetDevices=${response['targetDevices']} '
         'uploadMode=signed_write_url',
       );
-      return _requireAcceptedDelivery(response);
+      final result = _requireAcceptedDelivery(response);
+      await AnalyticsService.logNudgeSent(
+        groupId: groupId,
+        kind: 'voice',
+        targetScope: target.targetScope,
+        audioBytes: audio.length,
+        durationMs: durationMs,
+      );
+      await CrashlyticsService.log(
+        'voice_nudge_sent bytes=${audio.length} ms=$durationMs',
+      );
+      return result;
     } catch (error, stack) {
       debugPrint(
         '[OneOneNudge][DART-E1] Voice nudge upload failed '
@@ -148,6 +173,7 @@ class NudgeRepository {
         error,
         stack,
         reason: 'voice_nudge_upload_failed',
+        feature: 'nudge',
       );
       rethrow;
     }
@@ -158,7 +184,7 @@ class NudgeRepository {
     required String eventId,
     required String action,
     int? snoozeMinutes,
-  }) {
+  }) async {
     if (!const {'accept', 'decline', 'snooze'}.contains(action)) {
       throw ArgumentError.value(action, 'action');
     }
@@ -167,13 +193,19 @@ class NudgeRepository {
         snoozeMinutes != 15) {
       throw ArgumentError.value(snoozeMinutes, 'snoozeMinutes');
     }
-    return _apiClient.postJson(
+    final response = await _apiClient.postJson(
       '/v1/groups/$groupId/nudges/$eventId/respond',
       {
         'action': action,
         if (action == 'snooze') 'snoozeMinutes': snoozeMinutes,
       },
     );
+    await AnalyticsService.logNudgeResponded(
+      groupId: groupId,
+      action: action,
+      snoozeMinutes: snoozeMinutes,
+    );
+    return response;
   }
 
   Map<String, dynamic> _requireAcceptedDelivery(

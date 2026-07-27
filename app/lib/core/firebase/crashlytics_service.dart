@@ -1,6 +1,8 @@
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:flutter/foundation.dart';
 
+import 'firebase_analytics_service.dart';
+
 /// Thin wrapper around [FirebaseCrashlytics] for app-wide crash reporting.
 class CrashlyticsService {
   CrashlyticsService._();
@@ -8,8 +10,8 @@ class CrashlyticsService {
   static final FirebaseCrashlytics _crashlytics = FirebaseCrashlytics.instance;
 
   static Future<void> initialize() async {
-    // Keep collection on in debug so the Crashlytics test page works during
-    // development. Gate on kReleaseMode later if you want debug builds quiet.
+    // Keep collection on in debug so local verification still uploads reports.
+    // Gate on kReleaseMode later if you want debug builds quiet.
     await _crashlytics.setCrashlyticsCollectionEnabled(true);
     debugPrint(
       '[Crashlytics] initialized collectionEnabled='
@@ -22,6 +24,8 @@ class CrashlyticsService {
     StackTrace? stack, {
     String? reason,
     bool fatal = false,
+    String? feature,
+    String? screenName,
     Iterable<Object> information = const [],
   }) async {
     debugPrint(
@@ -36,12 +40,21 @@ class CrashlyticsService {
       information: information,
       printDetails: kDebugMode,
     );
+    await AnalyticsService.logError(
+      errorType: error.runtimeType.toString(),
+      feature: feature,
+      screenName: screenName,
+      isFatal: fatal,
+      reason: reason,
+    );
   }
 
   static Future<void> recordFatalError(
     Object error,
     StackTrace? stack, {
     String? reason,
+    String? feature,
+    String? screenName,
     Iterable<Object> information = const [],
   }) {
     return recordError(
@@ -49,16 +62,26 @@ class CrashlyticsService {
       stack,
       reason: reason,
       fatal: true,
+      feature: feature,
+      screenName: screenName,
       information: information,
     );
   }
 
-  static Future<void> recordFlutterFatalError(FlutterErrorDetails details) {
+  static Future<void> recordFlutterFatalError(
+    FlutterErrorDetails details,
+  ) async {
     debugPrint(
       '[Crashlytics] Flutter fatal error recorded '
       'exception=${details.exceptionAsString()}',
     );
-    return _crashlytics.recordFlutterFatalError(details);
+    await _crashlytics.recordFlutterFatalError(details);
+    await AnalyticsService.logError(
+      errorType: details.exception.runtimeType.toString(),
+      feature: 'flutter_framework',
+      isFatal: true,
+      reason: details.exceptionAsString(),
+    );
   }
 
   static Future<void> log(String message) async {
@@ -68,7 +91,9 @@ class CrashlyticsService {
 
   static Future<void> setUserIdentifier(String? userId) async {
     final id = userId?.trim() ?? '';
-    debugPrint('[Crashlytics] setUserIdentifier=${id.isEmpty ? '(cleared)' : id}');
+    debugPrint(
+      '[Crashlytics] setUserIdentifier=${id.isEmpty ? '(cleared)' : id}',
+    );
     await _crashlytics.setUserIdentifier(id);
   }
 
@@ -83,7 +108,7 @@ class CrashlyticsService {
     }
   }
 
-  /// Forces a native Android crash. Used only by the Crashlytics test page.
+  /// Forces a native Android crash. Dev/verification only.
   static void crash() {
     debugPrint('[Crashlytics] native crash triggered');
     _crashlytics.crash();

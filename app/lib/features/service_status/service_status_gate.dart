@@ -5,6 +5,8 @@ import 'package:firebase_remote_config/firebase_remote_config.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/firebase/firebase_analytics_service.dart';
+
 enum ServiceStatus {
   operational,
   maintenance,
@@ -41,6 +43,7 @@ class _ServiceStatusGateState extends State<ServiceStatusGate>
   ServiceStatus _remoteStatus = ServiceStatus.operational;
   List<ConnectivityResult> _connectivityResults = const [];
   bool _slowNetworkDismissed = false;
+  ServiceStatus? _lastLoggedBlockedStatus;
 
   ServiceStatus get _status {
     if (_connectivityResults.contains(ConnectivityResult.none)) {
@@ -127,7 +130,15 @@ class _ServiceStatusGateState extends State<ServiceStatusGate>
     final status = _status;
     if (status == ServiceStatus.operational ||
         (status == ServiceStatus.slowNetwork && _slowNetworkDismissed)) {
+      _lastLoggedBlockedStatus = null;
       return widget.child;
+    }
+
+    if (_lastLoggedBlockedStatus != status) {
+      _lastLoggedBlockedStatus = status;
+      unawaited(
+        AnalyticsService.logServiceStatusBlocked(status: status.name),
+      );
     }
 
     final screen = ServiceStatusScreen(

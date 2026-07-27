@@ -13,6 +13,7 @@ import 'google_auth_screen.dart';
 import 'startup_gate_screen.dart';
 import 'startup_performance.dart';
 import '../core/firebase/crashlytics_service.dart';
+import '../core/firebase/firebase_analytics_service.dart';
 import '../features/service_status/service_status_gate.dart';
 
 class OneOneApp extends StatelessWidget {
@@ -28,6 +29,7 @@ class OneOneApp extends StatelessWidget {
         return MaterialApp(
           title: 'One One',
           debugShowCheckedModeBanner: false,
+          navigatorObservers: [AnalyticsService.observer],
           builder: (context, child) {
             return ScreenUtilInit(
               designSize: const Size(393, 873),
@@ -88,6 +90,7 @@ class _AuthSessionLifecycleState extends State<_AuthSessionLifecycle>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      unawaited(AnalyticsService.logSessionStarted());
       unawaited(_refreshFirebaseToken());
     }
   }

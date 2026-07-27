@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:firebase_database/firebase_database.dart';
 
 import '../../../core/firebase/app_database.dart';
+import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/firebase/firebase_analytics_service.dart';
 import '../../../core/network/api_client.dart';
 import '../models/group_invite_result.dart';
 import '../models/group_member_summary.dart';
@@ -17,6 +21,8 @@ class GroupRepository {
   Future<GroupSummary> createGroup(String name) async {
     final response = await _apiClient.postJson('/v1/groups', {'name': name});
     final groupId = response['groupId'].toString();
+    unawaited(AnalyticsService.logGroupCreated(groupId: groupId));
+    unawaited(CrashlyticsService.log('group_created:$groupId'));
     final snapshot = await _database.ref('groups/$groupId').get();
 
     if (snapshot.value is Map<Object?, Object?>) {
@@ -40,6 +46,7 @@ class GroupRepository {
       'maxUses': 3,
       'expiresInHours': 72,
     });
+    unawaited(AnalyticsService.logInviteCreated(groupId: groupId));
     return GroupInviteResult.fromJson(response);
   }
 
@@ -47,7 +54,10 @@ class GroupRepository {
     final response = await _apiClient.postJson('/v1/invites/join', {
       'inviteCode': inviteCode,
     });
-    return response['groupId'].toString();
+    final groupId = response['groupId'].toString();
+    unawaited(AnalyticsService.logGroupJoined(groupId: groupId));
+    unawaited(CrashlyticsService.log('group_joined:$groupId'));
+    return groupId;
   }
 
   DatabaseReference userGroupsRef(String userId) {
@@ -115,6 +125,8 @@ class GroupRepository {
       '/v1/groups/${Uri.encodeComponent(groupId)}/leave',
       const {},
     );
+    unawaited(AnalyticsService.logGroupLeft(groupId: groupId));
+    unawaited(CrashlyticsService.log('group_left:$groupId'));
   }
 
   Future<void> deleteGroup(String groupId) async {
