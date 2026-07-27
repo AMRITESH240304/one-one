@@ -71,12 +71,27 @@ class _ServiceStatusGateState extends State<ServiceStatusGate>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) unawaited(_refresh());
+    if (state != AppLifecycleState.resumed) return;
+    // While the gate is actively blocking the app, a resume should be able
+    // to clear a status that has since recovered without waiting out the
+    // background poll interval below.
+    unawaited(_refresh(force: _status != ServiceStatus.operational));
   }
 
-  Future<void> _refresh() async {
+  /// Refreshes connectivity + the cached Remote Config `service_status`.
+  ///
+  /// [force] bypasses Remote Config's `minimumFetchInterval` throttle. This
+  /// must be true for user-initiated retries (the "Try again" button) and
+  /// for resume-while-blocked above - otherwise a status change made on the
+  /// backend/console (e.g. ending maintenance) can be invisible to an
+  /// already-open app for up to the full poll interval, which looks like a
+  /// broken "reconnect" button even though nothing is actually wrong.
+  Future<void> _refresh({bool force = false}) async {
     try {
       final results = await _connectivity.checkConnectivity();
+      if (mounted) {
+        setState(() => _connectivityResults = results);
+      }
       await _remoteConfig.setDefaults(const {
         'service_status': 'operational',
         'service_status_guidance': '',
@@ -85,7 +100,9 @@ class _ServiceStatusGateState extends State<ServiceStatusGate>
       await _remoteConfig.setConfigSettings(
         RemoteConfigSettings(
           fetchTimeout: const Duration(seconds: 5),
-          minimumFetchInterval: const Duration(minutes: 15),
+          minimumFetchInterval: force
+              ? Duration.zero
+              : const Duration(minutes: 15),
         ),
       );
       try {
@@ -95,7 +112,6 @@ class _ServiceStatusGateState extends State<ServiceStatusGate>
       }
       if (!mounted) return;
       setState(() {
-        _connectivityResults = results;
         _remoteStatus = ServiceStatus.fromRemoteValue(
           _remoteConfig.getString('service_status'),
         );
@@ -118,7 +134,7 @@ class _ServiceStatusGateState extends State<ServiceStatusGate>
       status: status,
       guidance: _remoteConfig.getString('service_status_guidance'),
       updatesUrl: _remoteConfig.getString('service_status_updates_url'),
-      onRetry: _refresh,
+      onRetry: () => _refresh(force: true),
       onContinue: status == ServiceStatus.slowNetwork
           ? () => setState(() => _slowNetworkDismissed = true)
           : null,

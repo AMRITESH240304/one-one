@@ -15,9 +15,17 @@ void logStartupMilestone(String milestone, [Stopwatch? phase]) {
 }
 
 class DelayedLoadingIndicator extends StatefulWidget {
-  const DelayedLoadingIndicator({super.key, required this.child});
+  const DelayedLoadingIndicator({
+    super.key,
+    required this.child,
+    this.threshold = startupLoadingThreshold,
+  });
 
   final Widget child;
+
+  /// How long to wait, with nothing shown, before revealing [child]. Defaults
+  /// to [startupLoadingThreshold].
+  final Duration threshold;
 
   @override
   State<DelayedLoadingIndicator> createState() =>
@@ -31,7 +39,7 @@ class _DelayedLoadingIndicatorState extends State<DelayedLoadingIndicator> {
   @override
   void initState() {
     super.initState();
-    _timer = Timer(startupLoadingThreshold, () {
+    _timer = Timer(widget.threshold, () {
       if (mounted) setState(() => _visible = true);
     });
   }

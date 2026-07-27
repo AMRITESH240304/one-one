@@ -32,11 +32,14 @@ import '../../nudges/data/nudge_repository.dart';
 import '../../nudges/ui/nudge_screen.dart';
 import '../../talk/data/hand_raise_repository.dart';
 import '../../talk/data/talk_repository.dart';
+import '../../talk/models/emoji_burst.dart';
 import '../../talk/models/in_call_reaction.dart';
 import '../../talk/models/talk_session.dart';
 import '../../talk/talk_feedback.dart';
+import '../../talk/ui/emoji_burst_overlay.dart';
 import '../../talk/ui/in_call_reaction_overlay.dart';
 import '../../talk/ui/in_call_reaction_sheet.dart';
+import '../data/identity_home_bootstrap.dart';
 import '../data/identity_repository.dart';
 import '../models/identity_session.dart';
 import 'group_action_screen.dart';
@@ -50,11 +53,13 @@ class IdentityHomeScreen extends StatefulWidget {
     required this.initialSession,
     required this.identityRepository,
     this.initialGroupId,
+    this.initialBootstrap,
   });
 
   final IdentitySession initialSession;
   final IdentityRepository identityRepository;
   final String? initialGroupId;
+  final IdentityHomeBootstrap? initialBootstrap;
 
   @override
   State<IdentityHomeScreen> createState() => _IdentityHomeScreenState();
@@ -127,6 +132,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Map<String, ConnectionQuality> _remoteConnectionQualityByUserId = const {};
   List<InCallReaction> _floatingReactions = const [];
   final Map<String, Timer> _reactionDismissTimers = {};
+  List<EmojiBurst> _emojiBursts = const [];
   List<ConnectivityResult> _connectivity = const [];
   bool _registrationRefreshInFlight = false;
   DateTime? _lastRegistrationRefreshAt;
@@ -169,10 +175,43 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       (action) => unawaited(_handlePipAction(action)),
     );
     unawaited(_startConnectivityMonitoring());
-    unawaited(_loadGroups());
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => logStartupMilestone('Home visible'),
-    );
+    final bootstrap = widget.initialBootstrap;
+    if (bootstrap != null) {
+      _applyBootstrap(bootstrap);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        logStartupMilestone('Home visible');
+        logStartupMilestone('Home data interactive');
+        unawaited(_takePendingNudgeAction());
+        unawaited(_takePendingInviteLink());
+      });
+    } else {
+      unawaited(_loadGroups());
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => logStartupMilestone('Home visible'),
+      );
+    }
+  }
+
+  void _applyBootstrap(IdentityHomeBootstrap bootstrap) {
+    _groups = bootstrap.groups;
+    _selectedGroup = bootstrap.selectedGroup;
+    _members = bootstrap.members;
+    _membersByGroupId = bootstrap.membersByGroupId;
+    _carouselIndex = bootstrap.carouselIndex;
+    _loadingGroups = false;
+    _message = bootstrap.loadError;
+
+    _userGroupsSubscription = _groupRepository
+        .userGroupsRef(_session.userId)
+        .onValue
+        .listen((event) => unawaited(_handleUserGroupsChanged(event)));
+
+    final selected = _selectedGroup;
+    if (selected != null) {
+      _listenToMembers(selected.groupId);
+      _listenToAvailability(selected.groupId);
+      _listenToHandRaises(selected.groupId);
+    }
   }
 
   @override
@@ -328,7 +367,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         return;
       }
 
-      final selected = _resolveSelectedGroup(groups);
+      final selected = IdentityHomeBootstrap.resolveSelectedGroup(
+        groups,
+        preferredGroupId: _preferredGroupId,
+        currentGroup: _selectedGroup,
+      );
       final selectedMembers = selected == null
           ? const <GroupMemberSummary>[]
           : await _groupRepository.loadGroupMembers(selected.groupId);
@@ -396,9 +439,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     await _handleIndexedGroupsChanged(indexedGroupIds);
   }
 
-  Future<void> _handleIndexedGroupsChanged(
-    Set<String> indexedGroupIds,
-  ) async {
+  Future<void> _handleIndexedGroupsChanged(Set<String> indexedGroupIds) async {
     if (!mounted) return;
     final loadedGroupIds = _groups.map((group) => group.groupId).toSet();
     if (indexedGroupIds.length == loadedGroupIds.length &&
@@ -1618,6 +1659,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   void _showFloatingReaction(InCallReaction reaction) {
     if (!mounted) return;
 
+    // Emoji reactions stream as a multi-glyph burst; short-text reactions
+    // keep the single floating chat-bubble look (a burst of words wouldn't
+    // read well).
+    if (reaction.isEmojiOnly) {
+      _showEmojiBurst(reaction);
+      return;
+    }
+
     _reactionDismissTimers.remove(reaction.id)?.cancel();
     setState(() {
       final next = [
@@ -1644,12 +1693,38 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
   }
 
+  void _showEmojiBurst(InCallReaction reaction) {
+    setState(() {
+      final next = [
+        ..._emojiBursts.where((item) => item.id != reaction.id),
+        EmojiBurst(
+          id: reaction.id,
+          emoji: reaction.text,
+          senderName: reaction.displayName,
+        ),
+      ];
+      // Cap concurrent streams so back-to-back reactions don't flood the
+      // screen; each burst self-removes via _onEmojiBurstFinished.
+      _emojiBursts = next.length <= 2 ? next : next.sublist(next.length - 2);
+    });
+  }
+
+  void _onEmojiBurstFinished(String id) {
+    if (!mounted) return;
+    setState(() {
+      _emojiBursts = _emojiBursts
+          .where((item) => item.id != id)
+          .toList(growable: false);
+    });
+  }
+
   void _clearFloatingReactions() {
     for (final timer in _reactionDismissTimers.values) {
       timer.cancel();
     }
     _reactionDismissTimers.clear();
     _floatingReactions = const [];
+    _emojiBursts = const [];
   }
 
   Future<void> _connectLiveKit(OnlineSession session) async {
@@ -1989,26 +2064,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     });
   }
 
-  GroupSummary? _resolveSelectedGroup(List<GroupSummary> groups) {
-    if (groups.isEmpty) return null;
-
-    final preferredGroupId = _preferredGroupId;
-    if (preferredGroupId != null) {
-      for (final group in groups) {
-        if (group.groupId == preferredGroupId) return group;
-      }
-    }
-
-    final currentGroup = _selectedGroup;
-    if (currentGroup == null) return groups.first;
-
-    for (final group in groups) {
-      if (group.groupId == currentGroup.groupId) return group;
-    }
-
-    return groups.first;
-  }
-
   Future<bool> _openGroupManagement() async {
     final group = _selectedGroup;
     if (group == null) return false;
@@ -2122,25 +2177,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   bool get _isOnline => _onlineSession != null;
   bool get _isViewingActiveGroup =>
       _onlineSession?.groupId == _selectedGroup?.groupId;
-
-  /// Single-word presence label shown beneath the online/offline toggle.
-  /// Recomputed on every `setState` that touches `_state`/`_onlineSession`,
-  /// so it updates immediately as the toggle changes.
-  String get _presenceStatusLabel {
-    switch (_state) {
-      case 'talking':
-      case 'live':
-        return 'Live';
-      case 'connecting':
-      case 'reconnecting':
-        return 'Online';
-      case 'disconnected':
-        return 'Offline';
-      case 'away':
-      default:
-        return 'Away';
-    }
-  }
 
   bool get _serviceReady =>
       groupHasServicePeer(members: _members, currentUserId: _session.userId);
@@ -2271,119 +2307,139 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             accent: accent,
           ),
           SafeArea(
-            child: Column(
-              children: [
-                _TopChrome(
-                  onSettings: _openSettings,
-                  onSetup: _openSetupWarnings,
-                  hasSetupWarnings: warnings.isNotEmpty,
-                  busy: _busy,
-                  online: live,
-                  enabled: _serviceReady,
-                  onTogglePresence: _togglePresence,
-                  showNetworkStrength: _isOnline,
-                  localConnectionQuality: _effectiveLocalConnectionQuality,
-                  statusLabel: _presenceStatusLabel,
-                ),
-                SizedBox(height: 8.h),
-                _FriendsStrip(
-                  friends: _friends,
-                  availability: _availability,
-                  speakingUserIds: _speakingUserIds,
-                  handRaises: _handRaises,
-                  connectionQualityByUserId: _remoteConnectionQualityByUserId,
-                  onInvite: inviteAction,
-                ),
-                if (_message != null) ...[
-                  SizedBox(height: 10.h),
-                  Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 24.w),
-                    child: Text(
-                      _message!,
-                      textAlign: TextAlign.center,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: Colors.white70, fontSize: 12.sp),
+            child: RefreshIndicator(
+              onRefresh: _loadGroups,
+              color: Colors.black,
+              backgroundColor: Colors.white,
+              child: CustomScrollView(
+                // The layout below has no intrinsic scroll content (it's a
+                // fixed column with a Spacer), so force scrollability purely
+                // to make the pull-to-refresh drag gesture available.
+                physics: const AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Column(
+                      children: [
+                        _TopChrome(
+                          onSettings: _openSettings,
+                          onSetup: _openSetupWarnings,
+                          hasSetupWarnings: warnings.isNotEmpty,
+                          busy: _busy,
+                          online: live,
+                          enabled: _serviceReady,
+                          onTogglePresence: _togglePresence,
+                          showNetworkStrength: _isOnline,
+                          localConnectionQuality:
+                              _effectiveLocalConnectionQuality,
+                        ),
+                        SizedBox(height: 8.h),
+                        _FriendsStrip(
+                          friends: _friends,
+                          availability: _availability,
+                          speakingUserIds: _speakingUserIds,
+                          handRaises: _handRaises,
+                          connectionQualityByUserId:
+                              _remoteConnectionQualityByUserId,
+                          onInvite: inviteAction,
+                        ),
+                        if (_message != null) ...[
+                          SizedBox(height: 10.h),
+                          Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 24.w),
+                            child: Text(
+                              _message!,
+                              textAlign: TextAlign.center,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12.sp,
+                              ),
+                            ),
+                          ),
+                        ],
+                        const Spacer(),
+                        if (focusedGroup != null)
+                          _CarouselCaption(
+                            displayName: _session.user.displayName,
+                            handRaised: _handRaises[_session.userId] == true,
+                            handRaiseBusy: _handRaiseBusy,
+                            handRaiseEnabled: viewingActiveGroup,
+                            onHandRaise: _toggleHandRaise,
+                            showNudge: groupNeedsNudge(
+                              members: _members,
+                              currentUserId: _session.userId,
+                              availability: _availability,
+                            ),
+                            onNudge: _busy ? null : _openNudges,
+                            showReaction:
+                                viewingActiveGroup && _canSendInCallReaction,
+                            reactionBusy: _reactionBusy,
+                            onReaction: _openReactionComposer,
+                            groupName: focusedGroup.name,
+                            onTapName: _groups.length > 1
+                                ? _openGroupPicker
+                                : null,
+                          ),
+                        SizedBox(height: 10.h),
+                        SizedBox(
+                          height: 200.h,
+                          child: _ExperienceCarousel(
+                            items: items,
+                            index: _carouselIndex,
+                            connectedGroupId: _onlineSession?.groupId,
+                            talkEnabled: viewingActiveGroup && !_busy,
+                            talkActive: _talkSession != null,
+                            talkBusy: _talkBusy,
+                            accent: accent,
+                            onSelected: (index) {
+                              unawaited(_onGroupCarouselChanged(index));
+                            },
+                            onTalkStart: _startTalking,
+                            onTalkStop: () => _stopTalking(),
+                            onJoinVoiceGroup: _togglePresence,
+                            onCreateGroup: _openCreateGroup,
+                            onJoinGroup: _openJoinGroup,
+                          ),
+                        ),
+                        if (items.length > 1) ...[
+                          SizedBox(height: 8.h),
+                          _CarouselDotIndicator(
+                            count: items.length,
+                            index: _carouselIndex.clamp(0, items.length - 1),
+                          ),
+                        ],
+                        SizedBox(height: 18.h),
+                        Text(
+                          viewingActiveGroup
+                              ? 'Tap to Talk'
+                              : _isOnline
+                              ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
+                              : !_serviceReady
+                              ? 'invite a friend to enable voice service'
+                              : 'send a nudge to go online together',
+                          style: TextStyle(
+                            color: const Color.fromRGBO(255, 255, 255, 0.55),
+                            fontSize: 13.sp,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        SizedBox(height: 28.h),
+                      ],
                     ),
                   ),
                 ],
-                const Spacer(),
-                if (focusedGroup != null)
-                  _CarouselCaption(
-                    displayName: _session.user.displayName,
-                    handRaised: _handRaises[_session.userId] == true,
-                    handRaiseBusy: _handRaiseBusy,
-                    handRaiseEnabled: viewingActiveGroup,
-                    onHandRaise: _toggleHandRaise,
-                    showNudge: groupNeedsNudge(
-                      members: _members,
-                      currentUserId: _session.userId,
-                      availability: _availability,
-                    ),
-                    onNudge: _busy ? null : _openNudges,
-                    showReaction:
-                        viewingActiveGroup &&
-                        _canSendInCallReaction &&
-                        _speakingUserIds.any((id) => id != _session.userId),
-                    reactionBusy: _reactionBusy,
-                    onReaction: _openReactionComposer,
-                    groupName: focusedGroup.name,
-                    onTapName: _groups.length > 1 ? _openGroupPicker : null,
-                  ),
-                SizedBox(height: 10.h),
-                SizedBox(
-                  height: 200.h,
-                  child: _ExperienceCarousel(
-                    items: items,
-                    index: _carouselIndex,
-                    connectedGroupId: _onlineSession?.groupId,
-                    talkEnabled: viewingActiveGroup && !_busy,
-                    talkActive: _talkSession != null,
-                    talkBusy: _talkBusy,
-                    accent: accent,
-                    onSelected: (index) {
-                      unawaited(_onGroupCarouselChanged(index));
-                    },
-                    onTalkStart: _startTalking,
-                    onTalkStop: () => _stopTalking(),
-                    onJoinVoiceGroup: _togglePresence,
-                    onCreateGroup: _openCreateGroup,
-                    onJoinGroup: _openJoinGroup,
-                  ),
-                ),
-                if (items.length > 1) ...[
-                  SizedBox(height: 8.h),
-                  _CarouselDotIndicator(
-                    count: items.length,
-                    index: _carouselIndex.clamp(0, items.length - 1),
-                  ),
-                ],
-                SizedBox(height: 18.h),
-                Text(
-                  viewingActiveGroup
-                      ? 'Tap to Talk'
-                      : _isOnline
-                      ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
-                      : !_serviceReady
-                      ? 'invite a friend to enable voice service'
-                      : 'send a nudge to go online together',
-                  style: TextStyle(
-                    color: const Color.fromRGBO(255, 255, 255, 0.55),
-                    fontSize: 13.sp,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                SizedBox(height: 28.h),
-              ],
+              ),
             ),
           ),
           if (_floatingReactions.isNotEmpty)
             InCallReactionOverlay(reactions: _floatingReactions),
-          // A shimmering silhouette of this exact layout reads as "already
-          // loading the real screen" rather than a generic wait — replaces
-          // the previous full-screen spinner overlay.
-          if (_loadingGroups)
-            const DelayedLoadingIndicator(child: _HomeLoadingSkeleton()),
+          if (_emojiBursts.isNotEmpty)
+            EmojiBurstOverlay(
+              bursts: _emojiBursts,
+              onBurstFinished: _onEmojiBurstFinished,
+            ),
         ],
       ),
     );
@@ -2479,112 +2535,6 @@ class _VoicePictureInPictureView extends StatelessWidget {
           },
         ),
       ),
-    );
-  }
-}
-
-/// Skeleton placeholder shown for the brief window while groups/members
-/// load, shaped like the real home screen (top bar, friends strip, big
-/// carousel circle, hint text) so the layout never visibly "pops in".
-class _HomeLoadingSkeleton extends StatefulWidget {
-  const _HomeLoadingSkeleton();
-
-  @override
-  State<_HomeLoadingSkeleton> createState() => _HomeLoadingSkeletonState();
-}
-
-class _HomeLoadingSkeletonState extends State<_HomeLoadingSkeleton>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1300),
-  )..repeat();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ColoredBox(
-      color: const Color(0xff101010),
-      child: SafeArea(
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(16.w, 8.h, 16.w, 24.h),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  _shimmer(width: 48.w, height: 48.w, radius: 24.r),
-                  const Spacer(),
-                  _shimmer(width: 72.w, height: 30.h, radius: 18.r),
-                ],
-              ),
-              SizedBox(height: 30.h),
-              _shimmer(width: 84.w, height: 12.h, radius: 6.r),
-              SizedBox(height: 12.h),
-              SizedBox(
-                height: 64.h,
-                child: Row(
-                  children: [
-                    for (var i = 0; i < 4; i++) ...[
-                      _shimmer(width: 52.w, height: 52.w, radius: 26.r),
-                      SizedBox(width: 12.w),
-                    ],
-                  ],
-                ),
-              ),
-              const Spacer(),
-              Center(
-                child: _shimmer(width: 190.w, height: 190.w, radius: 95.r),
-              ),
-              const Spacer(),
-              Center(
-                child: _shimmer(width: 150.w, height: 12.h, radius: 6.r),
-              ),
-              SizedBox(height: 12.h),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _shimmer({
-    required double width,
-    required double height,
-    required double radius,
-  }) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        final sweep = _controller.value;
-        return ShaderMask(
-          blendMode: BlendMode.srcATop,
-          shaderCallback: (bounds) {
-            return LinearGradient(
-              begin: Alignment(-1 + sweep * 3, 0),
-              end: Alignment(sweep * 3, 0),
-              colors: [
-                Colors.white.withValues(alpha: 0.05),
-                Colors.white.withValues(alpha: 0.18),
-                Colors.white.withValues(alpha: 0.05),
-              ],
-            ).createShader(bounds);
-          },
-          child: Container(
-            width: width,
-            height: height,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(radius),
-            ),
-          ),
-        );
-      },
     );
   }
 }
@@ -2747,7 +2697,6 @@ class _TopChrome extends StatelessWidget {
     required this.onTogglePresence,
     required this.showNetworkStrength,
     required this.localConnectionQuality,
-    required this.statusLabel,
   });
 
   final VoidCallback onSettings;
@@ -2759,7 +2708,6 @@ class _TopChrome extends StatelessWidget {
   final VoidCallback onTogglePresence;
   final bool showNetworkStrength;
   final ConnectionQuality localConnectionQuality;
-  final String statusLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -2823,27 +2771,14 @@ class _TopChrome extends StatelessWidget {
             ),
             Align(
               alignment: Alignment.centerRight,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  _StatusToggle(
-                    busy: busy,
-                    online: online,
-                    enabled: enabled,
-                    onToggle: onTogglePresence,
-                  ),
-                  SizedBox(height: 3.h),
-                  Text(
-                    statusLabel,
-                    style: TextStyle(
-                      color: const Color.fromRGBO(255, 255, 255, 0.65),
-                      fontSize: 10.sp,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.2,
-                    ),
-                  ),
-                ],
+              // No text label under the toggle by design - its state (and a
+              // description for accessibility) is conveyed by the switch
+              // itself plus its Tooltip/Semantics.
+              child: _StatusToggle(
+                busy: busy,
+                online: online,
+                enabled: enabled,
+                onToggle: onTogglePresence,
               ),
             ),
           ],
@@ -2957,14 +2892,12 @@ class _GlassIconButton extends StatelessWidget {
     required this.icon,
     required this.onPressed,
     this.onLongPress,
-    this.selected = false,
   });
 
   final String tooltip;
   final IconData icon;
   final VoidCallback? onPressed;
   final VoidCallback? onLongPress;
-  final bool selected;
 
   @override
   Widget build(BuildContext context) {
@@ -2981,9 +2914,7 @@ class _GlassIconButton extends StatelessWidget {
           alignment: Alignment.center,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: selected
-                ? const Color(0xfffff1a8)
-                : onPressed == null
+            color: onPressed == null
                 ? const Color.fromRGBO(255, 255, 255, 0.06)
                 : const Color.fromRGBO(0, 0, 0, 0.35),
             border: Border.all(
@@ -2992,11 +2923,7 @@ class _GlassIconButton extends StatelessWidget {
           ),
           child: Icon(
             icon,
-            color: selected
-                ? Colors.black
-                : onPressed == null
-                ? Colors.white38
-                : Colors.white,
+            color: onPressed == null ? Colors.white38 : Colors.white,
             size: 22.sp,
           ),
         ),
@@ -3411,36 +3338,37 @@ class _CarouselCaption extends StatelessWidget {
         ),
         SizedBox(height: 8.h),
         SizedBox(
-          width: 240.w,
-          height: 48,
+          height: 44,
           child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Visibility(
                 visible: showNudge,
                 maintainSize: true,
                 maintainAnimation: true,
                 maintainState: true,
-                child: _GlassIconButton(
+                child: _RowActionIcon(
                   tooltip: 'Nudge offline friends',
                   icon: Icons.notifications_active_rounded,
                   onPressed: onNudge,
                 ),
               ),
+              SizedBox(width: 4.w),
               Opacity(
                 opacity: handRaiseBusy || !handRaiseEnabled ? 0.45 : 1,
-                child: _GlassIconButton(
+                child: _RowActionIcon(
                   tooltip: handRaised ? 'Lower hand' : 'Raise hand',
-                  icon: Icons.pan_tool_alt_rounded,
+                  icon: Icons.back_hand_rounded,
                   selected: handRaised,
                   onPressed: handRaiseBusy || !handRaiseEnabled
                       ? null
                       : onHandRaise,
                 ),
               ),
+              SizedBox(width: 4.w),
               Opacity(
                 opacity: reactionBusy ? 0.55 : 1,
-                child: _GlassIconButton(
+                child: _RowActionIcon(
                   tooltip: 'Send a keyboard reaction',
                   icon: Icons.keyboard_rounded,
                   onPressed: reactionBusy || !showReaction ? null : onReaction,
@@ -3450,6 +3378,46 @@ class _CarouselCaption extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Plain (no filled-circle backdrop) icon action used in the tightly-grouped
+/// caption row - deliberately lighter-weight than [_GlassIconButton], which
+/// keeps its glass-pill look elsewhere (e.g. the top bar settings button).
+class _RowActionIcon extends StatelessWidget {
+  const _RowActionIcon({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+    this.selected = false,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback? onPressed;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkResponse(
+        onTap: onPressed,
+        radius: 26.r,
+        child: Padding(
+          padding: EdgeInsets.all(8.r),
+          child: Icon(
+            icon,
+            size: 24.sp,
+            color: selected
+                ? const Color(0xfffff1a8)
+                : onPressed == null
+                ? Colors.white30
+                : Colors.white,
+          ),
+        ),
+      ),
     );
   }
 }

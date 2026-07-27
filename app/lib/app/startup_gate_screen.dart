@@ -10,9 +10,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../features/groups/data/group_repository.dart';
 import '../features/groups/data/invite_link_bridge.dart';
+import '../features/groups/models/group_summary.dart';
+import '../features/identity/data/identity_home_bootstrap.dart';
 import '../features/identity/data/identity_repository.dart';
 import '../features/identity/models/identity_session.dart';
 import '../features/identity/ui/identity_home_screen.dart';
+import '../features/identity/ui/no_groups_screen.dart';
 import '../core/network/api_client.dart';
 import 'display_name_screen.dart';
 import 'profile_picture_screen.dart';
@@ -84,37 +87,34 @@ class _StartupGateScreenState extends State<StartupGateScreen>
       _readySession = session;
 
       final locallyCompleted = await _hasCompletedSetup(session.userId);
+      Future<List<GroupSummary>>? groupsPrefetch;
+      if (locallyCompleted) {
+        groupsPrefetch = _groupRepository.loadGroupsForUser(session.userId);
+      }
       final setupCompleted =
           locallyCompleted || await _identityRepository.hasCompletedSetup();
       logStartupMilestone('setup state resolved', stopwatch);
       if (!mounted) return;
 
       if (setupCompleted) {
-        if (!locallyCompleted && !await _requiredPermissionsGranted()) {
-          if (!mounted) return;
-          setState(() {
-            _nextScreen = SetupPermissionScreen(
-              onComplete: () => _finishReturningSetup(session),
-            );
-          });
-          return;
+        if (!locallyCompleted) {
+          groupsPrefetch = _groupRepository.loadGroupsForUser(session.userId);
+          if (!await _requiredPermissionsGranted()) {
+            if (!mounted) return;
+            setState(() {
+              _nextScreen = SetupPermissionScreen(
+                onComplete: () => _finishReturningSetup(session),
+              );
+            });
+            return;
+          }
         }
         await _markSetupComplete(session.userId);
-        final invitedGroupId = await _joinPendingInvite();
-        if (!mounted) return;
-        setState(() {
-          // IdentityHomeScreen resolves the user's groups itself (and
-          // redirects to NoGroupsScreen when needed), so we can go there
-          // directly instead of resolving group membership twice — once
-          // here and once more inside the home screen.
-          _nextScreen = IdentityHomeScreen(
-            initialSession: session,
-            identityRepository: _identityRepository,
-            initialGroupId: invitedGroupId,
-          );
-        });
-        logStartupMilestone('Home route selected', stopwatch);
-        _showPendingInviteMessage();
+        await _presentHomeScreen(
+          session,
+          groupsPrefetch: groupsPrefetch,
+          stopwatch: stopwatch,
+        );
         return;
       }
 
@@ -139,16 +139,7 @@ class _StartupGateScreenState extends State<StartupGateScreen>
                         await _identityRepository.markSetupComplete();
                         await _markSetupComplete(readySession.userId);
                         if (!mounted) return;
-                        final invitedGroupId = await _joinPendingInvite();
-                        if (!mounted) return;
-                        setState(() {
-                          _nextScreen = IdentityHomeScreen(
-                            initialSession: readySession,
-                            identityRepository: _identityRepository,
-                            initialGroupId: invitedGroupId,
-                          );
-                        });
-                        _showPendingInviteMessage();
+                        await _presentHomeScreen(readySession);
                       },
                     );
                   });
@@ -185,15 +176,71 @@ class _StartupGateScreenState extends State<StartupGateScreen>
     final readySession = await _identityRepository.ensureIdentity();
     _readySession = readySession;
     if (!mounted) return;
-    final invitedGroupId = await _joinPendingInvite();
-    if (!mounted) return;
-    setState(() {
-      _nextScreen = IdentityHomeScreen(
-        initialSession: readySession,
-        identityRepository: _identityRepository,
-        initialGroupId: invitedGroupId,
+    await _presentHomeScreen(readySession);
+  }
+
+  /// Keeps the splash visible while home data is prefetched in parallel with
+  /// invite handling, then transitions once the first home frame can render.
+  Future<void> _presentHomeScreen(
+    IdentitySession session, {
+    Future<List<GroupSummary>>? groupsPrefetch,
+    Stopwatch? stopwatch,
+    String? preferredGroupId,
+  }) async {
+    final phase = stopwatch ?? (Stopwatch()..start());
+    groupsPrefetch ??= _groupRepository.loadGroupsForUser(session.userId);
+
+    late final String? invitedGroupId;
+    late final List<GroupSummary> groups;
+    if (preferredGroupId != null) {
+      invitedGroupId = preferredGroupId;
+      groups = await groupsPrefetch;
+    } else {
+      final results = await Future.wait<Object?>([
+        _joinPendingInvite(),
+        groupsPrefetch,
+      ]);
+      invitedGroupId = results[0] as String?;
+      groups = results[1]! as List<GroupSummary>;
+    }
+
+    IdentityHomeBootstrap bootstrap;
+    try {
+      bootstrap = await IdentityHomeBootstrap.fromGroups(
+        groupRepository: _groupRepository,
+        groups: groups,
+        preferredGroupId: invitedGroupId,
       );
-    });
+    } catch (error) {
+      bootstrap = IdentityHomeBootstrap.failure(error);
+    }
+
+    logStartupMilestone('home prefetch complete', phase);
+    if (!mounted) return;
+
+    if (bootstrap.hasGroups) {
+      await bootstrap.precacheMemberPhotos(context);
+      if (!mounted) return;
+    }
+
+    if (!bootstrap.hasGroups && bootstrap.loadError == null) {
+      setState(() {
+        _nextScreen = NoGroupsScreen(
+          session: session,
+          identityRepository: _identityRepository,
+        );
+      });
+    } else {
+      setState(() {
+        _nextScreen = IdentityHomeScreen(
+          initialSession: session,
+          identityRepository: _identityRepository,
+          initialGroupId: invitedGroupId,
+          initialBootstrap: bootstrap,
+        );
+      });
+    }
+    logStartupMilestone('Home route selected', phase);
     _showPendingInviteMessage();
   }
 
@@ -218,13 +265,11 @@ class _StartupGateScreenState extends State<StartupGateScreen>
     if (groupId != null) {
       Navigator.of(context).popUntil((route) => route.isFirst);
       if (!mounted) return;
-      setState(() {
-        _nextScreen = IdentityHomeScreen(
-          initialSession: session,
-          identityRepository: _identityRepository,
-          initialGroupId: groupId,
-        );
-      });
+      await _presentHomeScreen(
+        session,
+        groupsPrefetch: _groupRepository.loadGroupsForUser(session.userId),
+        preferredGroupId: groupId,
+      );
     }
     _showPendingInviteMessage();
   }
@@ -300,9 +345,7 @@ class _StartupGateScreenState extends State<StartupGateScreen>
                 ),
                 SizedBox(height: 28.h),
                 if (_startupError == null)
-                  const DelayedLoadingIndicator(
-                    child: _StartupPulseDots(color: Color(0xff384047)),
-                  )
+                  const _StartupPulseDots(color: Color(0xff384047))
                 else ...[
                   Text(
                     'We couldn\'t finish setting up your account.',

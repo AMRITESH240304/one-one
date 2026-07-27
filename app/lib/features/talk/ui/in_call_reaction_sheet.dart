@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MaxLengthEnforcement;
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 import '../models/in_call_reaction.dart';
@@ -82,7 +83,7 @@ class _InCallReactionSheetState extends State<_InCallReactionSheet> {
           ),
           SizedBox(height: 4.h),
           Text(
-            'Emoji or a short line — floats for everyone, then fades.',
+            'Tap a quick emoji or type any emoji from your keyboard — floats for everyone, then fades.',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: Colors.white54,
@@ -122,13 +123,16 @@ class _InCallReactionSheetState extends State<_InCallReactionSheet> {
               Expanded(
                 child: TextField(
                   controller: _controller,
-                  autofocus: false,
+                  autofocus: true,
                   maxLength: InCallReaction.maxTextLength,
+                  // Grapheme-aware so a system emoji keyboard's flags / ZWJ
+                  // sequences / skin tones never get chopped mid-glyph.
+                  maxLengthEnforcement: MaxLengthEnforcement.truncateAfterCompositionEnds,
                   textInputAction: TextInputAction.send,
                   onSubmitted: (_) => _submit(),
                   style: TextStyle(color: Colors.white, fontSize: 15.sp),
                   decoration: InputDecoration(
-                    hintText: 'or type a short line…',
+                    hintText: 'Type or tap your device emoji key…',
                     hintStyle: TextStyle(color: Colors.white38, fontSize: 14.sp),
                     counterStyle: TextStyle(
                       color: Colors.white38,
