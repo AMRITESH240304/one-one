@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
+import '../core/firebase/crashlytics_service.dart';
 import '../features/identity/data/identity_repository.dart';
 
 class GoogleAuthScreen extends StatefulWidget {
@@ -31,7 +32,17 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
     try {
       await _identityRepository.signInWithGoogle();
       // The root Firebase auth stream advances to onboarding.
-    } catch (error) {
+    } catch (error, stack) {
+      final message = error.toString();
+      final cancelled =
+          message.contains('canceled') || message.contains('cancelled');
+      if (!cancelled) {
+        await CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'google_sign_in_failed',
+        );
+      }
       if (!mounted) return;
       setState(() {
         _isSigningIn = false;

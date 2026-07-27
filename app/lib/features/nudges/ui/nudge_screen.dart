@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:record/record.dart';
 
+import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/network/api_client.dart';
 import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
@@ -161,7 +162,17 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) Navigator.of(context).pop();
       });
-    } catch (error) {
+    } catch (error, stack) {
+      final cancelled = error.toString().toLowerCase().contains('cancel');
+      if (!cancelled) {
+        unawaited(
+          CrashlyticsService.recordError(
+            error,
+            stack,
+            reason: 'nudge_send_failed',
+          ),
+        );
+      }
       if (!mounted) return;
       final message = error is NudgeDeliveryException
           ? error.message

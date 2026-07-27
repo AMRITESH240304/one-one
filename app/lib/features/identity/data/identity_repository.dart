@@ -13,6 +13,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
 import '../../../core/firebase/app_database.dart';
+import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/storage/profile_photo_storage.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../models/app_user_profile.dart';
@@ -393,6 +394,8 @@ class IdentityRepository {
     } finally {
       await _auth.signOut();
       _clearSession();
+      unawaited(CrashlyticsService.setUserIdentifier(null));
+      unawaited(CrashlyticsService.log('user_signed_out'));
     }
   }
 
@@ -417,6 +420,8 @@ class IdentityRepository {
       await GoogleSignIn.instance.signOut();
     }
     _clearSession();
+    unawaited(CrashlyticsService.setUserIdentifier(null));
+    unawaited(CrashlyticsService.log('user_account_deleted'));
   }
 
   void dispose() {
@@ -593,10 +598,17 @@ class IdentityRepository {
       );
       _publishSession(session);
       return session;
-    } catch (error) {
+    } catch (error, stack) {
       debugPrint(
         '[OneOneFCM][DART-E4] Firebase device sync failed '
         '${error.runtimeType}: $error',
+      );
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'identity_device_sync_failed',
+        ),
       );
       // Keep startup responsive even if the database sync is slow or fails.
       return null;
@@ -654,6 +666,14 @@ class IdentityRepository {
     if (!_disposed) {
       _sessionNotifier.value = session;
     }
+    unawaited(CrashlyticsService.setUserIdentifier(session.userId));
+    unawaited(
+      CrashlyticsService.setCustomKeys({
+        'user_id': session.userId,
+        'device_id': session.device.deviceId,
+        'app_version': session.device.appVersion,
+      }),
+    );
   }
 
   Future<void> _evictProfilePhoto(String? url) async {
@@ -682,13 +702,30 @@ class IdentityRepository {
   Future<T> _requiredStartupStep<T>(Future<T> future, String stepName) async {
     try {
       return await future.timeout(_requiredStartupTimeout);
-    } on TimeoutException {
-      throw IdentityStartupException(
+    } on TimeoutException catch (error, stack) {
+      final wrapped = IdentityStartupException(
         '$stepName timed out after ${_requiredStartupTimeout.inSeconds}s. '
         'Check Firebase setup, phone internet, and Google Play services.',
       );
-    } catch (error) {
-      throw IdentityStartupException('$stepName failed: $error');
+      unawaited(
+        CrashlyticsService.recordError(
+          wrapped,
+          stack,
+          reason: 'identity_startup_timeout:$stepName',
+          information: [error],
+        ),
+      );
+      throw wrapped;
+    } catch (error, stack) {
+      final wrapped = IdentityStartupException('$stepName failed: $error');
+      unawaited(
+        CrashlyticsService.recordError(
+          wrapped,
+          stack,
+          reason: 'identity_startup_failed:$stepName',
+        ),
+      );
+      throw wrapped;
     }
   }
 

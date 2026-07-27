@@ -17,6 +17,7 @@ import '../features/identity/models/identity_session.dart';
 import '../features/identity/ui/identity_home_screen.dart';
 import '../features/identity/ui/no_groups_screen.dart';
 import '../core/network/api_client.dart';
+import '../core/firebase/crashlytics_service.dart';
 import 'display_name_screen.dart';
 import 'profile_picture_screen.dart';
 import 'setup_permission_screen.dart';
@@ -149,7 +150,14 @@ class _StartupGateScreenState extends State<StartupGateScreen>
           },
         );
       });
-    } catch (error) {
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'startup_gate_failed',
+        ),
+      );
       if (!mounted) return;
 
       setState(() {

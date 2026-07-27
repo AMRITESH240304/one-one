@@ -13,6 +13,7 @@ import 'package:uuid/uuid.dart';
 import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
 import '../../../core/firebase/app_database.dart';
+import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/network/api_client.dart';
 import '../../groups/data/group_repository.dart';
 import '../../groups/data/invite_link_bridge.dart';
@@ -314,9 +315,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     try {
       await widget.identityRepository.ensureIdentity();
       _lastRegistrationRefreshAt = DateTime.now();
-    } catch (error) {
+    } catch (error, stack) {
       debugPrint(
         '[OneOneFCM][DART-E5] Resume-time device registration refresh failed: $error',
+      );
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'device_registration_refresh_failed',
+        ),
       );
     } finally {
       _registrationRefreshInFlight = false;
@@ -517,9 +525,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       if (mounted) {
         setState(() => _message = 'Group joined from invite link.');
       }
-    } catch (error) {
+    } catch (error, stack) {
       debugPrint(
         '[OneOneInvite] Active invite failed ${error.runtimeType}: $error',
+      );
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'invite_join_failed',
+        ),
       );
       if (error is ApiException &&
           const {
@@ -1397,7 +1412,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       }
       _scheduleInactivityCheck();
       _startUsageTracking();
-    } catch (error) {
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'livekit_go_online_failed',
+        ),
+      );
       await _disconnectLiveKit();
       if (createdSession != null) {
         try {
@@ -1562,7 +1584,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       });
       _syncPipSessionState();
       _recordVoiceActivity();
-    } catch (error) {
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'talk_start_mic_failed',
+        ),
+      );
       if (startedTalk != null) {
         await _talkRepository.stopTalk(startedTalk, reason: 'mic_failed');
       }

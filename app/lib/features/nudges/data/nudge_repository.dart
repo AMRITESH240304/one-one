@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/network/api_client.dart';
 
 class NudgeTarget {
@@ -137,11 +138,16 @@ class NudgeRepository {
         'uploadMode=signed_write_url',
       );
       return _requireAcceptedDelivery(response);
-    } catch (error) {
+    } catch (error, stack) {
       debugPrint(
         '[OneOneNudge][DART-E1] Voice nudge upload failed '
         'audioBytes=${audio.length} elapsedMs=${stopwatch.elapsedMilliseconds} '
         '${error.runtimeType}: $error',
+      );
+      await CrashlyticsService.recordError(
+        error,
+        stack,
+        reason: 'voice_nudge_upload_failed',
       );
       rethrow;
     }

@@ -12,6 +12,7 @@ import 'firebase_setup_blocked_screen.dart';
 import 'google_auth_screen.dart';
 import 'startup_gate_screen.dart';
 import 'startup_performance.dart';
+import '../core/firebase/crashlytics_service.dart';
 import '../features/service_status/service_status_gate.dart';
 
 class OneOneApp extends StatelessWidget {
@@ -115,8 +116,13 @@ class _FirebaseGateState extends State<_FirebaseGate> {
 
   Future<FirebaseApp> _initializeFirebase() async {
     final stopwatch = Stopwatch()..start();
-    final app = await Firebase.initializeApp();
+    // Firebase is initialized in main.dart before runApp so Crashlytics
+    // handlers are active from the first frame. Reuse that default app here.
+    final app = Firebase.apps.isEmpty
+        ? await Firebase.initializeApp()
+        : Firebase.app();
     logStartupMilestone('Firebase ready', stopwatch);
+    await CrashlyticsService.log('firebase_gate_ready');
     return app;
   }
 

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 import '../../../core/firebase/app_database.dart';
+import '../../../core/firebase/crashlytics_service.dart';
 import '../../groups/models/group_summary.dart';
 import '../../identity/models/identity_session.dart';
 import '../../talk/data/talk_repository.dart';
@@ -123,7 +124,14 @@ class _OnlineScreenState extends State<OnlineScreen> {
       });
       _scheduleInactivityCheck();
       _startUsageTracking();
-    } catch (error) {
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'online_screen_go_online_failed',
+        ),
+      );
       await _disconnectLiveKit();
       if (createdSession != null) {
         try {
