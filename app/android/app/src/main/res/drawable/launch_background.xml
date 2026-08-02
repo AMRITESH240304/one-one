@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modify this file to customize your launch splash screen -->
+<!-- Branded launch screen: logo centered on the yellow brand background.
+     Looks intentional from the very first frame, not a "plain yellow square." -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/splash_background" />
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/splash_logo" />
+    </item>
 </layer-list>

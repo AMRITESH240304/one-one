@@ -144,10 +144,28 @@ class _FirebaseGateState extends State<_FirebaseGate> {
             backgroundColor: const Color(0xffF8BE03),
             body: SafeArea(
               child: Center(
-                child: Image.asset(
-                  'assets/logo.png',
-                  width: 190.w,
-                  fit: BoxFit.contain,
+                child: Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 28.w),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Image.asset(
+                        'assets/logo.png',
+                        width: 172.w,
+                        fit: BoxFit.contain,
+                      ),
+                      SizedBox(height: 36.h),
+                      Text(
+                        'Welcome to One One',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: const Color(0xff252a2e),
+                          fontSize: 26.sp,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
