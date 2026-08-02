@@ -481,7 +481,10 @@ export async function deleteGroup(input: GroupMemberActionInput) {
     );
   }
   const groupRef = db.ref(`groups/${input.groupId}`);
+  // Same optimistic-null handling as removeGroupMember — aborting on the first
+  // null callback leaves groups stuck undeletable.
   const deleting = await groupRef.transaction((current) => {
+    if (current === null) return null;
     if (!isRecord(current)) return;
     if (
       current.ownerUserId !== input.userId ||
@@ -703,23 +706,33 @@ function activeInviteRecord(
 
 async function reserveInviteUse(inviteId: string, inviteCode: string, now: number) {
   const hash = hashInviteCode(inviteCode);
-  const result = await getRealtimeDatabase()
-    .ref(`groupInvites/${inviteId}`)
-    .transaction((current) => {
-      if (!isRecord(current)) return;
-      const usedCount = readNumber(current.usedCount, 0);
-      const maxUsesValue = readNumber(current.maxUses, 0);
-      const expiresAt = readNumber(current.expiresAt, 0);
-      if (
-        current.inviteCodeHash !== hash ||
-        current.revokedAt != null ||
-        expiresAt <= now ||
-        usedCount >= maxUsesValue
-      ) {
-        return;
-      }
-      return { ...current, usedCount: usedCount + 1 };
-    });
+  const inviteRef = getRealtimeDatabase().ref(`groupInvites/${inviteId}`);
+  const snapshot = await inviteRef.get();
+  const value = snapshot.val();
+  if (!isRecord(value)) {
+    throw new HttpError(409, "invite_unavailable", "Invite is expired or fully used.");
+  }
+
+  const maxUsesValue = readNumber(value.maxUses, 0);
+  const expiresAt = readNumber(value.expiresAt, 0);
+  if (
+    value.inviteCodeHash !== hash ||
+    value.revokedAt != null ||
+    expiresAt <= now ||
+    maxUsesValue <= 0
+  ) {
+    throw new HttpError(409, "invite_unavailable", "Invite is expired or fully used.");
+  }
+
+  // RTDB transactions always fire once with null first (even right after get()).
+  // Returning undefined on that null aborts with no retry — every join then
+  // looked “fully used” while usedCount stayed 0. Increment the counter leaf
+  // and treat null as 0 so the first callback cannot abort the reservation.
+  const result = await inviteRef.child("usedCount").transaction((current) => {
+    const usedCount = current == null ? 0 : readNumber(current, 0);
+    if (usedCount >= maxUsesValue) return;
+    return usedCount + 1;
+  });
   if (!result.committed) {
     throw new HttpError(409, "invite_unavailable", "Invite is expired or fully used.");
   }
@@ -728,9 +741,10 @@ async function reserveInviteUse(inviteId: string, inviteCode: string, now: numbe
 async function releaseInviteUse(inviteId: string) {
   await getRealtimeDatabase()
     .ref(`groupInvites/${inviteId}/usedCount`)
-    .transaction((current) =>
-      current == null ? undefined : Math.max(readNumber(current, 1) - 1, 0)
-    );
+    .transaction((current) => {
+      const usedCount = current == null ? 0 : readNumber(current, 0);
+      return Math.max(usedCount - 1, 0);
+    });
 }
 
 async function acquireGroupActivityLock(
