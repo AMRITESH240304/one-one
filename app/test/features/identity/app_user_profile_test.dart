@@ -62,4 +62,13 @@ void main() {
       isFalse,
     );
   });
+
+  test('preset avatar is persisted without a photo upload', () {
+    final avatar = profile().copyWith(
+      avatarAsset: 'assets/avatars/avatar_01.png',
+    );
+
+    expect(avatar.toJson()['avatarAsset'], 'assets/avatars/avatar_01.png');
+    expect(avatar.hasProfilePhoto, isTrue);
+  });
 }

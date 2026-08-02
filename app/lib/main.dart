@@ -26,10 +26,6 @@ Future<void> main() async {
 
     await Firebase.initializeApp();
     debugPrint('[Firebase] initialized');
-    await CrashlyticsService.initialize();
-    await AnalyticsService.initialize();
-    await PerformanceService.initialize();
-
     FlutterError.onError = (details) {
       FlutterError.presentError(details);
       unawaited(CrashlyticsService.recordFlutterFatalError(details));
@@ -47,6 +43,10 @@ Future<void> main() async {
     };
 
     runApp(const OneOneApp());
+    // Firebase Auth is needed before the first frame; telemetry is not.
+    unawaited(CrashlyticsService.initialize());
+    unawaited(AnalyticsService.initialize());
+    unawaited(PerformanceService.initialize());
   }, (error, stack) {
     debugPrint('[Crashlytics] zone error: $error');
     unawaited(

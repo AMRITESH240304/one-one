@@ -11,13 +11,19 @@ class GoogleAuthScreen extends StatefulWidget {
   State<GoogleAuthScreen> createState() => _GoogleAuthScreenState();
 }
 
-class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
+class _GoogleAuthScreenState extends State<GoogleAuthScreen>
+    with SingleTickerProviderStateMixin {
   final IdentityRepository _identityRepository = IdentityRepository();
+  late final AnimationController _logoController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 600),
+  )..forward();
   bool _isSigningIn = false;
   String? _errorMessage;
 
   @override
   void dispose() {
+    _logoController.dispose();
     _identityRepository.dispose();
     super.dispose();
   }
@@ -61,6 +67,10 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final logoAnimation = CurvedAnimation(
+      parent: _logoController,
+      curve: Curves.easeOutCubic,
+    );
     return Scaffold(
       backgroundColor: const Color(0xffF8BE03),
       body: SafeArea(
@@ -69,7 +79,21 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
           child: Column(
             children: [
               const Spacer(flex: 2),
-              Image.asset('assets/logo.png', width: 172.w, fit: BoxFit.contain),
+              FadeTransition(
+                opacity: logoAnimation,
+                child: AnimatedBuilder(
+                  animation: logoAnimation,
+                  child: Image.asset(
+                    'assets/logo.png',
+                    width: 172.w,
+                    fit: BoxFit.contain,
+                  ),
+                  builder: (context, child) => Transform.translate(
+                    offset: Offset(0, 28.h * (1 - logoAnimation.value)),
+                    child: child,
+                  ),
+                ),
+              ),
               SizedBox(height: 36.h),
               Text(
                 'Welcome to One One',
@@ -103,43 +127,9 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
                 ),
                 SizedBox(height: 14.h),
               ],
-              SizedBox(
-                width: double.infinity,
-                height: 54.h,
-                child: ElevatedButton.icon(
-                  onPressed: _isSigningIn ? null : _continueWithGoogle,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: const Color(0xff384047),
-                    disabledBackgroundColor: Colors.white70,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(27.r),
-                    ),
-                  ),
-                  icon: _isSigningIn
-                      ? SizedBox.square(
-                          dimension: 19.w,
-                          child: const CircularProgressIndicator(
-                            strokeWidth: 2.3,
-                            color: Color(0xff384047),
-                          ),
-                        )
-                      : Text(
-                          'G',
-                          style: TextStyle(
-                            fontSize: 19.sp,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                  label: Text(
-                    _isSigningIn ? 'Signing in…' : 'Continue with Google',
-                    style: TextStyle(
-                      fontSize: 15.sp,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
+              _GoogleSignInButton(
+                busy: _isSigningIn,
+                onTap: _continueWithGoogle,
               ),
               SizedBox(height: 22.h),
               Text(
@@ -156,4 +146,65 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
       ),
     );
   }
+}
+
+class _GoogleSignInButton extends StatefulWidget {
+  const _GoogleSignInButton({required this.busy, required this.onTap});
+  final bool busy;
+  final VoidCallback onTap;
+  @override
+  State<_GoogleSignInButton> createState() => _GoogleSignInButtonState();
+}
+
+class _GoogleSignInButtonState extends State<_GoogleSignInButton> {
+  bool _pressed = false;
+  @override
+  Widget build(BuildContext context) => AnimatedScale(
+    scale: _pressed ? .96 : 1,
+    duration: const Duration(milliseconds: 100),
+    child: Material(
+      color: widget.busy ? Colors.white70 : Colors.white,
+      borderRadius: BorderRadius.circular(27.r),
+      child: InkWell(
+        onTap: widget.busy ? null : widget.onTap,
+        onTapDown: widget.busy ? null : (_) => setState(() => _pressed = true),
+        onTapUp: widget.busy ? null : (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        borderRadius: BorderRadius.circular(27.r),
+        child: SizedBox(
+          width: double.infinity,
+          height: 54.h,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              widget.busy
+                  ? SizedBox.square(
+                      dimension: 19.w,
+                      child: const CircularProgressIndicator(
+                        strokeWidth: 2.3,
+                        color: Color(0xff384047),
+                      ),
+                    )
+                  : Text(
+                      'G',
+                      style: TextStyle(
+                        fontSize: 19.sp,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+              SizedBox(width: 10.w),
+              Text(
+                widget.busy ? 'Signing in…' : 'Continue with Google',
+                style: TextStyle(
+                  color: const Color(0xff384047),
+                  fontSize: 15.sp,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }

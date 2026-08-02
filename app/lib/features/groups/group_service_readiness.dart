@@ -31,9 +31,7 @@ bool groupMembershipMatchesSnapshot({
   if (snapshotValue is! Map<Object?, Object?>) return members.isEmpty;
   if (snapshotValue.length != members.length) return false;
 
-  final currentByUserId = {
-    for (final member in members) member.userId: member,
-  };
+  final currentByUserId = {for (final member in members) member.userId: member};
   for (final entry in snapshotValue.entries) {
     final raw = entry.value;
     final current = currentByUserId[entry.key.toString()];

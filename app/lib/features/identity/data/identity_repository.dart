@@ -91,6 +91,7 @@ class IdentityRepository {
         lastSeenAt: now,
         profilePhotoUrl: _cachedSession?.user.profilePhotoUrl,
         profilePhotoBase64: _cachedSession?.user.profilePhotoBase64,
+        avatarAsset: _cachedSession?.user.avatarAsset,
       ),
       device: UserDeviceRecord(
         deviceId: localDevice.deviceId,
@@ -328,6 +329,7 @@ class IdentityRepository {
     await _database.ref('users/${user.uid}').update({
       'profilePhotoUrl': photoUrl,
       'profilePhotoBase64': null,
+      'avatarAsset': null,
       'updatedAt': now,
       'lastSeenAt': now,
     });
@@ -338,6 +340,7 @@ class IdentityRepository {
         user: session.user.copyWith(
           profilePhotoUrl: photoUrl,
           clearProfilePhotoBase64: true,
+          avatarAsset: null,
           updatedAt: now,
           lastSeenAt: now,
         ),
@@ -352,6 +355,40 @@ class IdentityRepository {
     }
 
     return ensureIdentity();
+  }
+
+  Future<IdentitySession> updatePresetAvatar(String assetPath) async {
+    if (!assetPath.startsWith('assets/avatars')) {
+      throw ArgumentError.value(assetPath, 'assetPath', 'Unsupported avatar.');
+    }
+    final user = _auth.currentUser;
+    if (user == null) {
+      throw StateError('Cannot update profile photo before sign-in.');
+    }
+    final now = _nowSeconds();
+    await _database.ref('users/${user.uid}').update({
+      'avatarAsset': assetPath,
+      'profilePhotoUrl': null,
+      'profilePhotoBase64': null,
+      'updatedAt': now,
+      'lastSeenAt': now,
+    });
+    final session = _cachedSession;
+    if (session == null) return ensureIdentity();
+    final updatedSession = IdentitySession(
+      user: session.user.copyWith(
+        avatarAsset: assetPath,
+        clearProfilePhotoUrl: true,
+        clearProfilePhotoBase64: true,
+        updatedAt: now,
+        lastSeenAt: now,
+      ),
+      device: session.device,
+      settings: session.settings,
+    );
+    _publishSession(updatedSession);
+    unawaited(AnalyticsService.logProfileUpdated(field: 'preset_avatar'));
+    return updatedSession;
   }
 
   Future<User> signInWithGoogle() async {

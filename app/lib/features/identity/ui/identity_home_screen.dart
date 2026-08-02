@@ -2554,6 +2554,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           displayName: _session.user.displayName,
           profilePhotoUrl: _session.user.profilePhotoUrl,
           profilePhotoBase64: _session.user.profilePhotoBase64,
+          avatarAsset: _session.user.avatarAsset,
           availability: group.groupId == _onlineSession?.groupId
               ? selfAvailability
               : MemberAvailability.away,
@@ -2602,6 +2603,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             members: _displayMembers,
             fallbackPhotoUrl: _session.user.profilePhotoUrl,
             fallbackPhotoBase64: _session.user.profilePhotoBase64,
+            fallbackAvatarAsset: _session.user.avatarAsset,
             accent: accent,
           ),
           SafeArea(
@@ -2696,9 +2698,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                             talkActive:
                                 _talkSession != null ||
                                 (_isCallMode &&
-                                    _speakingUserIds.contains(
-                                      _session.userId,
-                                    )),
+                                    _speakingUserIds.contains(_session.userId)),
                             talkBusy: _talkBusy,
                             accent: accent,
                             onSelected: (index) {
@@ -2799,6 +2799,7 @@ class _VoicePictureInPictureView extends StatelessWidget {
                       child: ProfileAvatar(
                         profilePhotoUrl: member.profilePhotoUrl,
                         profilePhotoBase64: member.profilePhotoBase64,
+                        avatarAsset: member.avatarAsset,
                         radius: avatarRadius,
                       ),
                     ),
@@ -2854,12 +2855,14 @@ class _HomeBackdrop extends StatelessWidget {
     required this.members,
     required this.fallbackPhotoUrl,
     required this.fallbackPhotoBase64,
+    required this.fallbackAvatarAsset,
     required this.accent,
   });
 
   final List<GroupMemberSummary> members;
   final String? fallbackPhotoUrl;
   final String? fallbackPhotoBase64;
+  final String? fallbackAvatarAsset;
   final Color accent;
 
   bool _memberHasPhoto(GroupMemberSummary member) {
@@ -2893,6 +2896,7 @@ class _HomeBackdrop extends StatelessWidget {
                     members: members,
                     fallbackPhotoUrl: fallbackPhotoUrl,
                     fallbackPhotoBase64: fallbackPhotoBase64,
+                    fallbackAvatarAsset: fallbackAvatarAsset,
                   ),
                 ),
               ),
@@ -2924,6 +2928,7 @@ class _BackdropMemberCollage extends StatelessWidget {
     required this.members,
     required this.fallbackPhotoUrl,
     required this.fallbackPhotoBase64,
+    required this.fallbackAvatarAsset,
   });
 
   static const int _maxTiles = 9;
@@ -2931,6 +2936,7 @@ class _BackdropMemberCollage extends StatelessWidget {
   final List<GroupMemberSummary> members;
   final String? fallbackPhotoUrl;
   final String? fallbackPhotoBase64;
+  final String? fallbackAvatarAsset;
 
   int _columnsFor(int count) {
     if (count <= 1) return 1;
@@ -2945,6 +2951,7 @@ class _BackdropMemberCollage extends StatelessWidget {
     return ProfileImage(
       profilePhotoUrl: member.profilePhotoUrl,
       profilePhotoBase64: member.profilePhotoBase64,
+      avatarAsset: member.avatarAsset,
       backgroundColor: const Color(0xff1a1a1a),
       fallback: Text(
         initial,
@@ -2963,6 +2970,7 @@ class _BackdropMemberCollage extends StatelessWidget {
       return ProfileImage(
         profilePhotoUrl: fallbackPhotoUrl,
         profilePhotoBase64: fallbackPhotoBase64,
+        avatarAsset: fallbackAvatarAsset,
         backgroundColor: const Color(0xff1a1a1a),
         fallback: const Icon(
           Icons.person_outline,
@@ -3288,6 +3296,7 @@ class _FriendsStrip extends StatelessWidget {
                   name: friend.displayName,
                   profilePhotoUrl: friend.profilePhotoUrl,
                   profilePhotoBase64: friend.profilePhotoBase64,
+                  avatarAsset: friend.avatarAsset,
                   availability:
                       availability[friend.userId] ?? MemberAvailability.away,
                   isSpeaking:
@@ -3314,6 +3323,7 @@ class _FriendChip extends StatelessWidget {
     required this.name,
     required this.profilePhotoUrl,
     required this.profilePhotoBase64,
+    required this.avatarAsset,
     required this.availability,
     required this.isSpeaking,
     required this.handRaised,
@@ -3323,6 +3333,7 @@ class _FriendChip extends StatelessWidget {
   final String name;
   final String? profilePhotoUrl;
   final String? profilePhotoBase64;
+  final String? avatarAsset;
   final MemberAvailability availability;
   final bool isSpeaking;
   final bool handRaised;
@@ -3368,6 +3379,7 @@ class _FriendChip extends StatelessWidget {
                 child: ProfileAvatar(
                   profilePhotoUrl: profilePhotoUrl,
                   profilePhotoBase64: profilePhotoBase64,
+                  avatarAsset: avatarAsset,
                   radius: 26.w,
                   backgroundColor: const Color(0xff2a2a2a),
                   fallback: Text(
@@ -3655,17 +3667,27 @@ class _CarouselCaption extends StatelessWidget {
             fontWeight: FontWeight.w500,
           ),
         ),
-        SizedBox(height: 8.h),
-        SizedBox(
-          height: 44,
+        SizedBox(height: 10.h),
+        Container(
+          height: 48,
+          padding: EdgeInsets.symmetric(horizontal: 8.w),
+          decoration: BoxDecoration(
+            color: const Color(0xd91a1a1a),
+            borderRadius: BorderRadius.circular(24.r),
+            border: Border.all(color: Colors.white12),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black38,
+                blurRadius: 16,
+                offset: Offset(0, 6),
+              ),
+            ],
+          ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Visibility(
                 visible: showNudge,
-                maintainSize: true,
-                maintainAnimation: true,
-                maintainState: true,
                 child: _RowActionIcon(
                   tooltip: 'Nudge offline friends',
                   icon: Icons.notifications_active_rounded,
@@ -4175,6 +4197,7 @@ class _MainAvatarCircle extends StatelessWidget {
               members: item.members,
               fallbackPhotoUrl: item.profilePhotoUrl,
               fallbackPhotoBase64: item.profilePhotoBase64,
+              fallbackAvatarAsset: item.avatarAsset,
               tileSize: size,
             ),
             Align(
@@ -4237,6 +4260,7 @@ class _MemberPhotoCollage extends StatelessWidget {
     required this.members,
     required this.fallbackPhotoUrl,
     required this.fallbackPhotoBase64,
+    required this.fallbackAvatarAsset,
     required this.tileSize,
   });
 
@@ -4245,6 +4269,7 @@ class _MemberPhotoCollage extends StatelessWidget {
   final List<GroupMemberSummary> members;
   final String? fallbackPhotoUrl;
   final String? fallbackPhotoBase64;
+  final String? fallbackAvatarAsset;
   final double tileSize;
 
   @override
@@ -4253,6 +4278,7 @@ class _MemberPhotoCollage extends StatelessWidget {
       return ProfileImage(
         profilePhotoUrl: fallbackPhotoUrl,
         profilePhotoBase64: fallbackPhotoBase64,
+        avatarAsset: fallbackAvatarAsset,
         backgroundColor: const Color(0xff2a2a2a),
         fadeInDuration: Duration.zero,
         fallback: Icon(
@@ -4273,6 +4299,7 @@ class _MemberPhotoCollage extends StatelessWidget {
       return ProfileImage(
         profilePhotoUrl: member.profilePhotoUrl,
         profilePhotoBase64: member.profilePhotoBase64,
+        avatarAsset: member.avatarAsset,
         backgroundColor: const Color(0xff2a2a2a),
         fadeInDuration: Duration.zero,
         fallback: Text(
@@ -4485,6 +4512,7 @@ class _CarouselItem {
     required this.availability,
     this.profilePhotoUrl,
     this.profilePhotoBase64,
+    this.avatarAsset,
     this.members = const [],
   });
 
@@ -4493,6 +4521,7 @@ class _CarouselItem {
     required String displayName,
     required String? profilePhotoUrl,
     required String? profilePhotoBase64,
+    required String? avatarAsset,
     required MemberAvailability availability,
     List<GroupMemberSummary> members = const [],
   }) {
@@ -4501,6 +4530,7 @@ class _CarouselItem {
       displayName: displayName,
       profilePhotoUrl: profilePhotoUrl,
       profilePhotoBase64: profilePhotoBase64,
+      avatarAsset: avatarAsset,
       availability: availability,
       members: members,
     );
@@ -4511,6 +4541,7 @@ class _CarouselItem {
   final MemberAvailability availability;
   final String? profilePhotoUrl;
   final String? profilePhotoBase64;
+  final String? avatarAsset;
 
   /// Group members loaded for this group (only populated for the
   /// currently-selected/focused group). Used to render a photo collage on

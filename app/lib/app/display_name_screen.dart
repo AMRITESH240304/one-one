@@ -56,9 +56,9 @@ class _DisplayNameScreenState extends State<DisplayNameScreen> {
       await widget.onComplete();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
       setState(() => _saving = false);
     }
   }

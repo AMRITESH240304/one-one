@@ -100,18 +100,18 @@ class _WaitingForGroupMembersScreenState
     } catch (_) {
       await Clipboard.setData(ClipboardData(text: widget.invite.inviteUrl));
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Invite link copied')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Invite link copied')));
     }
   }
 
   Future<void> _copyPin() async {
     await Clipboard.setData(ClipboardData(text: widget.invite.inviteCode));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Fallback PIN copied')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Fallback PIN copied')));
   }
 
   Route<void> _slideUpJoinRoute() {

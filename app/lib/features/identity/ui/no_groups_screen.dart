@@ -30,15 +30,12 @@ class NoGroupsScreen extends StatelessWidget {
         );
       },
       transitionsBuilder: (context, animation, secondaryAnimation, child) {
-        final offset = Tween<Offset>(
-          begin: const Offset(0, 1),
-          end: Offset.zero,
-        ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic));
+        final offset =
+            Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero).animate(
+              CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
+            );
 
-        return SlideTransition(
-          position: offset,
-          child: child,
-        );
+        return SlideTransition(position: offset, child: child);
       },
     );
   }
@@ -49,6 +46,12 @@ class NoGroupsScreen extends StatelessWidget {
 
   void _openJoinGroup(BuildContext context) {
     Navigator.of(context).push(_slideUpRoute(GroupActionMode.joinByPin));
+  }
+
+  void _showGroupRequired(BuildContext context) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Join or create a group first')),
+    );
   }
 
   @override
@@ -83,10 +86,17 @@ class NoGroupsScreen extends StatelessWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      const Icon(
+                        Icons.groups_rounded,
+                        size: 92,
+                        color: Color(0xffF8BE03),
+                      ),
+                      SizedBox(height: 22.h),
                       Text(
                         'Invite at least one friend to get started',
                         textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                        style: Theme.of(context).textTheme.headlineLarge
+                            ?.copyWith(
                               fontWeight: FontWeight.w700,
                               color: Colors.white,
                             ),
@@ -95,23 +105,43 @@ class NoGroupsScreen extends StatelessWidget {
                       Text(
                         'add your besties, the ones you talk to everyday 🫶',
                         textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                              color: Colors.white,
-                            ),
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodyLarge?.copyWith(color: Colors.white),
                       ),
-                      SizedBox(height: 42.h),
-                      SizedBox(
-                        width: 96.w,
-                        height: 96.w,
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            shape: const CircleBorder(),
-                            backgroundColor: Colors.white,
-                            padding: EdgeInsets.zero,
-                          ),
-                          onPressed: () => _openCreateGroup(context),
-                          child: Icon(Icons.add, size: 44.w, color: Colors.black),
+                      SizedBox(height: 28.h),
+                      FilledButton.icon(
+                        onPressed: () => _openCreateGroup(context),
+                        icon: const Icon(Icons.group_add_rounded),
+                        label: const Text('Create Group'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xffF8BE03),
+                          foregroundColor: Colors.black,
                         ),
+                      ),
+                      SizedBox(height: 10.h),
+                      OutlinedButton.icon(
+                        onPressed: () => _showGroupRequired(context),
+                        icon: const Icon(Icons.share_outlined),
+                        label: const Text('Share an invite'),
+                      ),
+                      SizedBox(height: 26.h),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _DisabledControl(
+                            icon: Icons.notifications_active_rounded,
+                            onTap: () => _showGroupRequired(context),
+                          ),
+                          _DisabledControl(
+                            icon: Icons.back_hand_rounded,
+                            onTap: () => _showGroupRequired(context),
+                          ),
+                          _DisabledControl(
+                            icon: Icons.keyboard_rounded,
+                            onTap: () => _showGroupRequired(context),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -122,9 +152,9 @@ class NoGroupsScreen extends StatelessWidget {
                   Text(
                     'Have a group already? Use the PIN from a friend.',
                     textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                          color: Colors.white,
-                        ),
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodyLarge?.copyWith(color: Colors.white),
                   ),
                   SizedBox(height: 18.h),
                   SizedBox(
@@ -148,4 +178,16 @@ class NoGroupsScreen extends StatelessWidget {
       ),
     );
   }
+}
+
+class _DisabledControl extends StatelessWidget {
+  const _DisabledControl({required this.icon, required this.onTap});
+  final IconData icon;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) => IconButton(
+    tooltip: 'Join or create a group first',
+    onPressed: onTap,
+    icon: Icon(icon, color: Colors.white30),
+  );
 }

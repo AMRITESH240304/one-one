@@ -15,6 +15,7 @@ class ProfileImage extends StatelessWidget {
     super.key,
     this.profilePhotoUrl,
     this.profilePhotoBase64,
+    this.avatarAsset,
     this.backgroundColor,
     this.fallback,
     this.fit = BoxFit.cover,
@@ -23,6 +24,7 @@ class ProfileImage extends StatelessWidget {
 
   final String? profilePhotoUrl;
   final String? profilePhotoBase64;
+  final String? avatarAsset;
   final Color? backgroundColor;
   final Widget? fallback;
   final BoxFit fit;
@@ -54,6 +56,14 @@ class ProfileImage extends StatelessWidget {
             return Center(child: resolvedFallback);
           },
         ),
+      );
+    }
+
+    final asset = avatarAsset?.trim();
+    if (asset != null && asset.startsWith('assets/avatars')) {
+      return ColoredBox(
+        color: resolvedBackgroundColor,
+        child: Image.asset(asset, fit: fit),
       );
     }
 
@@ -91,6 +101,7 @@ class ProfileAvatar extends StatelessWidget {
     super.key,
     this.profilePhotoUrl,
     this.profilePhotoBase64,
+    this.avatarAsset,
     required this.radius,
     this.backgroundColor,
     this.fallback,
@@ -98,6 +109,7 @@ class ProfileAvatar extends StatelessWidget {
 
   final String? profilePhotoUrl;
   final String? profilePhotoBase64;
+  final String? avatarAsset;
   final double radius;
   final Color? backgroundColor;
   final Widget? fallback;
@@ -111,6 +123,7 @@ class ProfileAvatar extends StatelessWidget {
         child: ProfileImage(
           profilePhotoUrl: profilePhotoUrl,
           profilePhotoBase64: profilePhotoBase64,
+          avatarAsset: avatarAsset,
           backgroundColor: backgroundColor,
           fallback: fallback,
         ),

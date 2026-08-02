@@ -337,7 +337,8 @@ export async function listGroupMembers(input: GroupMemberActionInput) {
             profilePhotoUrl:
               user.child("profilePhotoUrl").val()?.toString() ?? null,
             profilePhotoBase64:
-              user.child("profilePhotoBase64").val()?.toString() ?? null
+              user.child("profilePhotoBase64").val()?.toString() ?? null,
+            avatarAsset: user.child("avatarAsset").val()?.toString() ?? null
           };
         }
       )

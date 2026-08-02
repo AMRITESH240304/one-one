@@ -1,6 +1,3 @@
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter/widgets.dart';
-
 import '../../groups/data/group_repository.dart';
 import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
@@ -115,25 +112,4 @@ class IdentityHomeBootstrap {
     );
   }
 
-  Future<void> precacheMemberPhotos(BuildContext context) async {
-    final urls = members
-        .map((member) => member.profilePhotoUrl?.trim())
-        .whereType<String>()
-        .where((url) => url.isNotEmpty)
-        .toSet();
-
-    await Future.wait(
-      urls.map((url) async {
-        try {
-          await precacheImage(
-            CachedNetworkImageProvider(url),
-            context,
-            onError: (error, stackTrace) {},
-          );
-        } catch (_) {
-          // Broken member photos fall back to initials in ProfileAvatar.
-        }
-      }),
-    );
-  }
 }

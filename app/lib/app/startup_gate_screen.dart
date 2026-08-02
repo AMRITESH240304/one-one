@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -169,14 +167,7 @@ class _StartupGateScreenState extends State<StartupGateScreen>
 
   Future<bool> _requiredPermissionsGranted() async {
     final mic = await Permission.microphone.isGranted;
-    final notifications = await Permission.notification.isGranted;
-    if (!mic || !notifications) return false;
-    if (!Platform.isAndroid) return true;
-    try {
-      return await FlutterForegroundTask.isIgnoringBatteryOptimizations;
-    } catch (_) {
-      return false;
-    }
+    return mic;
   }
 
   Future<void> _finishReturningSetup(IdentitySession session) async {
@@ -225,11 +216,6 @@ class _StartupGateScreenState extends State<StartupGateScreen>
 
     logStartupMilestone('home prefetch complete', phase);
     if (!mounted) return;
-
-    if (bootstrap.hasGroups) {
-      await bootstrap.precacheMemberPhotos(context);
-      if (!mounted) return;
-    }
 
     if (!bootstrap.hasGroups && bootstrap.loadError == null) {
       setState(() {

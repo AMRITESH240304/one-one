@@ -30,6 +30,11 @@ class OneOneApp extends StatelessWidget {
           title: 'One One',
           debugShowCheckedModeBanner: false,
           navigatorObservers: [AnalyticsService.observer],
+          routes: {
+            '/auth': (_) => const WithForegroundTask(
+              child: _AuthSessionLifecycle(child: _FirebaseGate()),
+            ),
+          },
           builder: (context, child) {
             return ScreenUtilInit(
               designSize: const Size(393, 873),

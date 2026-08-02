@@ -10,6 +10,7 @@ class AppUserProfile {
     this.setupCompleted = false,
     this.profilePhotoUrl,
     this.profilePhotoBase64,
+    this.avatarAsset,
   });
 
   final String userId;
@@ -22,6 +23,7 @@ class AppUserProfile {
   final bool setupCompleted;
   final String? profilePhotoUrl;
   final String? profilePhotoBase64;
+  final String? avatarAsset;
 
   bool get hasProfilePhoto {
     final url = profilePhotoUrl?.trim();
@@ -30,7 +32,9 @@ class AppUserProfile {
     }
 
     final encodedPhoto = profilePhotoBase64?.trim();
-    return encodedPhoto != null && encodedPhoto.isNotEmpty;
+    if (encodedPhoto != null && encodedPhoto.isNotEmpty) return true;
+    final avatar = avatarAsset?.trim();
+    return avatar != null && avatar.isNotEmpty;
   }
 
   Map<String, Object?> toJson() {
@@ -52,6 +56,8 @@ class AppUserProfile {
       data['profilePhotoBase64'] = profilePhotoBase64;
     }
 
+    if (avatarAsset != null) data['avatarAsset'] = avatarAsset;
+
     return data;
   }
 
@@ -67,6 +73,7 @@ class AppUserProfile {
       setupCompleted: data['setupCompleted'] == true,
       profilePhotoUrl: data['profilePhotoUrl']?.toString(),
       profilePhotoBase64: data['profilePhotoBase64']?.toString(),
+      avatarAsset: data['avatarAsset']?.toString(),
     );
   }
 
@@ -78,6 +85,7 @@ class AppUserProfile {
     bool? setupCompleted,
     String? profilePhotoUrl,
     String? profilePhotoBase64,
+    String? avatarAsset,
     bool clearProfilePhotoUrl = false,
     bool clearProfilePhotoBase64 = false,
   }) {
@@ -96,6 +104,7 @@ class AppUserProfile {
       profilePhotoBase64: clearProfilePhotoBase64
           ? null
           : (profilePhotoBase64 ?? this.profilePhotoBase64),
+      avatarAsset: avatarAsset ?? this.avatarAsset,
     );
   }
 }

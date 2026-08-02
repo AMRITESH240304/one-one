@@ -69,10 +69,14 @@ class GroupRepository {
     final rawGroups = response['groups'];
     if (rawGroups is! List) return const [];
 
-    return rawGroups.whereType<Map>().map((raw) {
-      final groupId = raw['groupId']?.toString() ?? '';
-      return GroupSummary.fromJson(groupId, raw.cast<Object?, Object?>());
-    }).where((group) => group.groupId.isNotEmpty).toList();
+    return rawGroups
+        .whereType<Map>()
+        .map((raw) {
+          final groupId = raw['groupId']?.toString() ?? '';
+          return GroupSummary.fromJson(groupId, raw.cast<Object?, Object?>());
+        })
+        .where((group) => group.groupId.isNotEmpty)
+        .toList();
   }
 
   Future<List<GroupMemberSummary>> loadGroupMembers(String groupId) async {
@@ -82,16 +86,21 @@ class GroupRepository {
     final rawMembers = response['members'];
     if (rawMembers is! List) return const [];
 
-    return rawMembers.whereType<Map>().map((raw) {
-      return GroupMemberSummary(
-        userId: raw['userId']?.toString() ?? '',
-        displayName: raw['displayName']?.toString() ?? 'Member',
-        role: raw['role']?.toString() ?? 'member',
-        memberState: raw['memberState']?.toString() ?? 'active',
-        profilePhotoUrl: raw['profilePhotoUrl']?.toString(),
-        profilePhotoBase64: raw['profilePhotoBase64']?.toString(),
-      );
-    }).where((member) => member.userId.isNotEmpty).toList();
+    return rawMembers
+        .whereType<Map>()
+        .map((raw) {
+          return GroupMemberSummary(
+            userId: raw['userId']?.toString() ?? '',
+            displayName: raw['displayName']?.toString() ?? 'Member',
+            role: raw['role']?.toString() ?? 'member',
+            memberState: raw['memberState']?.toString() ?? 'active',
+            profilePhotoUrl: raw['profilePhotoUrl']?.toString(),
+            profilePhotoBase64: raw['profilePhotoBase64']?.toString(),
+            avatarAsset: raw['avatarAsset']?.toString(),
+          );
+        })
+        .where((member) => member.userId.isNotEmpty)
+        .toList();
   }
 
   Future<int> countActiveMembers(String groupId) async {
@@ -130,8 +139,6 @@ class GroupRepository {
   }
 
   Future<void> deleteGroup(String groupId) async {
-    await _apiClient.deleteJson(
-      '/v1/groups/${Uri.encodeComponent(groupId)}',
-    );
+    await _apiClient.deleteJson('/v1/groups/${Uri.encodeComponent(groupId)}');
   }
 }

@@ -339,8 +339,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       _persistedAccentColorKey = session.settings.accentColorKey;
       _persistedHapticsEnabled = session.settings.hapticsEnabled;
-      _persistedAudioOutputPreference =
-          session.settings.audioOutputPreference;
+      _persistedAudioOutputPreference = session.settings.audioOutputPreference;
       _hasUnsavedAccentPreview = false;
       AccentThemeController.setAccentKey(session.settings.accentColorKey);
       if (!mounted) return;
@@ -382,7 +381,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       await widget.identityRepository.signOut();
       if (!mounted) return;
-      Navigator.of(context).popUntil((route) => route.isFirst);
+      Navigator.of(context).pushNamedAndRemoveUntil('/auth', (_) => false);
     } catch (error) {
       if (!mounted) return;
       setState(() => _message = error.toString());
@@ -408,7 +407,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       await widget.identityRepository.deleteAccount();
       if (!mounted) return;
-      Navigator.of(context).popUntil((route) => route.isFirst);
+      Navigator.of(context).pushNamedAndRemoveUntil('/auth', (_) => false);
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -532,12 +531,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: SafeArea(
           top: false,
           child: ListView(
-            padding: EdgeInsets.fromLTRB(
-              20,
-              8,
-              20,
-              showSaveButton ? 112 : 32,
-            ),
+            padding: EdgeInsets.fromLTRB(20, 8, 20, showSaveButton ? 112 : 32),
             children: [
               _ProfileHeader(
                 session: _session,
@@ -548,8 +542,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onEditProfile: _openProfileEditor,
               ),
               const SizedBox(height: 30),
-              if (widget.groupName != null &&
-                  widget.onManageGroup != null) ...[
+              if (widget.groupName != null && widget.onManageGroup != null) ...[
                 const _SectionTitle('Group'),
                 const SizedBox(height: 12),
                 _SettingsSurface(
@@ -815,6 +808,7 @@ class _ProfileHeader extends StatelessWidget {
               child: ProfileAvatar(
                 profilePhotoUrl: session.user.profilePhotoUrl,
                 profilePhotoBase64: session.user.profilePhotoBase64,
+                avatarAsset: session.user.avatarAsset,
                 radius: 48,
                 backgroundColor: const Color(0xff2b2b2b),
                 fallback: const Icon(

@@ -28,7 +28,7 @@ class MainActivity : FlutterFragmentActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         VoiceNudgeNotifications.ensureChannels(this)
-        logFirebaseRuntimeConfiguration()
+        if (BuildConfig.DEBUG) logFirebaseRuntimeConfiguration()
         voiceNudgeChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             VoiceNudgeContract.flutterChannel,

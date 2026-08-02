@@ -478,6 +478,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                           avatar: ProfileAvatar(
                             profilePhotoUrl: friend.profilePhotoUrl,
                             profilePhotoBase64: friend.profilePhotoBase64,
+                            avatarAsset: friend.avatarAsset,
                             radius: 24.r,
                             fallback: Text(
                               friend.displayName.trim().isEmpty

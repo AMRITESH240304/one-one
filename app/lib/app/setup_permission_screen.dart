@@ -9,10 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 enum _SetupStep { mic, notification, background }
 
 class SetupPermissionScreen extends StatefulWidget {
-  const SetupPermissionScreen({
-    super.key,
-    required this.onComplete,
-  });
+  const SetupPermissionScreen({super.key, required this.onComplete});
 
   final Future<void> Function() onComplete;
 
@@ -84,8 +81,13 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
     if (!mounted) return;
 
     if (!status.isGranted) {
-      setState(() => _busy = false);
-      _showDeniedSnackBar('Notification permission is required.');
+      setState(() {
+        _busy = false;
+        _step = _SetupStep.background;
+      });
+      _showDeniedSnackBar(
+        'Notifications can be enabled later in Android Settings.',
+      );
       return;
     }
 
@@ -123,10 +125,8 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
     final granted = await _isBackgroundActivityAllowed();
     if (!mounted || _completed) return;
     if (!granted) {
-      setState(() => _busy = false);
-      _showDeniedSnackBar(
-        'Choose unrestricted background activity, then return to One One.',
-      );
+      _completed = true;
+      await widget.onComplete();
       return;
     }
 
@@ -154,9 +154,9 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
   }
 
   void _showDeniedSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -170,7 +170,7 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
             children: [
               SizedBox(height: 100.h),
               Text(
-                'let\'s get those\nover with:',
+                'one quick setup',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: Colors.white,
@@ -200,37 +200,41 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
                 },
                 child: switch (_step) {
                   _SetupStep.mic => _PermissionCard(
-                      key: const ValueKey('mic-card'),
-                      iconColor: const Color(0xffffb020),
-                      icon: Icons.mic_rounded,
-                      title: 'mic',
-                      subtitle: 'so your friends can hear you\nwhen you talk...',
-                      checked: _micGranted,
-                      onTap: _requestMicPermission,
-                    ),
+                    key: const ValueKey('mic-card'),
+                    iconColor: const Color(0xffffb020),
+                    icon: Icons.mic_rounded,
+                    title: 'Talk to your friends without them even being there',
+                    subtitle: 'Microphone access is required to continue.',
+                    checked: _micGranted,
+                    onTap: _requestMicPermission,
+                  ),
                   _SetupStep.notification => _PermissionCard(
-                      key: const ValueKey('notification-card'),
-                      iconColor: const Color(0xffff5a5f),
-                      icon: Icons.notifications_rounded,
-                      title: 'notifications',
-                      subtitle: 'know when your friends are\ntalking to you',
-                      checked: _notificationGranted,
-                      onTap: _requestNotificationPermission,
-                    ),
+                    key: const ValueKey('notification-card'),
+                    iconColor: const Color(0xffff5a5f),
+                    icon: Icons.notifications_rounded,
+                    title: 'Stay connected',
+                    subtitle:
+                        'Voice comes through even when the app isn\'t open.',
+                    checked: _notificationGranted,
+                    onTap: _requestNotificationPermission,
+                  ),
                   _SetupStep.background => _PermissionCard(
-                      key: const ValueKey('background-card'),
-                      iconColor: const Color(0xff4c8dff),
-                      icon: Icons.battery_saver_rounded,
-                      title: 'background activity',
-                      subtitle: 'receive nudges when one one\nisn\'t open',
-                      checked: _backgroundGranted,
-                      onTap: _requestBackgroundPermission,
-                    ),
+                    key: const ValueKey('background-card'),
+                    iconColor: const Color(0xff4c8dff),
+                    icon: Icons.battery_saver_rounded,
+                    title: 'Keep One One reliable',
+                    subtitle:
+                        'Allow background activity for dependable voice nudges.',
+                    checked: _backgroundGranted,
+                    onTap: _requestBackgroundPermission,
+                  ),
                 },
               ),
               SizedBox(height: 28.h),
               Text(
-                '*we need those for one one to work',
+                _step == _SetupStep.mic
+                    ? 'Microphone access is required to continue.'
+                    : 'You can update these later in Android Settings.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: const Color.fromRGBO(255, 255, 255, 0.72),
