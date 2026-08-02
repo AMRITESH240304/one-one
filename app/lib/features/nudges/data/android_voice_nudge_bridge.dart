@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../../../core/firebase/crashlytics_service.dart';
+
 class AndroidVoiceNudgeBridge {
   static const MethodChannel _channel = MethodChannel('app.oneone/voice_nudge');
   static final StreamController<void> _actionSignals =
@@ -52,16 +54,26 @@ class AndroidVoiceNudgeBridge {
         'length=${cleanToken.length} suffix=${_suffix(cleanToken)}',
       );
       return cleanToken;
-    } on PlatformException catch (error) {
+    } on PlatformException catch (error, stack) {
       debugPrint(
         '[OneOneFCM][DART-E2] Native registration failed '
         'code=${error.code} message=${error.message}',
       );
+      await CrashlyticsService.recordError(
+        error,
+        stack,
+        reason: 'fcm_native_registration_failed',
+      );
       rethrow;
-    } catch (error) {
+    } catch (error, stack) {
       debugPrint(
         '[OneOneFCM][DART-E3] Registration bridge failed '
         '${error.runtimeType}: $error',
+      );
+      await CrashlyticsService.recordError(
+        error,
+        stack,
+        reason: 'fcm_registration_bridge_failed',
       );
       rethrow;
     }

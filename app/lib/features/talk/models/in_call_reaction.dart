@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:characters/characters.dart';
+
 /// Ephemeral in-call emoji / short text sent over LiveKit data.
 class InCallReaction {
   const InCallReaction({
@@ -22,8 +24,10 @@ class InCallReaction {
   bool get isEmojiOnly {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return false;
-    // Rough: short payload with no spaces / letters / digits reads as emoji.
-    if (trimmed.length > 8) return false;
+    // Rough: a handful of emoji glyphs (grapheme clusters, so multi-codepoint
+    // system emoji like flags / ZWJ sequences / skin tones count as one) with
+    // no spaces / letters / digits reads as emoji.
+    if (trimmed.characters.length > 8) return false;
     return !RegExp(r'[A-Za-z0-9]').hasMatch(trimmed);
   }
 
@@ -76,8 +80,11 @@ class InCallReaction {
   static String _sanitizeText(String raw) {
     final collapsed = raw.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (collapsed.isEmpty) return '';
-    final runes = collapsed.runes;
-    if (runes.length <= maxTextLength) return collapsed;
-    return String.fromCharCodes(runes.take(maxTextLength));
+    // Truncate by grapheme cluster (not code unit / rune) so multi-codepoint
+    // system emoji - flags, ZWJ family emoji, skin-tone modifiers - are never
+    // split mid-glyph when a message is near the length limit.
+    final characters = collapsed.characters;
+    if (characters.length <= maxTextLength) return collapsed;
+    return characters.take(maxTextLength).toString();
   }
 }

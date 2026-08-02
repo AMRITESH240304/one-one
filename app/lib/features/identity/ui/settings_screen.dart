@@ -16,16 +16,22 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.session,
     required this.identityRepository,
+    this.groupName,
+    this.onManageGroup,
   });
 
   final IdentitySession session;
   final IdentityRepository identityRepository;
+  final String? groupName;
+  final Future<bool> Function()? onManageGroup;
 
   /// Opens settings with a dark fade/slide transition (no white flash).
   static Future<void> open(
     BuildContext context, {
     required IdentitySession session,
     required IdentityRepository identityRepository,
+    String? groupName,
+    Future<bool> Function()? onManageGroup,
   }) {
     return Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
@@ -41,6 +47,8 @@ class SettingsScreen extends StatefulWidget {
               child: SettingsScreen(
                 session: session,
                 identityRepository: identityRepository,
+                groupName: groupName,
+                onManageGroup: onManageGroup,
               ),
             ),
           );
@@ -452,6 +460,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Future<void> _openGroupManagement() async {
+    final groupEnded = await widget.onManageGroup?.call() ?? false;
+    if (groupEnded && mounted) Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) {
     final accent = accentColorForKey(_accentColorKey);
@@ -535,6 +548,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onEditProfile: _openProfileEditor,
               ),
               const SizedBox(height: 30),
+              if (widget.groupName != null &&
+                  widget.onManageGroup != null) ...[
+                const _SectionTitle('Group'),
+                const SizedBox(height: 12),
+                _SettingsSurface(
+                  padding: EdgeInsets.zero,
+                  children: [
+                    _NavigationRow(
+                      icon: Icons.group_outlined,
+                      label: 'Manage ${widget.groupName}',
+                      onTap: _openGroupManagement,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 28),
+              ],
               const _SectionTitle('Preferences'),
               const SizedBox(height: 12),
               _SettingsSurface(
@@ -712,7 +741,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   TextButton.icon(
                     onPressed: _accountActionInProgress ? null : _deleteAccount,
                     style: TextButton.styleFrom(
-                      minimumSize: const Size.fromHeight(46),
+                      minimumSize: const Size.fromHeight(48),
                       foregroundColor: const Color(0xffff8a80),
                     ),
                     icon: const Icon(Icons.delete_outline_rounded),
@@ -934,24 +963,33 @@ class _ColorSwatch extends StatelessWidget {
         button: true,
         selected: selected,
         label: '${option.label} accent',
-        child: InkWell(
-          onTap: enabled ? onSelected : null,
-          customBorder: const CircleBorder(),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: option.color,
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: selected ? Colors.white : Colors.transparent,
-                width: 3,
+        child: SizedBox.square(
+          dimension: 48,
+          child: InkWell(
+            onTap: enabled ? onSelected : null,
+            customBorder: const CircleBorder(),
+            child: Center(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: option.color,
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: selected ? Colors.white : Colors.transparent,
+                    width: 3,
+                  ),
+                ),
+                child: selected
+                    ? const Icon(
+                        Icons.check_rounded,
+                        color: Colors.black,
+                        size: 19,
+                      )
+                    : null,
               ),
             ),
-            child: selected
-                ? const Icon(Icons.check_rounded, color: Colors.black, size: 19)
-                : null,
           ),
         ),
       ),

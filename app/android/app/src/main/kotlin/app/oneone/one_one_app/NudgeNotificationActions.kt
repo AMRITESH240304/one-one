@@ -129,6 +129,7 @@ class NudgeNotificationActionReceiver : BroadcastReceiver() {
             executor.execute {
                 try {
                     postResponse(responseUrl, idToken, responseAction, snoozeMinutes)
+                    VoiceNudgeAudioCache.delete(appContext, eventId)
                     val text = if (responseAction == "snooze") {
                         "You asked $senderName to wait $snoozeMinutes minutes"
                     } else {

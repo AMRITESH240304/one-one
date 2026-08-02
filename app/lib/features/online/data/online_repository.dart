@@ -21,6 +21,7 @@ class OnlineRepository {
   Future<OnlineSession> goOnline({
     required IdentitySession identity,
     required GroupSummary group,
+    String connectionMode = MemberAvailability.walkieTalkieMode,
   }) async {
     await _requestOnlinePermissions();
 
@@ -81,18 +82,19 @@ class OnlineRepository {
         'serviceState': 'starting',
         'livekitConnectionState': 'connecting',
         'canReceiveLiveAudio': false,
+        'connectionMode': connectionMode,
         'lastHeartbeatAt': now,
         'staleAfterAt': now + 30,
         'updatedAt': now,
       },
     });
+    await _scheduleAwayOnDisconnect(session);
 
     return session;
   }
 
   Future<void> markLive(OnlineSession session) async {
     final now = _nowSeconds();
-    await _scheduleAwayOnDisconnect(session);
     await _database.ref().update({
       'appServiceSessions/${session.serviceSessionId}/serviceState': 'running',
       'appServiceSessions/${session.serviceSessionId}/lastHeartbeatAt': now,
@@ -121,7 +123,6 @@ class OnlineRepository {
     bool isTalking = false,
   }) async {
     final now = _nowSeconds();
-    await _scheduleAwayOnDisconnect(session);
     await _database.ref().update({
       'appServiceSessions/${session.serviceSessionId}/lastHeartbeatAt': now,
       'memberAvailability/${session.groupId}/${session.userId}/desiredState':
@@ -142,16 +143,44 @@ class OnlineRepository {
     });
   }
 
-  Future<void> goAway(OnlineSession session) async {
+  /// Switches a member's own connection between walkie-talkie (push-to-talk)
+  /// and call (always-on mic). This is a per-user setting, not a group-wide
+  /// mode: it only ever writes the caller's own availability entry.
+  Future<void> setConnectionMode(
+    OnlineSession session, {
+    required String connectionMode,
+  }) async {
+    await _database.ref().update({
+      'memberAvailability/${session.groupId}/${session.userId}/connectionMode':
+          connectionMode,
+      'memberAvailability/${session.groupId}/${session.userId}/updatedAt':
+          _nowSeconds(),
+    });
+  }
+
+  Future<void> goAway(
+    OnlineSession session, {
+    String reason = 'user_away',
+  }) async {
     final now = _nowSeconds();
     final availabilityRef = _database.ref(
       'memberAvailability/${session.groupId}/${session.userId}',
     );
-    await availabilityRef.onDisconnect().cancel();
+    final serviceRef = _database.ref(
+      'appServiceSessions/${session.serviceSessionId}',
+    );
+    final liveKitRef = _database.ref(
+      'livekitSessions/${session.livekitSessionId}',
+    );
+    await Future.wait([
+      availabilityRef.onDisconnect().cancel(),
+      serviceRef.onDisconnect().cancel(),
+      liveKitRef.onDisconnect().cancel(),
+    ]);
 
     await _database.ref().update({
       'appServiceSessions/${session.serviceSessionId}/serviceState': 'stopped',
-      'appServiceSessions/${session.serviceSessionId}/stopReason': 'user_away',
+      'appServiceSessions/${session.serviceSessionId}/stopReason': reason,
       'appServiceSessions/${session.serviceSessionId}/stoppedAt': now,
       'appServiceSessions/${session.serviceSessionId}/lastHeartbeatAt': now,
       'livekitSessions/${session.livekitSessionId}/connectionState':
@@ -167,6 +196,7 @@ class OnlineRepository {
         'serviceState': 'stopped',
         'livekitConnectionState': 'disconnected',
         'canReceiveLiveAudio': false,
+        'connectionMode': MemberAvailability.walkieTalkieMode,
         'lastHeartbeatAt': now,
         'staleAfterAt': now,
         'updatedAt': now,
@@ -174,23 +204,64 @@ class OnlineRepository {
     });
   }
 
+  /// Asks the backend to push a "you're offline" alert to this user's devices
+  /// after an involuntary leave (peer left, inactivity, usage cap, network).
+  Future<void> notifyGoneOffline({
+    required OnlineSession session,
+    required String reason,
+  }) async {
+    try {
+      await _apiClient.postJson(
+        '/v1/groups/${session.groupId}/notifications/gone-offline',
+        {
+          'deviceId': session.deviceId,
+          'reason': reason,
+        },
+      );
+    } catch (_) {
+      // Best-effort — RTDB presence is already away; missing the push is
+      // non-fatal (foreground snackbars still cover the same cases).
+    }
+  }
+
   Future<void> _scheduleAwayOnDisconnect(OnlineSession session) async {
+    final now = _nowSeconds();
     final availabilityRef = _database.ref(
       'memberAvailability/${session.groupId}/${session.userId}',
     );
-    await availabilityRef.onDisconnect().set({
-      'activeDeviceId': null,
-      'activeServiceSessionId': null,
-      'activeLivekitSessionId': null,
-      'desiredState': MemberAvailability.away.desiredState,
-      'effectiveState': MemberAvailability.away.effectiveState,
-      'serviceState': 'stopped',
-      'livekitConnectionState': 'disconnected',
-      'canReceiveLiveAudio': false,
-      'lastHeartbeatAt': 0,
-      'staleAfterAt': 0,
-      'updatedAt': _nowSeconds(),
-    });
+    final serviceRef = _database.ref(
+      'appServiceSessions/${session.serviceSessionId}',
+    );
+    final liveKitRef = _database.ref(
+      'livekitSessions/${session.livekitSessionId}',
+    );
+    await Future.wait([
+      serviceRef.onDisconnect().update({
+        'serviceState': 'stopped',
+        'stopReason': 'network_loss',
+        'stoppedAt': now,
+        'lastHeartbeatAt': now,
+      }),
+      liveKitRef.onDisconnect().update({
+        'connectionState': 'disconnected',
+        'disconnectedAt': now,
+        'lastStateChangedAt': now,
+      }),
+      availabilityRef.onDisconnect().set({
+        'activeDeviceId': null,
+        'activeServiceSessionId': null,
+        'activeLivekitSessionId': null,
+        'desiredState': MemberAvailability.away.desiredState,
+        'effectiveState': MemberAvailability.away.effectiveState,
+        'serviceState': 'stopped',
+        'livekitConnectionState': 'disconnected',
+        'canReceiveLiveAudio': false,
+        'connectionMode': MemberAvailability.walkieTalkieMode,
+        'lastHeartbeatAt': 0,
+        'staleAfterAt': 0,
+        'updatedAt': now,
+      }),
+    ]);
   }
 
   Future<LiveKitTokenResponse> _requestLiveKitToken({

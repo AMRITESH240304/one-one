@@ -1,9 +1,15 @@
 package app.oneone.one_one_app
 
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.content.Intent
 import android.util.Log
+import android.util.Rational
 import com.google.firebase.FirebaseApp
 import com.google.firebase.installations.FirebaseInstallations
 import com.google.firebase.messaging.FirebaseMessaging
@@ -15,6 +21,9 @@ import java.security.MessageDigest
 class MainActivity : FlutterFragmentActivity() {
     private lateinit var voiceNudgeChannel: MethodChannel
     private lateinit var inviteLinkChannel: MethodChannel
+    private lateinit var voicePipChannel: MethodChannel
+    private var voiceSessionActive = false
+    private var voiceSessionTalking = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -31,6 +40,29 @@ class MainActivity : FlutterFragmentActivity() {
             InviteLinkContract.flutterChannel,
         )
         captureInviteLink(intent)
+        voicePipChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            VoicePipContract.flutterChannel,
+        )
+        VoicePipActionDispatcher.attach(voicePipChannel)
+        voicePipChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "setSessionState" -> {
+                    val arguments = call.arguments as? Map<*, *>
+                    val wasActive = voiceSessionActive
+                    voiceSessionActive = arguments?.get("active") == true
+                    voiceSessionTalking = arguments?.get("isTalking") == true
+                    if (voiceSessionActive && !wasActive) {
+                        VoiceSessionService.start(this)
+                    } else if (!voiceSessionActive && wasActive) {
+                        VoiceSessionService.stop(this)
+                    }
+                    updatePictureInPictureParams()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
         voiceNudgeChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 // Keep the channel name for compatibility with existing Dart and
@@ -142,11 +174,83 @@ class MainActivity : FlutterFragmentActivity() {
         captureInviteLink(intent)
     }
 
+    override fun onUserLeaveHint() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S &&
+            voiceSessionActive &&
+            !isInPictureInPictureMode
+        ) {
+            enterPictureInPictureMode(buildPictureInPictureParams())
+        }
+        super.onUserLeaveHint()
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        if (::voicePipChannel.isInitialized) {
+            voicePipChannel.invokeMethod(
+                "onPipModeChanged",
+                isInPictureInPictureMode,
+            )
+        }
+    }
+
     override fun onDestroy() {
+        if (isFinishing && voiceSessionActive) {
+            VoiceSessionService.stop(this)
+            voiceSessionActive = false
+        }
         if (::voiceNudgeChannel.isInitialized) {
             NudgeActionDispatcher.detach(voiceNudgeChannel)
         }
+        if (::voicePipChannel.isInitialized) {
+            VoicePipActionDispatcher.detach(voicePipChannel)
+        }
         super.onDestroy()
+    }
+
+    private fun updatePictureInPictureParams() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            setPictureInPictureParams(buildPictureInPictureParams())
+        }
+    }
+
+    private fun buildPictureInPictureParams(): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(1, 1))
+            .setActions(pictureInPictureActions())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder
+                .setAutoEnterEnabled(voiceSessionActive)
+                .setSeamlessResizeEnabled(false)
+        }
+        return builder.build()
+    }
+
+    private fun pictureInPictureActions(): List<RemoteAction> {
+        val toggleAction = RemoteAction(
+            Icon.createWithResource(
+                this,
+                if (voiceSessionTalking) R.drawable.ic_mic_off else R.drawable.ic_voice_nudge,
+            ),
+            if (voiceSessionTalking) "Stop talking" else "Talk",
+            if (voiceSessionTalking) "Stop talking" else "Talk",
+            pipActionIntent(VoicePipContract.actionToggleMicrophone, 1),
+        )
+        return listOf(toggleAction)
+    }
+
+    private fun pipActionIntent(action: String, requestCode: Int): PendingIntent {
+        return PendingIntent.getBroadcast(
+            this,
+            requestCode,
+            Intent(this, VoicePipActionReceiver::class.java).setAction(action),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
     }
 
     private fun captureNudgeAction(intent: Intent?) {
@@ -163,6 +267,7 @@ class MainActivity : FlutterFragmentActivity() {
         )
         (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
             .cancel(notificationId)
+        VoiceNudgeAudioCache.delete(this, eventId)
         NudgeActionStore.save(this, PendingNudgeAction(action, eventId, groupId))
         NudgeActionDispatcher.signal()
         Log.i(

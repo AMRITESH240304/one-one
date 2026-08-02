@@ -1,35 +1,14 @@
+import 'dart:async';
+
 import 'package:firebase_database/firebase_database.dart';
 
 import '../../../core/firebase/app_database.dart';
+import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/firebase/firebase_analytics_service.dart';
 import '../../../core/network/api_client.dart';
 import '../models/group_invite_result.dart';
 import '../models/group_member_summary.dart';
 import '../models/group_summary.dart';
-
-enum GroupEntryKind { noGroups, home, waiting }
-
-class GroupEntryResolution {
-  const GroupEntryResolution._({
-    required this.kind,
-    this.group,
-    this.groups = const [],
-  });
-
-  const GroupEntryResolution.noGroups()
-    : this._(kind: GroupEntryKind.noGroups);
-
-  const GroupEntryResolution.home({required List<GroupSummary> groups})
-    : this._(kind: GroupEntryKind.home, groups: groups);
-
-  const GroupEntryResolution.waiting({
-    required GroupSummary group,
-    required List<GroupSummary> groups,
-  }) : this._(kind: GroupEntryKind.waiting, group: group, groups: groups);
-
-  final GroupEntryKind kind;
-  final GroupSummary? group;
-  final List<GroupSummary> groups;
-}
 
 class GroupRepository {
   GroupRepository({ApiClient? apiClient, FirebaseDatabase? database})
@@ -42,6 +21,8 @@ class GroupRepository {
   Future<GroupSummary> createGroup(String name) async {
     final response = await _apiClient.postJson('/v1/groups', {'name': name});
     final groupId = response['groupId'].toString();
+    unawaited(AnalyticsService.logGroupCreated(groupId: groupId));
+    unawaited(CrashlyticsService.log('group_created:$groupId'));
     final snapshot = await _database.ref('groups/$groupId').get();
 
     if (snapshot.value is Map<Object?, Object?>) {
@@ -65,6 +46,7 @@ class GroupRepository {
       'maxUses': 3,
       'expiresInHours': 72,
     });
+    unawaited(AnalyticsService.logInviteCreated(groupId: groupId));
     return GroupInviteResult.fromJson(response);
   }
 
@@ -72,91 +54,44 @@ class GroupRepository {
     final response = await _apiClient.postJson('/v1/invites/join', {
       'inviteCode': inviteCode,
     });
-    return response['groupId'].toString();
+    final groupId = response['groupId'].toString();
+    unawaited(AnalyticsService.logGroupJoined(groupId: groupId));
+    unawaited(CrashlyticsService.log('group_joined:$groupId'));
+    return groupId;
   }
 
-  Future<List<GroupSummary>> loadGroupsForUser(String userId) async {
-    final membersSnapshot = await _database.ref('groupMembers').get();
+  DatabaseReference userGroupsRef(String userId) {
+    return _database.ref('userGroups/$userId');
+  }
 
-    if (membersSnapshot.value is! Map<Object?, Object?>) {
-      return const [];
-    }
+  Future<List<GroupSummary>> loadGroupsForUser(String _) async {
+    final response = await _apiClient.getJson('/v1/groups');
+    final rawGroups = response['groups'];
+    if (rawGroups is! List) return const [];
 
-    final membersByGroup = membersSnapshot.value! as Map<Object?, Object?>;
-    final groupIds = <String>[];
-
-    for (final entry in membersByGroup.entries) {
-      final groupId = entry.key.toString();
-      final members = entry.value;
-
-      if (members is! Map<Object?, Object?>) continue;
-
-      final currentUserMember = members[userId];
-      if (currentUserMember is! Map<Object?, Object?>) continue;
-
-      if ((currentUserMember['memberState']?.toString() ?? 'active') ==
-          'active') {
-        groupIds.add(groupId);
-      }
-    }
-
-    final groups = <GroupSummary>[];
-    for (final groupId in groupIds) {
-      final groupSnapshot = await _database.ref('groups/$groupId').get();
-      if (groupSnapshot.value is Map<Object?, Object?>) {
-        groups.add(
-          GroupSummary.fromJson(
-            groupId,
-            groupSnapshot.value! as Map<Object?, Object?>,
-          ),
-        );
-      }
-    }
-
-    return groups;
+    return rawGroups.whereType<Map>().map((raw) {
+      final groupId = raw['groupId']?.toString() ?? '';
+      return GroupSummary.fromJson(groupId, raw.cast<Object?, Object?>());
+    }).where((group) => group.groupId.isNotEmpty).toList();
   }
 
   Future<List<GroupMemberSummary>> loadGroupMembers(String groupId) async {
-    final snapshot = await _database.ref('groupMembers/$groupId').get();
+    final response = await _apiClient.getJson(
+      '/v1/groups/${Uri.encodeComponent(groupId)}/members',
+    );
+    final rawMembers = response['members'];
+    if (rawMembers is! List) return const [];
 
-    if (snapshot.value is! Map<Object?, Object?>) {
-      return const [];
-    }
-
-    final members = snapshot.value! as Map<Object?, Object?>;
-    final result = <GroupMemberSummary>[];
-
-    for (final entry in members.entries) {
-      final rawMember = entry.value;
-      if (rawMember is! Map<Object?, Object?>) continue;
-
-      final userId = entry.key.toString();
-      final data = rawMember;
-      final userSnapshot = await _database.ref('users/$userId').get();
-      String displayName = userId;
-      String? profilePhotoUrl;
-      String? profilePhotoBase64;
-
-      if (userSnapshot.value is Map<Object?, Object?>) {
-        final userData = userSnapshot.value! as Map<Object?, Object?>;
-        displayName = userData['displayName']?.toString() ?? userId;
-        profilePhotoUrl = userData['profilePhotoUrl']?.toString();
-        profilePhotoBase64 = userData['profilePhotoBase64']?.toString();
-      }
-
-      result.add(
-        GroupMemberSummary(
-          userId: userId,
-          displayName: displayName,
-          role: data['role']?.toString() ?? 'member',
-          memberState: data['memberState']?.toString() ?? 'active',
-          profilePhotoUrl: profilePhotoUrl,
-          profilePhotoBase64: profilePhotoBase64,
-        ),
+    return rawMembers.whereType<Map>().map((raw) {
+      return GroupMemberSummary(
+        userId: raw['userId']?.toString() ?? '',
+        displayName: raw['displayName']?.toString() ?? 'Member',
+        role: raw['role']?.toString() ?? 'member',
+        memberState: raw['memberState']?.toString() ?? 'active',
+        profilePhotoUrl: raw['profilePhotoUrl']?.toString(),
+        profilePhotoBase64: raw['profilePhotoBase64']?.toString(),
       );
-    }
-
-    return result;
+    }).where((member) => member.userId.isNotEmpty).toList();
   }
 
   Future<int> countActiveMembers(String groupId) async {
@@ -178,24 +113,25 @@ class GroupRepository {
     return count;
   }
 
-  Future<GroupEntryResolution> resolveGroupEntry(String userId) async {
-    final groups = await loadGroupsForUser(userId);
-    if (groups.isEmpty) {
-      return const GroupEntryResolution.noGroups();
-    }
+  Future<void> removeMember(String groupId, String memberUserId) async {
+    await _apiClient.deleteJson(
+      '/v1/groups/${Uri.encodeComponent(groupId)}/members/'
+      '${Uri.encodeComponent(memberUserId)}',
+    );
+  }
 
-    GroupSummary? soloGroup;
-    for (final group in groups) {
-      final memberCount = await countActiveMembers(group.groupId);
-      if (memberCount > 1) {
-        return GroupEntryResolution.home(groups: groups);
-      }
-      soloGroup ??= group;
-    }
+  Future<void> leaveGroup(String groupId) async {
+    await _apiClient.postJson(
+      '/v1/groups/${Uri.encodeComponent(groupId)}/leave',
+      const {},
+    );
+    unawaited(AnalyticsService.logGroupLeft(groupId: groupId));
+    unawaited(CrashlyticsService.log('group_left:$groupId'));
+  }
 
-    return GroupEntryResolution.waiting(
-      group: soloGroup!,
-      groups: groups,
+  Future<void> deleteGroup(String groupId) async {
+    await _apiClient.deleteJson(
+      '/v1/groups/${Uri.encodeComponent(groupId)}',
     );
   }
 }

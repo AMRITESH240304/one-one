@@ -7,6 +7,7 @@ class AppUserProfile {
     required this.createdAt,
     required this.updatedAt,
     required this.lastSeenAt,
+    this.setupCompleted = false,
     this.profilePhotoUrl,
     this.profilePhotoBase64,
   });
@@ -18,6 +19,7 @@ class AppUserProfile {
   final int createdAt;
   final int updatedAt;
   final int lastSeenAt;
+  final bool setupCompleted;
   final String? profilePhotoUrl;
   final String? profilePhotoBase64;
 
@@ -39,6 +41,7 @@ class AppUserProfile {
       'createdAt': createdAt,
       'updatedAt': updatedAt,
       'lastSeenAt': lastSeenAt,
+      'setupCompleted': setupCompleted,
     };
 
     if (profilePhotoUrl != null) {
@@ -61,6 +64,7 @@ class AppUserProfile {
       createdAt: _readInt(data['createdAt']),
       updatedAt: _readInt(data['updatedAt']),
       lastSeenAt: _readInt(data['lastSeenAt']),
+      setupCompleted: data['setupCompleted'] == true,
       profilePhotoUrl: data['profilePhotoUrl']?.toString(),
       profilePhotoBase64: data['profilePhotoBase64']?.toString(),
     );
@@ -71,6 +75,7 @@ class AppUserProfile {
     String? authProvider,
     int? updatedAt,
     int? lastSeenAt,
+    bool? setupCompleted,
     String? profilePhotoUrl,
     String? profilePhotoBase64,
     bool clearProfilePhotoUrl = false,
@@ -84,6 +89,7 @@ class AppUserProfile {
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       lastSeenAt: lastSeenAt ?? this.lastSeenAt,
+      setupCompleted: setupCompleted ?? this.setupCompleted,
       profilePhotoUrl: clearProfilePhotoUrl
           ? null
           : (profilePhotoUrl ?? this.profilePhotoUrl),
@@ -92,6 +98,16 @@ class AppUserProfile {
           : (profilePhotoBase64 ?? this.profilePhotoBase64),
     );
   }
+}
+
+bool hasCompletedProfileSetup(
+  AppUserProfile profile, {
+  required bool isLegacyProfile,
+}) {
+  return profile.setupCompleted ||
+      (isLegacyProfile &&
+          profile.displayName.trim().isNotEmpty &&
+          profile.hasProfilePhoto);
 }
 
 int _readInt(Object? value) {

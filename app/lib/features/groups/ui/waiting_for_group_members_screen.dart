@@ -45,7 +45,6 @@ class _WaitingForGroupMembersScreenState
     super.initState();
     AccentThemeController.setAccentKey(widget.session.settings.accentColorKey);
     _listenForNewMembers();
-    unawaited(_checkMemberCount());
   }
 
   @override
@@ -64,17 +63,6 @@ class _WaitingForGroupMembersScreenState
             unawaited(_goHome());
           }
         });
-  }
-
-  Future<void> _checkMemberCount() async {
-    final snapshot = await AppDatabase.instance()
-        .ref('groupMembers/${widget.group.groupId}')
-        .get();
-    if (!mounted) return;
-
-    if (_activeMemberCount(snapshot.value) > 1) {
-      await _goHome();
-    }
   }
 
   int _activeMemberCount(Object? value) {

@@ -4,7 +4,14 @@ class MemberAvailability {
     required this.effectiveState,
     required this.canReceiveLiveAudio,
     this.staleAfterAt,
+    this.connectionMode = walkieTalkieMode,
   });
+
+  /// Default for everyone: mic only opens while actively pressing talk.
+  static const String walkieTalkieMode = 'walkieTalkie';
+
+  /// Always-on, hands-free connection — mic stays open once switched on.
+  static const String callMode = 'call';
 
   static const MemberAvailability away = MemberAvailability(
     desiredState: 'away',
@@ -17,14 +24,22 @@ class MemberAvailability {
   final bool canReceiveLiveAudio;
   final int? staleAfterAt;
 
+  /// Per-user connection style: [walkieTalkieMode] (push-to-talk, default)
+  /// or [callMode] (always-on mic). This is independent per member — it is
+  /// never a group-wide setting.
+  final String connectionMode;
+
   factory MemberAvailability.fromJson(Map<Object?, Object?> data) {
     return MemberAvailability(
       desiredState: data['desiredState']?.toString() ?? 'away',
       effectiveState: data['effectiveState']?.toString() ?? 'away',
       canReceiveLiveAudio: data['canReceiveLiveAudio'] == true,
       staleAfterAt: _readInt(data['staleAfterAt']),
+      connectionMode: data['connectionMode']?.toString() ?? walkieTalkieMode,
     );
   }
+
+  bool get isCallMode => connectionMode == callMode;
 
   bool get isLive => isLiveAt(
     DateTime.now().millisecondsSinceEpoch ~/ Duration.millisecondsPerSecond,
@@ -33,6 +48,26 @@ class MemberAvailability {
   bool get isTalking {
     if (!isLive) return false;
     return effectiveState == 'talking';
+  }
+
+  /// True while a member has an active voice session — including the brief
+  /// `connecting` handshake before audio actually flows. Unlike [isLive],
+  /// this does not require [canReceiveLiveAudio] yet, so it can be used to
+  /// detect "someone is already joining/in a session" a moment earlier.
+  bool get isInVoiceSession => isInVoiceSessionAt(
+    DateTime.now().millisecondsSinceEpoch ~/ Duration.millisecondsPerSecond,
+  );
+
+  bool isInVoiceSessionAt(int epochSeconds) {
+    final expiresAt = staleAfterAt;
+    if (expiresAt != null && expiresAt <= epochSeconds) return false;
+    if (desiredState != 'online') return false;
+
+    return effectiveState == 'connecting' ||
+        effectiveState == 'live' ||
+        effectiveState == 'talking' ||
+        effectiveState == 'listening' ||
+        effectiveState == 'connected';
   }
 
   bool isLiveAt(int epochSeconds) {

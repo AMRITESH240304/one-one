@@ -27,12 +27,17 @@ object VoiceNudgeContract {
     const val kindRing = "ring_nudge"
     const val kindPush = "nudge"
     const val kindFriendLive = "friend_live"
+    const val kindGoneOffline = "gone_offline"
     const val kindResponse = "nudge_response"
 
     const val actionAccept = "app.oneone.action.ACCEPT_NUDGE"
     const val actionConnect = "app.oneone.action.CONNECT_NUDGE"
     const val actionDecline = "app.oneone.action.DECLINE_NUDGE"
     const val actionSnooze = "app.oneone.action.SNOOZE_NUDGE"
+    const val actionPlayCachedAudio = "app.oneone.action.PLAY_CACHED_NUDGE"
+    const val actionPauseCachedAudio = "app.oneone.action.PAUSE_CACHED_NUDGE"
+    const val actionDismissCachedAudio = "app.oneone.action.DISMISS_CACHED_NUDGE"
+    const val actionStopGroupNudges = "app.oneone.action.STOP_GROUP_NUDGES"
 }
 
 object VoiceNudgeTokenStore {

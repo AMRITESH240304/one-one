@@ -2,7 +2,16 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireFirebaseAuth, type AuthenticatedRequest } from "../firebase/auth.js";
 import { asyncHandler } from "../http/asyncHandler.js";
-import { createGroup, createInvite, joinInvite } from "../groups/groupService.js";
+import {
+  createGroup,
+  createInvite,
+  deleteGroup,
+  joinInvite,
+  leaveGroup,
+  listGroupMembers,
+  listGroupsForUser,
+  removeGroupMember
+} from "../groups/groupService.js";
 import { config } from "../config.js";
 
 const createGroupSchema = z.object({
@@ -17,6 +26,12 @@ const createInviteSchema = z.object({
 const joinInviteSchema = z.object({
   inviteCode: z.string().trim().min(4).max(64)
 });
+
+const databaseKeySchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[^.#$\[\]\/]+$/);
 
 export function createGroupRoutes() {
   const router = Router();
@@ -69,12 +84,21 @@ export function createGroupRoutes() {
     })
   );
 
+  router.get(
+    "/v1/groups",
+    requireFirebaseAuth,
+    asyncHandler(async (request, response) => {
+      const authRequest = request as AuthenticatedRequest;
+      response.status(200).json(await listGroupsForUser(authRequest.auth.uid));
+    })
+  );
+
   router.post(
     "/v1/groups/:groupId/invites",
     requireFirebaseAuth,
     asyncHandler(async (request, response) => {
       const authRequest = request as AuthenticatedRequest;
-      const groupId = z.string().min(1).parse(request.params.groupId);
+      const groupId = databaseKeySchema.parse(request.params.groupId);
       const body = createInviteSchema.parse(request.body);
       const result = await createInvite({
         groupId,
@@ -84,6 +108,18 @@ export function createGroupRoutes() {
       });
 
       response.status(201).json(result);
+    })
+  );
+
+  router.get(
+    "/v1/groups/:groupId/members",
+    requireFirebaseAuth,
+    asyncHandler(async (request, response) => {
+      const authRequest = request as AuthenticatedRequest;
+      const groupId = databaseKeySchema.parse(request.params.groupId);
+      response.status(200).json(
+        await listGroupMembers({ groupId, userId: authRequest.auth.uid })
+      );
     })
   );
 
@@ -99,6 +135,47 @@ export function createGroupRoutes() {
       });
 
       response.status(200).json(result);
+    })
+  );
+
+  router.delete(
+    "/v1/groups/:groupId/members/:memberUserId",
+    requireFirebaseAuth,
+    asyncHandler(async (request, response) => {
+      const authRequest = request as AuthenticatedRequest;
+      const groupId = databaseKeySchema.parse(request.params.groupId);
+      const memberUserId = databaseKeySchema.parse(request.params.memberUserId);
+      response.status(200).json(
+        await removeGroupMember({
+          groupId,
+          userId: authRequest.auth.uid,
+          memberUserId
+        })
+      );
+    })
+  );
+
+  router.post(
+    "/v1/groups/:groupId/leave",
+    requireFirebaseAuth,
+    asyncHandler(async (request, response) => {
+      const authRequest = request as AuthenticatedRequest;
+      const groupId = databaseKeySchema.parse(request.params.groupId);
+      response.status(200).json(
+        await leaveGroup({ groupId, userId: authRequest.auth.uid })
+      );
+    })
+  );
+
+  router.delete(
+    "/v1/groups/:groupId",
+    requireFirebaseAuth,
+    asyncHandler(async (request, response) => {
+      const authRequest = request as AuthenticatedRequest;
+      const groupId = databaseKeySchema.parse(request.params.groupId);
+      response.status(200).json(
+        await deleteGroup({ groupId, userId: authRequest.auth.uid })
+      );
     })
   );
 

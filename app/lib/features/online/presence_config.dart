@@ -18,4 +18,10 @@ class PresenceConfig {
   /// the app blocks further "go online" attempts until the next UTC day.
   /// Prevents runaway sessions from unattended devices.
   static const Duration dailyUsageCap = Duration(minutes: 120);
+
+  /// How long a single continuous stretch of call mode (always-on mic) is
+  /// allowed before the local user is automatically switched back to
+  /// walkie-talkie. Does not disconnect them from the group — only their
+  /// own connection mode changes. They can re-enter call mode immediately.
+  static const Duration callModeTimeout = Duration(minutes: 15);
 }

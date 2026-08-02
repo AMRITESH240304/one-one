@@ -3,6 +3,8 @@ package app.oneone.one_one_app
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.media.AudioAttributes as PlatformAudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -40,7 +42,36 @@ class VoiceNudgePlaybackService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        VoiceNudgeAudioCache.deleteOrphans(this)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val cachedRequest = intent?.toCachedRequest()
+        when (intent?.action) {
+            VoiceNudgeContract.actionStopGroupNudges -> {
+                stopGroupNudges(
+                    intent.getStringExtra(VoiceNudgeContract.extraGroupId) ?: return START_NOT_STICKY,
+                )
+                return START_NOT_STICKY
+            }
+            VoiceNudgeContract.actionPlayCachedAudio -> {
+                if (cachedRequest == null) return START_NOT_STICKY
+                if (
+                    active?.eventId != cachedRequest.eventId &&
+                    queue.none { it.eventId == cachedRequest.eventId }
+                ) {
+                    queue.addFirst(cachedRequest)
+                }
+                processNext()
+                return START_NOT_STICKY
+            }
+            VoiceNudgeContract.actionPauseCachedAudio -> {
+                if (cachedRequest != null) pauseCachedAudio(cachedRequest)
+                return START_NOT_STICKY
+            }
+        }
         val request = intent?.toRequest()
         if (request == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W6] Playback service received invalid intent")
@@ -78,6 +109,31 @@ class VoiceNudgePlaybackService : Service() {
         super.onDestroy()
     }
 
+    private fun stopGroupNudges(groupId: String) {
+        queue.removeAll { it.groupId == groupId }
+        val current = active
+        if (current?.groupId == groupId) {
+            releasePlayback()
+            releaseWakeLock()
+            active = null
+            VoiceNudgeAudioCache.delete(this, current.eventId)
+            getSystemService(NotificationManager::class.java).cancel(
+                VoiceNudgeNotifications.idFor(current.eventId),
+            )
+        }
+        if (active == null && queue.isEmpty()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
+        } else if (active == null) {
+            processNext()
+        }
+    }
+
     private fun processNext() {
         if (active != null || queue.isEmpty()) return
         val request = queue.removeFirst()
@@ -87,9 +143,29 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-11] Processing queued nudge kind=${request.kind}",
         )
         holdWakeLock()
-        notify(request, if (request.kind == VoiceNudgeContract.kindRing) "Ringing…" else "Downloading voice nudge…")
+        val initialStatus = when {
+            request.kind == VoiceNudgeContract.kindRing -> "Ringing…"
+            request.cachedReplay -> "Preparing replay…"
+            else -> "Downloading voice nudge…"
+        }
+        startForeground(
+            VoiceNudgeNotifications.idFor(request.eventId),
+            notification(
+                request,
+                initialStatus,
+                ongoing = true,
+                cachedAudioAvailable = request.cachedReplay,
+            ),
+        )
         if (request.kind == VoiceNudgeContract.kindRing) {
             playRing(request)
+        } else if (request.cachedReplay) {
+            val file = VoiceNudgeAudioCache.file(this, request.eventId)
+            if (file.isFile && file.length() > 0) {
+                startPlayer(request, file)
+            } else {
+                finishActive(success = false)
+            }
         } else {
             downloadAndPlay(request)
         }
@@ -190,6 +266,12 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun downloadAudio(request: NudgeRequest): File {
+        val output = VoiceNudgeAudioCache.file(this, request.eventId)
+        if (output.isFile && output.length() > 0) {
+            VoiceNudgeAudioCache.register(this, request.eventId)
+            return output
+        }
+
         var currentUrl = requireNotNull(request.audioUrl) { "Missing audio URL" }
         var redirects = 0
         while (true) {
@@ -226,9 +308,10 @@ class VoiceNudgePlaybackService : Service() {
                 if (responseCode !in 200..299) {
                     throw IllegalStateException("Audio download failed with HTTP $responseCode")
                 }
-                val output = File(cacheDir, "voice_nudge_${request.eventId.safeFileName()}.m4a")
-                connection.inputStream.use { input ->
-                    FileOutputStream(output).use { sink ->
+                val partial = File(output.path + ".part")
+                try {
+                    connection.inputStream.use { input ->
+                        FileOutputStream(partial).use { sink ->
                         val buffer = ByteArray(8 * 1024)
                         var total = 0
                         while (true) {
@@ -241,7 +324,13 @@ class VoiceNudgePlaybackService : Service() {
                             sink.write(buffer, 0, count)
                         }
                         if (total == 0) throw IllegalStateException("Voice nudge is empty")
+                        }
                     }
+                    check(partial.renameTo(output)) { "Could not finalize voice nudge cache" }
+                    VoiceNudgeAudioCache.register(this, request.eventId)
+                } catch (error: Exception) {
+                    partial.delete()
+                    throw error
                 }
                 return output
             } finally {
@@ -256,10 +345,14 @@ class VoiceNudgePlaybackService : Service() {
 
     private fun startPlayer(request: NudgeRequest, file: File) {
         if (active?.eventId != request.eventId) {
-            file.delete()
             return
         }
-        notify(request, "Playing voice nudge…")
+        notify(
+            request,
+            "Playing voice nudge…",
+            cachedAudioAvailable = true,
+            isPlaying = true,
+        )
         Log.i(VoiceNudgeDiagnostics.tag, "[FCM-14] Preparing voice audio player")
         player = ExoPlayer.Builder(this).build().apply {
             setAudioAttributes(
@@ -274,24 +367,88 @@ class VoiceNudgePlaybackService : Service() {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_ENDED) {
                         Log.i(VoiceNudgeDiagnostics.tag, "[FCM-15] Voice playback completed")
-                        acknowledge(request, "played") {
-                            file.delete()
+                        VoiceNudgeAudioCache.clearPosition(
+                            this@VoiceNudgePlaybackService,
+                            request.eventId,
+                        )
+                        if (request.cachedReplay) {
                             finishActive(success = true)
+                        } else {
+                            acknowledge(request, "played") {
+                                finishActive(success = true)
+                            }
                         }
                     }
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
                     VoiceNudgeDiagnostics.logFailure("[FCM-E6] Voice playback", error)
-                    acknowledge(request, "failed") {
-                        file.delete()
+                    VoiceNudgeAudioCache.delete(
+                        this@VoiceNudgePlaybackService,
+                        request.eventId,
+                    )
+                    if (request.cachedReplay) {
                         finishActive(success = false)
+                    } else {
+                        acknowledge(request, "failed") {
+                            finishActive(success = false)
+                        }
                     }
                 }
             })
             setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
             prepare()
+            if (request.cachedReplay) {
+                seekTo(
+                    VoiceNudgeAudioCache.position(
+                        this@VoiceNudgePlaybackService,
+                        request.eventId,
+                    ),
+                )
+            }
             play()
+        }
+    }
+
+    private fun pauseCachedAudio(request: NudgeRequest) {
+        val current = active
+        if (current?.eventId == request.eventId) {
+            VoiceNudgeAudioCache.savePosition(
+                this,
+                request.eventId,
+                player?.currentPosition ?: 0,
+            )
+            releasePlayback()
+            active = null
+            releaseWakeLock()
+            if (!current.cachedReplay) {
+                acknowledge(current, "played") { finishPause(request) }
+                return
+            }
+        }
+        finishPause(request)
+    }
+
+    private fun finishPause(request: NudgeRequest) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_DETACH)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(false)
+        }
+        getSystemService(NotificationManager::class.java).notify(
+            VoiceNudgeNotifications.idFor(request.eventId),
+            notification(
+                request,
+                "Paused",
+                ongoing = false,
+                cachedAudioAvailable = true,
+            ),
+        )
+        if (queue.isEmpty()) {
+            stopSelf()
+        } else {
+            processNext()
         }
     }
 
@@ -337,6 +494,11 @@ class VoiceNudgePlaybackService : Service() {
         releasePlayback()
         active = null
         val manager = getSystemService(NotificationManager::class.java)
+        val cachedAudioAvailable = shouldRetainNotificationAudio(
+            success = success,
+            kind = request.kind,
+            fileExists = VoiceNudgeAudioCache.file(this, request.eventId).isFile,
+        )
         val finalStatus = when {
             !success -> "Nudge could not be played"
             request.kind == VoiceNudgeContract.kindRing ->
@@ -361,6 +523,7 @@ class VoiceNudgePlaybackService : Service() {
                     request.senderName,
                     finalStatus,
                     false,
+                    cachedAudioAvailable,
                 ),
             )
             stopSelf()
@@ -375,6 +538,7 @@ class VoiceNudgePlaybackService : Service() {
                     request.senderName,
                     finalStatus,
                     false,
+                    cachedAudioAvailable,
                 ),
             )
             processNext()
@@ -421,21 +585,42 @@ class VoiceNudgePlaybackService : Service() {
         }
     }
 
-    private fun notify(request: NudgeRequest, status: String) {
+    private fun notify(
+        request: NudgeRequest,
+        status: String,
+        cachedAudioAvailable: Boolean = false,
+        isPlaying: Boolean = false,
+    ) {
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(
             VoiceNudgeNotifications.idFor(request.eventId),
-            VoiceNudgeNotifications.build(
-                this,
-                request.eventId,
-                request.groupId,
-                request.responseUrl,
-                request.senderName,
+            notification(
+                request,
                 status,
-                true,
+                ongoing = true,
+                cachedAudioAvailable = cachedAudioAvailable,
+                isPlaying = isPlaying,
             ),
         )
     }
+
+    private fun notification(
+        request: NudgeRequest,
+        status: String,
+        ongoing: Boolean,
+        cachedAudioAvailable: Boolean,
+        isPlaying: Boolean = false,
+    ) = VoiceNudgeNotifications.build(
+        this,
+        request.eventId,
+        request.groupId,
+        request.responseUrl,
+        request.senderName,
+        status,
+        ongoing,
+        cachedAudioAvailable,
+        isPlaying,
+    )
 
     private fun Intent.toRequest(): NudgeRequest? {
         val kind = getStringExtra(VoiceNudgeContract.extraKind) ?: return null
@@ -458,10 +643,26 @@ class VoiceNudgePlaybackService : Service() {
             deliveryToken = getStringExtra(VoiceNudgeContract.extraDeliveryToken),
             groupId = groupId,
             responseUrl = getStringExtra(VoiceNudgeContract.extraResponseUrl),
+            cachedReplay = false,
         )
     }
 
-    private fun String.safeFileName() = replace(Regex("[^A-Za-z0-9_-]"), "_")
+    private fun Intent.toCachedRequest(): NudgeRequest? {
+        val eventId = getStringExtra(VoiceNudgeContract.extraEventId) ?: return null
+        val groupId = getStringExtra(VoiceNudgeContract.extraGroupId) ?: return null
+        return NudgeRequest(
+            kind = VoiceNudgeContract.kindVoice,
+            eventId = eventId,
+            senderName = getStringExtra(VoiceNudgeContract.extraSenderName) ?: "Someone",
+            durationMs = 0,
+            audioUrl = null,
+            ackUrl = null,
+            deliveryToken = null,
+            groupId = groupId,
+            responseUrl = getStringExtra(VoiceNudgeContract.extraResponseUrl),
+            cachedReplay = true,
+        )
+    }
 
     private data class NudgeRequest(
         val kind: String,
@@ -473,6 +674,7 @@ class VoiceNudgePlaybackService : Service() {
         val deliveryToken: String?,
         val groupId: String,
         val responseUrl: String?,
+        val cachedReplay: Boolean,
     )
 
     private data class RingPulse(
@@ -488,5 +690,107 @@ class VoiceNudgePlaybackService : Service() {
         private val supportedRingDurationsMs = setOf(3_000L, 5_000L, 10_000L)
         private const val maxAudioBytes = 128 * 1024
         private const val maxWakeLockDurationMs = 30_000L
+    }
+}
+
+internal fun shouldRetainNotificationAudio(
+    success: Boolean,
+    kind: String,
+    fileExists: Boolean,
+): Boolean = success && kind == VoiceNudgeContract.kindVoice && fileExists
+
+object VoiceNudgeAudioCache {
+    private const val filePrefix = "voice_nudge_"
+    private const val preferencesName = "one_one_voice_nudge_playback"
+    private const val eventIdsKey = "cached_event_ids"
+    private const val staleAfterMs = 24 * 60 * 60 * 1_000L
+
+    fun file(context: Context, eventId: String): File =
+        File(context.cacheDir, "$filePrefix${eventId.safeFileName()}.m4a")
+
+    fun position(context: Context, eventId: String): Long =
+        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            .getLong(eventId.safeFileName(), 0)
+
+    fun savePosition(context: Context, eventId: String, positionMs: Long) {
+        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(eventId.safeFileName(), positionMs.coerceAtLeast(0))
+            .apply()
+    }
+
+    fun clearPosition(context: Context, eventId: String) {
+        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            .edit()
+            .remove(eventId.safeFileName())
+            .apply()
+    }
+
+    fun register(context: Context, eventId: String) {
+        val preferences = context.getSharedPreferences(
+            preferencesName,
+            Context.MODE_PRIVATE,
+        )
+        val eventIds = preferences.getStringSet(eventIdsKey, emptySet())
+            .orEmpty()
+            .toMutableSet()
+        eventIds.add(eventId)
+        preferences.edit().putStringSet(eventIdsKey, eventIds).apply()
+    }
+
+    fun delete(context: Context, eventId: String) {
+        val cached = file(context, eventId)
+        cached.delete()
+        File(cached.path + ".part").delete()
+        val preferences = context.getSharedPreferences(
+            preferencesName,
+            Context.MODE_PRIVATE,
+        )
+        val eventIds = preferences.getStringSet(eventIdsKey, emptySet())
+            .orEmpty()
+            .toMutableSet()
+        eventIds.remove(eventId)
+        preferences.edit()
+            .remove(eventId.safeFileName())
+            .putStringSet(eventIdsKey, eventIds)
+            .apply()
+    }
+
+    fun deleteOrphans(context: Context) {
+        val preferences = context.getSharedPreferences(
+            preferencesName,
+            Context.MODE_PRIVATE,
+        )
+        val eventIds = preferences.getStringSet(eventIdsKey, emptySet()).orEmpty()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val activeNotificationIds = context
+                .getSystemService(NotificationManager::class.java)
+                .activeNotifications
+                .mapTo(mutableSetOf()) { it.id }
+            eventIds
+                .filter { VoiceNudgeNotifications.idFor(it) !in activeNotificationIds }
+                .forEach { delete(context, it) }
+            return
+        }
+
+        val cutoff = System.currentTimeMillis() - staleAfterMs
+        // ponytail: API 22 cannot inspect active notifications; remove stale
+        // files after 24 hours instead. Drop API 22 to remove this fallback.
+        context.cacheDir.listFiles()
+            ?.filter {
+                it.name.startsWith(filePrefix) &&
+                    it.lastModified() < cutoff
+            }
+            ?.forEach(File::delete)
+    }
+
+    private fun String.safeFileName() = replace(Regex("[^A-Za-z0-9_-]"), "_")
+}
+
+class VoiceNudgeCacheDismissReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != VoiceNudgeContract.actionDismissCachedAudio) return
+        val eventId = intent.getStringExtra(VoiceNudgeContract.extraEventId) ?: return
+        VoiceNudgeAudioCache.delete(context, eventId)
     }
 }

@@ -1,6 +1,21 @@
 {
   "conditions": [],
   "parameters": {
+    "service_status": {
+      "defaultValue": { "value": "operational" },
+      "description": "Global or condition-targeted service state: operational, maintenance, country_restricted, slow_network, or backend_failure.",
+      "valueType": "STRING"
+    },
+    "service_status_guidance": {
+      "defaultValue": { "value": "" },
+      "description": "Optional guidance replacing the built-in copy for the active service state.",
+      "valueType": "STRING"
+    },
+    "service_status_updates_url": {
+      "defaultValue": { "value": "" },
+      "description": "Reddit updates URL shown during maintenance.",
+      "valueType": "STRING"
+    },
     "subscription_pricing_tier": {
       "defaultValue": { "value": "normal" },
       "description": "Active RevenueCat pricing tier: normal or extreme.",

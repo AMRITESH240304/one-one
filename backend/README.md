@@ -47,7 +47,12 @@ Endpoints:
 
 ```txt
 POST /v1/groups
+GET  /v1/groups
+GET  /v1/groups/:groupId/members
 POST /v1/groups/:groupId/invites
+DELETE /v1/groups/:groupId/members/:memberUserId
+POST /v1/groups/:groupId/leave
+DELETE /v1/groups/:groupId
 POST /v1/invites/join
 GET  /invite/:inviteCode
 GET  /.well-known/assetlinks.json

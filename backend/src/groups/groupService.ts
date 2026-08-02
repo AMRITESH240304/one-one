@@ -1,7 +1,11 @@
 import { randomBytes, createHash } from "node:crypto";
+import { RoomServiceClient } from "livekit-server-sdk";
 import { config } from "../config.js";
+import { sendAndroidDataPushes } from "../firebase/messaging.js";
 import { getRealtimeDatabase } from "../firebase/database.js";
+import { getVoiceNudgeBucket } from "../firebase/storage.js";
 import { HttpError } from "../http/httpError.js";
+import { logger } from "../logger.js";
 
 const maxMembers = 100;
 const defaultMaxTalkMs = 60_000;
@@ -21,6 +25,15 @@ export type CreateInviteInput = {
 export type JoinInviteInput = {
   userId: string;
   inviteCode: string;
+};
+
+export type GroupMemberActionInput = {
+  groupId: string;
+  userId: string;
+};
+
+export type RemoveGroupMemberInput = GroupMemberActionInput & {
+  memberUserId: string;
 };
 
 export async function createGroup(input: CreateGroupInput) {
@@ -56,6 +69,10 @@ export async function createGroup(input: CreateGroupInput) {
       joinedAt: now,
       leftAt: null
     },
+    [`userGroups/${input.ownerUserId}/${groupId}`]: {
+      role: "owner",
+      joinedAt: now
+    },
     [`livekitRooms/${groupId}`]: {
       groupId,
       roomName: livekitRoomName,
@@ -78,37 +95,64 @@ export async function createInvite(input: CreateInviteInput) {
   await requireActiveUser(input.userId);
   await requireActiveGroupMember(input.groupId, input.userId);
   const group = await requireActiveGroup(input.groupId);
-
-  const inviteRef = db.ref("groupInvites").push();
-  const inviteId = inviteRef.key;
-
-  if (!inviteId) {
-    throw new HttpError(500, "invite_id_failed", "Failed to allocate invite id.");
-  }
-
   const now = nowSeconds();
-  const inviteCode = generateInviteCode();
-  const expiresAt = now + input.expiresInHours * 60 * 60;
+  const operationId = randomBytes(8).toString("hex");
+  if (!(await acquireGroupActivityLock(input.groupId, operationId, now))) {
+    throw new HttpError(409, "group_not_active", "Group is being deleted.");
+  }
+  try {
+    const inviteRef = db.ref("groupInvites").push();
+    const inviteId = inviteRef.key;
+    if (!inviteId) {
+      throw new HttpError(500, "invite_id_failed", "Failed to allocate invite id.");
+    }
 
-  await inviteRef.set({
-    inviteId,
-    groupId: input.groupId,
-    inviteCodeHash: hashInviteCode(inviteCode),
-    createdByUserId: input.userId,
-    maxUses: Math.min(input.maxUses, Math.max(Math.max(group.maxMembers, maxMembers) - 1, 1)),
-    usedCount: 0,
-    expiresAt,
-    revokedAt: null,
-    createdAt: now
-  });
+    let inviteCode = "";
+    let inviteCodeHash = "";
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const candidate = generateInviteCode();
+      const candidateHash = hashInviteCode(candidate);
+      if (!(await db.ref(`inviteCodeIndex/${candidateHash}`).get()).exists()) {
+        inviteCode = candidate;
+        inviteCodeHash = candidateHash;
+        break;
+      }
+    }
+    if (!inviteCode) {
+      throw new HttpError(500, "invite_code_failed", "Failed to allocate invite code.");
+    }
+    const expiresAt = now + input.expiresInHours * 60 * 60;
+    await db.ref().update({
+      [`groupInvites/${inviteId}`]: {
+        inviteId,
+        groupId: input.groupId,
+        inviteCodeHash,
+        createdByUserId: input.userId,
+        maxUses: Math.min(
+          input.maxUses,
+          Math.max(Math.max(group.maxMembers, maxMembers) - 1, 1)
+        ),
+        usedCount: 0,
+        expiresAt,
+        revokedAt: null,
+        createdAt: now
+      },
+      [`inviteCodeIndex/${inviteCodeHash}`]: inviteId
+    });
 
-  return {
-    inviteId,
-    groupId: input.groupId,
-    inviteCode,
-    inviteUrl: buildInviteUrl(inviteCode),
-    expiresAt
-  };
+    return {
+      inviteId,
+      groupId: input.groupId,
+      inviteCode,
+      inviteUrl: buildInviteUrl(inviteCode),
+      expiresAt
+    };
+  } finally {
+    await db
+      .ref(`groupLifecycleLocks/${input.groupId}/operations/${operationId}`)
+      .remove()
+      .catch(() => undefined);
+  }
 }
 
 export async function joinInvite(input: JoinInviteInput) {
@@ -117,54 +161,390 @@ export async function joinInvite(input: JoinInviteInput) {
 
   const invite = await findActiveInvite(input.inviteCode);
   const group = await requireActiveGroup(invite.groupId);
-  const existingMember = await db
-    .ref(`groupMembers/${invite.groupId}/${input.userId}`)
-    .get();
+  const memberRef = db.ref(`groupMembers/${invite.groupId}/${input.userId}`);
+  const now = nowSeconds();
+  const joinOperationId = randomBytes(8).toString("hex");
+  if (!(await acquireGroupActivityLock(invite.groupId, joinOperationId, now))) {
+    throw new HttpError(409, "group_not_active", "Group is being deleted.");
+  }
 
-  if (
-    existingMember.exists() &&
-    (existingMember.child("memberState").val() ?? "active") === "active"
-  ) {
+  try {
+    const existingMember = await memberRef.get();
+    if (
+      existingMember.exists() &&
+      (existingMember.child("memberState").val() ?? "active") === "active"
+    ) {
+      await db.ref(`userGroups/${input.userId}/${invite.groupId}`).set({
+        role: existingMember.child("role").val()?.toString() ?? "member",
+        joinedAt: readNumber(existingMember.child("joinedAt").val(), now)
+      });
+      return {
+        groupId: invite.groupId,
+        alreadyMember: true
+      };
+    }
+
+    const capacity = Math.max(group.maxMembers, maxMembers);
+    await reserveInviteUse(invite.inviteId, input.inviteCode, now);
+    const joinNonce = randomBytes(8).toString("hex");
+    const membersRef = db.ref(`groupMembers/${invite.groupId}`);
+    const joinResult = await membersRef.transaction((current) => {
+      const members = isRecord(current) ? { ...current } : {};
+      const currentMember = members[input.userId];
+      if (
+        isRecord(currentMember) &&
+        (currentMember.memberState ?? "active") === "active"
+      ) {
+        return;
+      }
+
+      const activeCount = Object.values(members).filter(
+        (member) =>
+          isRecord(member) && (member.memberState ?? "active") === "active"
+      ).length;
+      if (activeCount >= capacity) return;
+
+      members[input.userId] = {
+        role: "member",
+        memberState: "active",
+        mutedBySelf: false,
+        joinedAt: now,
+        leftAt: null,
+        joinNonce
+      };
+      return members;
+    });
+
+    if (!joinResult.committed) {
+      await releaseInviteUse(invite.inviteId);
+      const latestMember = await memberRef.get();
+      if (
+        latestMember.exists() &&
+        (latestMember.child("memberState").val() ?? "active") === "active"
+      ) {
+        await db.ref(`userGroups/${input.userId}/${invite.groupId}`).set({
+          role: latestMember.child("role").val()?.toString() ?? "member",
+          joinedAt: readNumber(latestMember.child("joinedAt").val(), now)
+        });
+        return { groupId: invite.groupId, alreadyMember: true };
+      }
+      throw new HttpError(
+        409,
+        "group_full",
+        "Group already has the maximum number of members."
+      );
+    }
+
+    await db.ref().update({
+      [`groupMembers/${invite.groupId}/${input.userId}/joinNonce`]: null,
+      [`userGroups/${input.userId}/${invite.groupId}`]: {
+        role: "member",
+        joinedAt: now
+      },
+      [`memberAvailability/${invite.groupId}/${input.userId}`]:
+        defaultAvailability(now)
+    });
+
     return {
       groupId: invite.groupId,
-      alreadyMember: true
+      alreadyMember: false
     };
+  } finally {
+    await db
+      .ref(`groupLifecycleLocks/${invite.groupId}/operations/${joinOperationId}`)
+      .remove()
+      .catch(() => undefined);
+  }
+}
+
+export async function listGroupsForUser(userId: string) {
+  const db = getRealtimeDatabase();
+  await requireActiveUser(userId);
+
+  const indexVersion = (await db.ref(`userGroupIndexVersion/${userId}`).get()).val();
+  if (indexVersion !== 1) {
+    const memberships = await db.ref("groupMembers").get();
+    const indexed: Record<string, unknown> = {};
+    if (isRecord(memberships.val())) {
+      for (const [groupId, rawMembers] of Object.entries(
+        memberships.val() as Record<string, unknown>
+      )) {
+        if (!isRecord(rawMembers)) continue;
+        const member = rawMembers[userId];
+        if (!isRecord(member) || (member.memberState ?? "active") !== "active") continue;
+        indexed[groupId] = {
+          role: member.role?.toString() ?? "member",
+          joinedAt: readNumber(member.joinedAt, 0)
+        };
+      }
+    }
+    await db.ref(`userGroups/${userId}`).set(indexed);
+    await db.ref(`userGroupIndexVersion/${userId}`).set(1);
+  }
+
+  const index = await db.ref(`userGroups/${userId}`).get();
+  if (!isRecord(index.val())) return { groups: [] };
+
+  const groups = (
+    await Promise.all(
+      Object.keys(index.val() as Record<string, unknown>).map(async (groupId) => {
+        const snapshot = await db.ref(`groups/${groupId}`).get();
+        if (
+          !snapshot.exists() ||
+          (snapshot.child("groupState").val() ?? "active") !== "active"
+        ) {
+          await db.ref(`userGroups/${userId}/${groupId}`).remove();
+          return null;
+        }
+        return {
+          groupId,
+          name: snapshot.child("name").val()?.toString() ?? "Friends",
+          ownerUserId: snapshot.child("ownerUserId").val()?.toString() ?? "",
+          livekitRoomName:
+            snapshot.child("livekitRoomName").val()?.toString() ?? `group_${groupId}`,
+          groupState: "active"
+        };
+      })
+    )
+  ).filter((group) => group !== null);
+
+  return { groups };
+}
+
+export async function listGroupMembers(input: GroupMemberActionInput) {
+  const db = getRealtimeDatabase();
+  await requireActiveGroup(input.groupId);
+  await requireActiveGroupMember(input.groupId, input.userId);
+  const snapshot = await db.ref(`groupMembers/${input.groupId}`).get();
+  if (!isRecord(snapshot.val())) return { members: [] };
+
+  const members = (
+    await Promise.all(
+      Object.entries(snapshot.val() as Record<string, unknown>).map(
+        async ([userId, raw]) => {
+          if (
+            !isRecord(raw) ||
+            (raw.memberState ?? "active") !== "active"
+          ) {
+            return null;
+          }
+          const user = await db.ref(`users/${userId}`).get();
+          return {
+            userId,
+            displayName: user.child("displayName").val()?.toString() ?? userId,
+            role: raw.role?.toString() ?? "member",
+            memberState: "active",
+            profilePhotoUrl:
+              user.child("profilePhotoUrl").val()?.toString() ?? null,
+            profilePhotoBase64:
+              user.child("profilePhotoBase64").val()?.toString() ?? null
+          };
+        }
+      )
+    )
+  ).filter((member) => member !== null);
+
+  return { members };
+}
+
+export async function removeGroupMember(input: RemoveGroupMemberInput) {
+  const group = await requireGroupOwner(input.groupId, input.userId);
+  if (input.memberUserId === group.ownerUserId) {
+    throw new HttpError(409, "cannot_remove_owner", "The group owner cannot be removed.");
+  }
+
+  const db = getRealtimeDatabase();
+  const memberRef = db.ref(`groupMembers/${input.groupId}/${input.memberUserId}`);
+  const now = nowSeconds();
+  // RTDB transactions often invoke the handler first with null (optimistic
+  // local guess). Returning undefined there aborts with no retry — which left
+  // members stuck as active while cleanup still wiped userGroups. Returning
+  // null on null lets the SDK retry with the real server value.
+  const result = await memberRef.transaction((current) => {
+    if (current === null) return null;
+    if (!isRecord(current) || (current.memberState ?? "active") !== "active") {
+      return;
+    }
+    if (current.role === "owner") return;
+    return {
+      ...current,
+      memberState: "removed",
+      leftAt: now,
+      removedAt: now,
+      removedByUserId: input.userId
+    };
+  });
+
+  if (!result.committed) {
+    const current = await memberRef.get();
+    const stillActive =
+      current.exists() &&
+      (current.child("memberState").val() ?? "active") === "active";
+    if (stillActive && current.child("role").val() === "owner") {
+      throw new HttpError(409, "cannot_remove_owner", "The group owner cannot be removed.");
+    }
+    if (stillActive) {
+      throw new HttpError(
+        409,
+        "member_remove_failed",
+        "Could not remove this member. Please try again."
+      );
+    }
+    // Already left/removed — still sweep leftover session state.
+    await cleanupMemberState(input.groupId, input.memberUserId, "removed_by_owner");
+    return { removed: true, alreadyRemoved: true };
+  }
+
+  await cleanupMemberState(input.groupId, input.memberUserId, "removed_by_owner");
+  await notifyUsers(
+    [input.memberUserId],
+    "Removed from group",
+    `You were removed from ${group.name}.`,
+    { type: "group_removed", groupId: input.groupId }
+  );
+
+  return { removed: true, alreadyRemoved: false };
+}
+
+export async function leaveGroup(input: GroupMemberActionInput) {
+  const db = getRealtimeDatabase();
+  const group = await requireActiveGroup(input.groupId);
+  const memberRef = db.ref(`groupMembers/${input.groupId}/${input.userId}`);
+  const member = await memberRef.get();
+  const memberRole = member.child("role").val()?.toString() ?? "member";
+  if (memberRole === "owner" || group.ownerUserId === input.userId) {
+    throw new HttpError(
+      409,
+      "owner_must_delete_group",
+      "Owners must delete the group. Ownership transfer is not supported yet."
+    );
+  }
+  if (
+    !member.exists() ||
+    (member.child("memberState").val() ?? "active") !== "active"
+  ) {
+    await cleanupMemberState(input.groupId, input.userId, "member_left");
+    return { left: true, alreadyLeft: true };
   }
 
   const now = nowSeconds();
-  const membersSnapshot = await db.ref(`groupMembers/${invite.groupId}`).get();
-  const members = isRecord(membersSnapshot.val())
-    ? (membersSnapshot.val() as Record<string, unknown>)
-    : {};
-  const activeCount = Object.values(members).filter((member) => {
-    return isRecord(member) && member.memberState === "active";
-  }).length;
-
-  // Prefer the current product cap so older groups stored with maxMembers=4
-  // can still grow after the limit was raised.
-  const capacity = Math.max(group.maxMembers, maxMembers);
-  if (activeCount >= capacity) {
-    throw new HttpError(409, "group_full", "Group already has the maximum number of members.");
-  }
-
-  const latestInvite = await readActiveInviteById(invite.inviteId, now);
-
-  await db.ref().update({
-    [`groupMembers/${invite.groupId}/${input.userId}`]: {
-      role: "member",
-      memberState: "active",
-      mutedBySelf: false,
-      joinedAt: now,
-      leftAt: null
-    },
-    [`groupInvites/${invite.inviteId}/usedCount`]: latestInvite.usedCount + 1,
-    [`memberAvailability/${invite.groupId}/${input.userId}`]: defaultAvailability(now)
+  // Same optimistic-null handling as removeGroupMember — see comment there.
+  const result = await memberRef.transaction((current) => {
+    if (current === null) return null;
+    if (!isRecord(current) || (current.memberState ?? "active") !== "active") {
+      return;
+    }
+    if (current.role === "owner") return;
+    return {
+      ...current,
+      memberState: "left",
+      leftAt: now
+    };
   });
 
-  return {
-    groupId: invite.groupId,
-    alreadyMember: false
-  };
+  if (!result.committed) {
+    const current = await memberRef.get();
+    const stillActive =
+      current.exists() &&
+      (current.child("memberState").val() ?? "active") === "active";
+    if (stillActive && current.child("role").val() === "owner") {
+      throw new HttpError(
+        409,
+        "owner_must_delete_group",
+        "Owners must delete the group. Ownership transfer is not supported yet."
+      );
+    }
+    if (stillActive) {
+      throw new HttpError(
+        409,
+        "member_leave_failed",
+        "Could not leave this group. Please try again."
+      );
+    }
+    await cleanupMemberState(input.groupId, input.userId, "member_left");
+    return { left: true, alreadyLeft: true };
+  }
+
+  await cleanupMemberState(input.groupId, input.userId, "member_left");
+  return { left: true, alreadyLeft: false };
+}
+
+export async function deleteGroup(input: GroupMemberActionInput) {
+  const db = getRealtimeDatabase();
+  const group = await requireGroupOwner(input.groupId, input.userId);
+  const lifecycleRef = db.ref(`groupLifecycleLocks/${input.groupId}`);
+  if (!(await acquireGroupDeletionLock(input.groupId))) {
+    throw new HttpError(
+      409,
+      "group_change_in_progress",
+      "A group change is in progress. Try deleting the group again."
+    );
+  }
+  const groupRef = db.ref(`groups/${input.groupId}`);
+  const deleting = await groupRef.transaction((current) => {
+    if (!isRecord(current)) return;
+    if (
+      current.ownerUserId !== input.userId ||
+      (current.groupState ?? "active") !== "active"
+    ) {
+      return;
+    }
+    return { ...current, groupState: "deleting", deletingAt: nowSeconds() };
+  });
+
+  if (!deleting.committed) {
+    await lifecycleRef.remove();
+    throw new HttpError(409, "group_not_active", "Group is already being deleted.");
+  }
+
+  try {
+    const membersSnapshot = await db.ref(`groupMembers/${input.groupId}`).get();
+    const memberUserIds = isRecord(membersSnapshot.val())
+      ? Object.entries(membersSnapshot.val() as Record<string, unknown>)
+          .filter(
+            ([, member]) =>
+              isRecord(member) && (member.memberState ?? "active") === "active"
+          )
+          .map(([userId]) => userId)
+      : [];
+
+    await disconnectLiveKitRoom(group.livekitRoomName);
+    const updates: Record<string, unknown> = {
+      [`groups/${input.groupId}`]: null,
+      [`groupMembers/${input.groupId}`]: null,
+      [`livekitRooms/${input.groupId}`]: null,
+      [`memberAvailability/${input.groupId}`]: null,
+      [`handRaises/${input.groupId}`]: null,
+      [`talkLocks/${input.groupId}`]: null,
+      [`talkSessions/${input.groupId}`]: null,
+      [`statusEvents/${input.groupId}`]: null,
+      [`dailyUsage/${input.groupId}`]: null,
+      [`notificationEvents/${input.groupId}`]: null,
+      [`groupLifecycleLocks/${input.groupId}`]: null
+    };
+    for (const userId of memberUserIds) {
+      updates[`userGroups/${userId}/${input.groupId}`] = null;
+    }
+    await addFlatGroupCleanup(updates, input.groupId);
+    await db.ref().update(updates);
+    await notifyUsers(
+      memberUserIds,
+      "Group deleted",
+      `${group.name} was permanently deleted.`,
+      { type: "group_deleted", groupId: input.groupId }
+    );
+    return { deleted: true };
+  } catch (error) {
+    await groupRef
+      .update({
+        groupState: "active",
+        deletingAt: null,
+        deletionFailedAt: nowSeconds()
+      })
+      .catch(() => undefined);
+    await lifecycleRef.remove().catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function requireActiveUser(userId: string) {
@@ -201,9 +581,28 @@ export async function requireActiveGroup(groupId: string) {
 
   return {
     groupId,
+    name: snapshot.child("name").val()?.toString() ?? "Friends",
+    ownerUserId: snapshot.child("ownerUserId").val()?.toString() ?? "",
     maxMembers: readNumber(snapshot.child("maxMembers").val(), maxMembers),
     livekitRoomName: snapshot.child("livekitRoomName").val()?.toString() ?? `group_${groupId}`
   };
+}
+
+async function requireGroupOwner(groupId: string, userId: string) {
+  const group = await requireActiveGroup(groupId);
+  const member = await requireActiveGroupMember(groupId, userId);
+  if (!isVerifiedGroupOwner(group.ownerUserId, member.role, userId)) {
+    throw new HttpError(403, "owner_required", "Only the group owner can do this.");
+  }
+  return group;
+}
+
+export function isVerifiedGroupOwner(
+  ownerUserId: string,
+  memberRole: string,
+  userId: string
+) {
+  return ownerUserId === userId && memberRole === "owner";
 }
 
 export async function requireActiveGroupMember(groupId: string, userId: string) {
@@ -243,7 +642,22 @@ export async function requireActiveUserDevice(userId: string, deviceId: string) 
 async function findActiveInvite(inviteCode: string) {
   const now = nowSeconds();
   const hash = hashInviteCode(inviteCode);
-  const snapshot = await getRealtimeDatabase().ref("groupInvites").get();
+  const db = getRealtimeDatabase();
+  const indexedId = (await db.ref(`inviteCodeIndex/${hash}`).get()).val()?.toString();
+  if (indexedId) {
+    const indexed = await db.ref(`groupInvites/${indexedId}`).get();
+    if (isRecord(indexed.val())) {
+      return activeInviteRecord(indexedId, indexed.val() as Record<string, unknown>, hash, now);
+    }
+  }
+
+  // Legacy fallback: backfill links created before inviteCodeIndex existed.
+  const snapshot = await db
+    .ref("groupInvites")
+    .orderByChild("inviteCodeHash")
+    .equalTo(hash)
+    .limitToFirst(1)
+    .get();
 
   if (!snapshot.exists() || !isRecord(snapshot.val())) {
     throw new HttpError(404, "invite_not_found", "Invite code is invalid.");
@@ -252,48 +666,301 @@ async function findActiveInvite(inviteCode: string) {
   for (const [inviteId, value] of Object.entries(snapshot.val() as Record<string, unknown>)) {
     if (!isRecord(value)) continue;
     if (value.inviteCodeHash !== hash) continue;
-
-    const expiresAt = readNumber(value.expiresAt, 0);
-    const maxUsesValue = readNumber(value.maxUses, 0);
-    const usedCount = readNumber(value.usedCount, 0);
-
-    if (value.revokedAt != null || expiresAt <= now || usedCount >= maxUsesValue) {
-      continue;
-    }
-
-    return {
-      inviteId,
-      groupId: value.groupId?.toString() ?? "",
-      maxUses: maxUsesValue,
-      usedCount,
-      expiresAt
-    };
+    await db.ref(`inviteCodeIndex/${hash}`).set(inviteId);
+    return activeInviteRecord(inviteId, value, hash, now);
   }
 
-  throw new HttpError(409, "invite_unavailable", "Invite is expired or fully used.");
+  throw new HttpError(404, "invite_not_found", "Invite code is invalid.");
 }
 
-async function readActiveInviteById(inviteId: string, now: number) {
-  const snapshot = await getRealtimeDatabase().ref(`groupInvites/${inviteId}`).get();
-
-  if (!snapshot.exists() || !isRecord(snapshot.val())) {
-    throw new HttpError(409, "invite_unavailable", "Invite is expired or fully used.");
-  }
-
-  const value = snapshot.val() as Record<string, unknown>;
-  const usedCount = readNumber(value.usedCount, 0);
-  const maxUsesValue = readNumber(value.maxUses, 0);
+function activeInviteRecord(
+  inviteId: string,
+  value: Record<string, unknown>,
+  expectedHash: string,
+  now: number
+) {
   const expiresAt = readNumber(value.expiresAt, 0);
-
-  if (value.revokedAt != null || expiresAt <= now || usedCount >= maxUsesValue) {
+  const maxUsesValue = readNumber(value.maxUses, 0);
+  const usedCount = readNumber(value.usedCount, 0);
+  const groupId = value.groupId?.toString() ?? "";
+  if (
+    value.inviteCodeHash !== expectedHash ||
+    groupId.length === 0 ||
+    value.revokedAt != null ||
+    expiresAt <= now ||
+    usedCount >= maxUsesValue
+  ) {
     throw new HttpError(409, "invite_unavailable", "Invite is expired or fully used.");
   }
-
   return {
-    usedCount,
+    inviteId,
+    groupId,
     maxUses: maxUsesValue,
+    usedCount,
     expiresAt
   };
+}
+
+async function reserveInviteUse(inviteId: string, inviteCode: string, now: number) {
+  const hash = hashInviteCode(inviteCode);
+  const result = await getRealtimeDatabase()
+    .ref(`groupInvites/${inviteId}`)
+    .transaction((current) => {
+      if (!isRecord(current)) return;
+      const usedCount = readNumber(current.usedCount, 0);
+      const maxUsesValue = readNumber(current.maxUses, 0);
+      const expiresAt = readNumber(current.expiresAt, 0);
+      if (
+        current.inviteCodeHash !== hash ||
+        current.revokedAt != null ||
+        expiresAt <= now ||
+        usedCount >= maxUsesValue
+      ) {
+        return;
+      }
+      return { ...current, usedCount: usedCount + 1 };
+    });
+  if (!result.committed) {
+    throw new HttpError(409, "invite_unavailable", "Invite is expired or fully used.");
+  }
+}
+
+async function releaseInviteUse(inviteId: string) {
+  await getRealtimeDatabase()
+    .ref(`groupInvites/${inviteId}/usedCount`)
+    .transaction((current) =>
+      current == null ? undefined : Math.max(readNumber(current, 1) - 1, 0)
+    );
+}
+
+async function acquireGroupActivityLock(
+  groupId: string,
+  operationId: string,
+  now: number
+) {
+  const result = await getRealtimeDatabase()
+    .ref(`groupLifecycleLocks/${groupId}`)
+    .transaction((current) => {
+      const lock = isRecord(current) ? current : {};
+      if (lock.deleting === true) return;
+      const operations = isRecord(lock.operations) ? { ...lock.operations } : {};
+      // ponytail: 60-second lease avoids a dead group after a crashed request;
+      // use renewable leases if group mutations ever legitimately exceed it.
+      for (const [id, startedAt] of Object.entries(operations)) {
+        if (readNumber(startedAt, 0) < now - 60) delete operations[id];
+      }
+      operations[operationId] = now;
+      return { deleting: false, operations };
+    });
+  return result.committed;
+}
+
+async function acquireGroupDeletionLock(groupId: string) {
+  const now = nowSeconds();
+  const result = await getRealtimeDatabase()
+    .ref(`groupLifecycleLocks/${groupId}`)
+    .transaction((current) => {
+      const lock = isRecord(current) ? current : {};
+      if (lock.deleting === true) return;
+      const operations = isRecord(lock.operations) ? lock.operations : {};
+      const activeOperationExists = Object.values(operations).some(
+        (startedAt) => readNumber(startedAt, 0) >= now - 60
+      );
+      if (activeOperationExists) return;
+      return { deleting: true, operations: {} };
+    });
+  return result.committed;
+}
+
+async function cleanupMemberState(groupId: string, userId: string, reason: string) {
+  const db = getRealtimeDatabase();
+  const now = nowSeconds();
+  const updates: Record<string, unknown> = {
+    [`userGroups/${userId}/${groupId}`]: null,
+    [`memberAvailability/${groupId}/${userId}`]: null,
+    [`handRaises/${groupId}/${userId}`]: null,
+    [`dailyUsage/${groupId}/${userId}`]: null
+  };
+
+  for (const collection of ["appServiceSessions", "livekitSessions"]) {
+    const snapshot = await db
+      .ref(collection)
+      .orderByChild("groupId")
+      .equalTo(groupId)
+      .get();
+    if (!isRecord(snapshot.val())) continue;
+    for (const [id, raw] of Object.entries(snapshot.val() as Record<string, unknown>)) {
+      if (!isRecord(raw) || raw.groupId !== groupId || raw.userId !== userId) continue;
+      if (collection === "appServiceSessions") {
+        updates[`${collection}/${id}/serviceState`] = "stopped";
+        updates[`${collection}/${id}/stopReason`] = reason;
+        updates[`${collection}/${id}/stoppedAt`] = now;
+      } else {
+        updates[`${collection}/${id}/connectionState`] = "disconnected";
+        updates[`${collection}/${id}/disconnectedAt`] = now;
+      }
+    }
+  }
+
+  const lock = await db.ref(`talkLocks/${groupId}`).get();
+  if (lock.child("holderUserId").val() === userId) {
+    updates[`talkLocks/${groupId}`] = null;
+  }
+  const talks = await db.ref(`talkSessions/${groupId}`).get();
+  if (isRecord(talks.val())) {
+    for (const [talkId, raw] of Object.entries(talks.val() as Record<string, unknown>)) {
+      if (!isRecord(raw) || raw.speakerUserId !== userId || raw.talkState !== "active") continue;
+      updates[`talkSessions/${groupId}/${talkId}/talkState`] = "completed";
+      updates[`talkSessions/${groupId}/${talkId}/endReason`] = reason;
+      updates[`talkSessions/${groupId}/${talkId}/endedAt`] = now;
+    }
+  }
+  const issuances = await db
+    .ref("livekitTokenIssuances")
+    .orderByChild("groupId")
+    .equalTo(groupId)
+    .get();
+  if (isRecord(issuances.val())) {
+    for (const [id, raw] of Object.entries(issuances.val() as Record<string, unknown>)) {
+      if (!isRecord(raw) || raw.groupId !== groupId || raw.userId !== userId) continue;
+      updates[`livekitTokenIssuances/${id}/revokedAt`] = now;
+    }
+  }
+
+  await db.ref().update(updates);
+  await disconnectLiveKitMember(groupId, userId);
+}
+
+async function addFlatGroupCleanup(updates: Record<string, unknown>, groupId: string) {
+  const db = getRealtimeDatabase();
+  for (const collection of [
+    "groupInvites",
+    "appServiceSessions",
+    "livekitSessions",
+    "livekitTokenIssuances",
+    "voiceNudges"
+  ]) {
+    const snapshot = await db
+      .ref(collection)
+      .orderByChild("groupId")
+      .equalTo(groupId)
+      .get();
+    if (!isRecord(snapshot.val())) continue;
+    for (const [id, raw] of Object.entries(snapshot.val() as Record<string, unknown>)) {
+      if (!isRecord(raw) || raw.groupId !== groupId) continue;
+      updates[`${collection}/${id}`] = null;
+      if (collection === "groupInvites" && typeof raw.inviteCodeHash === "string") {
+        updates[`inviteCodeIndex/${raw.inviteCodeHash}`] = null;
+      }
+    }
+  }
+
+  const events = await db.ref(`notificationEvents/${groupId}`).get();
+  if (isRecord(events.val())) {
+    const eventIds = Object.keys(events.val() as Record<string, unknown>);
+    for (const eventId of eventIds) {
+      updates[`notificationDeliveries/${eventId}`] = null;
+    }
+    try {
+      const bucket = getVoiceNudgeBucket();
+      await Promise.all(
+        eventIds.map((eventId) =>
+          bucket.file(`voiceNudges/${eventId}.m4a`).delete({ ignoreNotFound: true })
+        )
+      );
+    } catch (error) {
+      logger.warn({ error, groupId }, "group voice nudge media cleanup failed");
+    }
+  }
+}
+
+async function notifyUsers(
+  userIds: string[],
+  title: string,
+  body: string,
+  data: Record<string, string>
+) {
+  const db = getRealtimeDatabase();
+  const tokens: string[] = [];
+  for (const userId of userIds) {
+    const devices = await db.ref(`userDevices/${userId}`).get();
+    if (!isRecord(devices.val())) continue;
+    for (const raw of Object.values(devices.val() as Record<string, unknown>)) {
+      if (!isRecord(raw) || raw.deviceState !== "active") continue;
+      const token = raw.fcmToken?.toString();
+      if (token) tokens.push(token);
+    }
+  }
+  try {
+    await sendAndroidDataPushes(
+      tokens.map((token) => ({
+        token,
+        data: { ...data, title, body }
+      })),
+      10 * 60 * 1000
+    );
+  } catch (error) {
+    logger.warn({ error, userCount: userIds.length }, "group lifecycle push failed");
+  }
+}
+
+function roomServiceClient() {
+  if (!config.LIVEKIT_URL || !config.LIVEKIT_API_KEY || !config.LIVEKIT_API_SECRET) {
+    return null;
+  }
+  const host = config.LIVEKIT_URL.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+  return new RoomServiceClient(host, config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET);
+}
+
+async function disconnectLiveKitMember(groupId: string, userId: string) {
+  const client = roomServiceClient();
+  if (!client) return;
+  try {
+    const group = await getRealtimeDatabase().ref(`groups/${groupId}`).get();
+    const roomName = group.child("livekitRoomName").val()?.toString() ?? `group_${groupId}`;
+    const participants = await client.listParticipants(roomName);
+    await Promise.all(
+      participants
+        .filter((participant) => participant.identity.startsWith(`${groupId}:${userId}:`))
+        .map((participant) =>
+          client.removeParticipant(roomName, participant.identity, {
+            revokeTokenTs: BigInt(nowSeconds())
+          })
+        )
+    );
+  } catch (error) {
+    // Empty / never-created rooms return 404 — expected when the member was
+    // not in an active LiveKit session. Only warn on unexpected failures.
+    if (!isLiveKitNotFound(error)) {
+      logger.warn({ error, groupId, userId }, "LiveKit member disconnect failed");
+    }
+  }
+}
+
+async function disconnectLiveKitRoom(roomName: string) {
+  const client = roomServiceClient();
+  if (!client) return;
+  try {
+    const participants = await client.listParticipants(roomName);
+    await Promise.all(
+      participants.map((participant) =>
+        client.removeParticipant(roomName, participant.identity, {
+          revokeTokenTs: BigInt(nowSeconds())
+        })
+      )
+    );
+    await client.deleteRoom(roomName);
+  } catch (error) {
+    if (!isLiveKitNotFound(error)) {
+      logger.warn({ error, roomName }, "LiveKit room deletion failed");
+    }
+  }
+}
+
+function isLiveKitNotFound(error: unknown) {
+  if (!isRecord(error)) return false;
+  const status = error.status ?? error.code;
+  return status === 404 || status === "not_found";
 }
 
 function defaultAvailability(now: number) {
@@ -306,6 +973,10 @@ function defaultAvailability(now: number) {
     serviceState: "stopped",
     livekitConnectionState: "disconnected",
     canReceiveLiveAudio: false,
+    // Placeholder until the member actually connects — the client decides
+    // the real starting mode in OnlineRepository.goOnline (walkie-talkie by
+    // default, or call mode if peers are already connected that way).
+    connectionMode: "walkieTalkie",
     lastHeartbeatAt: now,
     staleAfterAt: now,
     updatedAt: now

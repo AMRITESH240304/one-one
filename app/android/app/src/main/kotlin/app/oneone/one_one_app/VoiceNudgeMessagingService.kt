@@ -38,6 +38,15 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             return
         }
         when (kind) {
+            "group_removed",
+            "group_deleted" -> {
+                showGroupLifecycleNotification(message)
+                return
+            }
+            VoiceNudgeContract.kindGoneOffline -> {
+                showGoneOfflineNotification(message)
+                return
+            }
             VoiceNudgeContract.kindPush -> {
                 showActionableNotification(message)
                 return
@@ -126,6 +135,65 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         )
     }
 
+    private fun showGroupLifecycleNotification(message: RemoteMessage) {
+        val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val groupId = message.data["groupId"] ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            manager.activeNotifications
+                .filter { it.notification.group == VoiceNudgeNotifications.groupKey(groupId) }
+                .forEach { manager.cancel(it.id) }
+        } else {
+            manager.cancelAll()
+        }
+        try {
+            startService(
+                Intent(this, VoiceNudgePlaybackService::class.java).apply {
+                    action = VoiceNudgeContract.actionStopGroupNudges
+                    putExtra(VoiceNudgeContract.extraGroupId, groupId)
+                },
+            )
+        } catch (error: RuntimeException) {
+            VoiceNudgeDiagnostics.logFailure("[FCM-E11] Group nudge cleanup", error)
+        }
+        try {
+            manager.notify(
+                VoiceNudgeNotifications.idFor(message.messageId ?: "group_lifecycle"),
+                VoiceNudgeNotifications.buildGeneral(
+                    this,
+                    message.data["title"] ?: "Group updated",
+                    message.data["body"] ?: "Your group membership changed.",
+                    groupId,
+                ),
+            )
+        } catch (error: SecurityException) {
+            VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
+        }
+    }
+
+    private fun showGoneOfflineNotification(message: RemoteMessage) {
+        val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val groupId = message.data["groupId"]
+        try {
+            manager.notify(
+                VoiceNudgeNotifications.idFor(
+                    message.messageId ?: "gone_offline_${message.sentTime}",
+                ),
+                VoiceNudgeNotifications.buildGeneral(
+                    this,
+                    message.data["title"] ?: "You're offline",
+                    message.data["body"] ?: "You are now offline.",
+                    groupId,
+                ),
+            )
+            Log.i(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-08] Gone-offline notification displayed reason=${message.data["reason"]}",
+            )
+        } catch (error: SecurityException) {
+            VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
+        }
+    }
+
     private fun showForegroundNotification(message: RemoteMessage, kind: String) {
         val senderName = message.data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
         val fallbackTitle = if (kind == VoiceNudgeContract.kindFriendLive) {
@@ -147,6 +215,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                     this,
                     message.notification?.title ?: fallbackTitle,
                     message.notification?.body ?: fallbackBody,
+                    message.data["groupId"],
                 ),
             )
             Log.i(

@@ -11,6 +11,10 @@ import 'accent_theme.dart';
 import 'firebase_setup_blocked_screen.dart';
 import 'google_auth_screen.dart';
 import 'startup_gate_screen.dart';
+import 'startup_performance.dart';
+import '../core/firebase/crashlytics_service.dart';
+import '../core/firebase/firebase_analytics_service.dart';
+import '../features/service_status/service_status_gate.dart';
 
 class OneOneApp extends StatelessWidget {
   const OneOneApp({super.key});
@@ -25,6 +29,7 @@ class OneOneApp extends StatelessWidget {
         return MaterialApp(
           title: 'One One',
           debugShowCheckedModeBanner: false,
+          navigatorObservers: [AnalyticsService.observer],
           builder: (context, child) {
             return ScreenUtilInit(
               designSize: const Size(393, 873),
@@ -85,6 +90,7 @@ class _AuthSessionLifecycleState extends State<_AuthSessionLifecycle>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      unawaited(AnalyticsService.logSessionStarted());
       unawaited(_refreshFirebaseToken());
     }
   }
@@ -109,7 +115,19 @@ class _FirebaseGate extends StatefulWidget {
 }
 
 class _FirebaseGateState extends State<_FirebaseGate> {
-  late final Future<FirebaseApp> _firebaseInit = Firebase.initializeApp();
+  late final Future<FirebaseApp> _firebaseInit = _initializeFirebase();
+
+  Future<FirebaseApp> _initializeFirebase() async {
+    final stopwatch = Stopwatch()..start();
+    // Firebase is initialized in main.dart before runApp so Crashlytics
+    // handlers are active from the first frame. Reuse that default app here.
+    final app = Firebase.apps.isEmpty
+        ? await Firebase.initializeApp()
+        : Firebase.app();
+    logStartupMilestone('Firebase ready', stopwatch);
+    await CrashlyticsService.log('firebase_gate_ready');
+    return app;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -137,24 +155,23 @@ class _FirebaseGateState extends State<_FirebaseGate> {
           );
         }
 
-        return StreamBuilder<User?>(
-          stream: FirebaseAuth.instance.userChanges(),
-          initialData: FirebaseAuth.instance.currentUser,
-          builder: (context, authSnapshot) {
-            final user = authSnapshot.data;
-            if (user == null ||
-                user.isAnonymous ||
-                !user.providerData.any(
-                  (provider) => provider.providerId == 'google.com',
-                )) {
-              return const GoogleAuthScreen();
-            }
+        return ServiceStatusGate(
+          child: StreamBuilder<User?>(
+            stream: FirebaseAuth.instance.userChanges(),
+            initialData: FirebaseAuth.instance.currentUser,
+            builder: (context, authSnapshot) {
+              final user = authSnapshot.data;
+              if (user == null ||
+                  user.isAnonymous ||
+                  !user.providerData.any(
+                    (provider) => provider.providerId == 'google.com',
+                  )) {
+                return const GoogleAuthScreen();
+              }
 
-            // RevenueCat is intentionally absent on this branch. Once Google
-            // authentication succeeds, continue into the normal app startup
-            // and onboarding flow without initializing a subscription SDK.
-            return const StartupGateScreen();
-          },
+              return const StartupGateScreen();
+            },
+          ),
         );
       },
     );
