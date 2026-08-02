@@ -1,14 +1,12 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 import 'accent_theme.dart';
-import 'firebase_setup_blocked_screen.dart';
 import 'google_auth_screen.dart';
 import 'startup_gate_screen.dart';
 import 'startup_performance.dart';
@@ -120,83 +118,46 @@ class _FirebaseGate extends StatefulWidget {
 }
 
 class _FirebaseGateState extends State<_FirebaseGate> {
-  late final Future<FirebaseApp> _firebaseInit = _initializeFirebase();
+  @override
+  void initState() {
+    super.initState();
+    // Firebase is already initialized in main.dart before runApp.
+    // Telemetry is fire-and-forget — never block the first frame on it.
+    unawaited(_logFirebaseReady());
+  }
 
-  Future<FirebaseApp> _initializeFirebase() async {
+  Future<void> _logFirebaseReady() async {
     final stopwatch = Stopwatch()..start();
-    // Firebase is initialized in main.dart before runApp so Crashlytics
-    // handlers are active from the first frame. Reuse that default app here.
-    final app = Firebase.apps.isEmpty
-        ? await Firebase.initializeApp()
-        : Firebase.app();
     logStartupMilestone('Firebase ready', stopwatch);
-    await CrashlyticsService.log('firebase_gate_ready');
-    return app;
+    try {
+      await CrashlyticsService.log('firebase_gate_ready');
+    } catch (_) {
+      // Telemetry failure must never block the UI.
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<FirebaseApp>(
-      future: _firebaseInit,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done) {
-          return Scaffold(
-            backgroundColor: const Color(0xffF8BE03),
-            body: SafeArea(
-              child: Center(
-                child: Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 28.w),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Image.asset(
-                        'assets/logo.png',
-                        width: 172.w,
-                        fit: BoxFit.contain,
-                      ),
-                      SizedBox(height: 36.h),
-                      Text(
-                        'Welcome to One One',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: const Color(0xff252a2e),
-                          fontSize: 26.sp,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        }
+    // No FutureBuilder — go straight to the auth-gated content on the very
+    // first frame. The native window background is the same yellow as the
+    // welcome screen, so there is zero visual break between launch and Flutter.
+    return ServiceStatusGate(
+      child: StreamBuilder<User?>(
+        stream: FirebaseAuth.instance.userChanges(),
+        initialData: FirebaseAuth.instance.currentUser,
+        builder: (context, authSnapshot) {
+          final user = authSnapshot.data;
+          if (user == null ||
+              user.isAnonymous ||
+              !user.providerData.any(
+                (provider) => provider.providerId == 'google.com',
+              )) {
+            return const GoogleAuthScreen();
+          }
 
-        if (snapshot.hasError) {
-          return FirebaseSetupBlockedScreen(
-            errorText: snapshot.error.toString(),
-          );
-        }
-
-        return ServiceStatusGate(
-          child: StreamBuilder<User?>(
-            stream: FirebaseAuth.instance.userChanges(),
-            initialData: FirebaseAuth.instance.currentUser,
-            builder: (context, authSnapshot) {
-              final user = authSnapshot.data;
-              if (user == null ||
-                  user.isAnonymous ||
-                  !user.providerData.any(
-                    (provider) => provider.providerId == 'google.com',
-                  )) {
-                return const GoogleAuthScreen();
-              }
-
-              return const StartupGateScreen();
-            },
-          ),
-        );
-      },
+          return const StartupGateScreen();
+        },
+      ),
     );
   }
 }
