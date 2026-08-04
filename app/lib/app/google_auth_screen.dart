@@ -7,7 +7,14 @@ import '../core/firebase/crashlytics_service.dart';
 import '../features/identity/data/identity_repository.dart';
 
 class GoogleAuthScreen extends StatefulWidget {
-  const GoogleAuthScreen({super.key});
+  const GoogleAuthScreen({super.key, this.initializing = false});
+
+  /// When true, renders the exact same layout as the interactive welcome
+  /// screen but with the button in a disabled "loading" state and taps
+  /// ignored. Used while Firebase is still initializing so the very first
+  /// frame is pixel-identical to the real welcome screen — nothing shifts
+  /// or jitters once initialization completes and the real screen swaps in.
+  final bool initializing;
 
   @override
   State<GoogleAuthScreen> createState() => _GoogleAuthScreenState();
@@ -125,8 +132,9 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
                 SizedBox(height: 14.h),
               ],
               _GoogleSignInButton(
-                busy: false,
-                onTap: _continueWithGoogle,
+                busy: widget.initializing,
+                busyLabel: widget.initializing ? 'Loading…' : 'Signing in…',
+                onTap: widget.initializing ? () {} : _continueWithGoogle,
               ),
               SizedBox(height: 22.h),
               Text(
@@ -235,9 +243,14 @@ class _SplashPulseDotsState extends State<_SplashPulseDots>
 }
 
 class _GoogleSignInButton extends StatefulWidget {
-  const _GoogleSignInButton({required this.busy, required this.onTap});
+  const _GoogleSignInButton({
+    required this.busy,
+    required this.onTap,
+    this.busyLabel = 'Signing in…',
+  });
   final bool busy;
   final VoidCallback onTap;
+  final String busyLabel;
   @override
   State<_GoogleSignInButton> createState() => _GoogleSignInButtonState();
 }
@@ -280,7 +293,7 @@ class _GoogleSignInButtonState extends State<_GoogleSignInButton> {
                     ),
               SizedBox(width: 10.w),
               Text(
-                widget.busy ? 'Signing in…' : 'Continue with Google',
+                widget.busy ? widget.busyLabel : 'Continue with Google',
                 style: TextStyle(
                   color: const Color(0xff384047),
                   fontSize: 15.sp,

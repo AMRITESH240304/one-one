@@ -140,36 +140,11 @@ class _FirebaseGateState extends State<_FirebaseGate> {
       future: _firebaseInit,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          return Scaffold(
-            backgroundColor: const Color(0xffF8BE03),
-            body: SafeArea(
-              child: Center(
-                child: Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 28.w),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Image.asset(
-                        'assets/logo.png',
-                        width: 172.w,
-                        fit: BoxFit.contain,
-                      ),
-                      SizedBox(height: 36.h),
-                      Text(
-                        'Welcome to One One',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: const Color(0xff252a2e),
-                          fontSize: 26.sp,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
+          // Pixel-identical to GoogleAuthScreen's real layout (just with the
+          // button disabled) so there is zero visual shift — no jitter —
+          // once Firebase finishes initializing and the real screen swaps
+          // in underneath the StreamBuilder.
+          return const GoogleAuthScreen(initializing: true);
         }
 
         if (snapshot.hasError) {

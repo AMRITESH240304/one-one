@@ -4,9 +4,40 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+import 'package:lottie/lottie.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 enum _SetupStep { mic, notification, background }
+
+class _StepVisual {
+  const _StepVisual({
+    required this.iconColor,
+    required this.icon,
+    required this.lottieAsset,
+  });
+
+  final Color iconColor;
+  final IconData icon;
+  final String lottieAsset;
+}
+
+const Map<_SetupStep, _StepVisual> _stepVisuals = {
+  _SetupStep.mic: _StepVisual(
+    iconColor: Color(0xffffb020),
+    icon: Icons.mic_rounded,
+    lottieAsset: 'assets/lottie/mic_pulse.json',
+  ),
+  _SetupStep.notification: _StepVisual(
+    iconColor: Color(0xffff5a5f),
+    icon: Icons.notifications_rounded,
+    lottieAsset: 'assets/lottie/notification_wave.json',
+  ),
+  _SetupStep.background: _StepVisual(
+    iconColor: Color(0xff4c8dff),
+    icon: Icons.battery_saver_rounded,
+    lottieAsset: 'assets/lottie/radio_connect.json',
+  ),
+};
 
 class SetupPermissionScreen extends StatefulWidget {
   const SetupPermissionScreen({super.key, required this.onComplete});
@@ -161,6 +192,8 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
 
   @override
   Widget build(BuildContext context) {
+    final visual = _stepVisuals[_step]!;
+
     return Scaffold(
       backgroundColor: const Color(0xff000000),
       body: SafeArea(
@@ -168,9 +201,9 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
           padding: EdgeInsets.symmetric(horizontal: 24.w),
           child: Column(
             children: [
-              SizedBox(height: 100.h),
+              SizedBox(height: 64.h),
               Text(
-                'one quick setup',
+                'let\'s get those\nover with:',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: Colors.white,
@@ -180,7 +213,31 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
                   letterSpacing: -0.6,
                 ),
               ),
-              const Spacer(),
+              Expanded(
+                child: Center(
+                  child: AnimatedSwitcher(
+                    duration: _stageTransitionDuration,
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    transitionBuilder: (child, animation) {
+                      return FadeTransition(
+                        opacity: animation,
+                        child: ScaleTransition(
+                          scale: Tween<double>(
+                            begin: 0.92,
+                            end: 1,
+                          ).animate(animation),
+                          child: child,
+                        ),
+                      );
+                    },
+                    child: _StepHero(
+                      key: ValueKey(_step),
+                      visual: visual,
+                    ),
+                  ),
+                ),
+              ),
               AnimatedSwitcher(
                 duration: _stageTransitionDuration,
                 switchInCurve: Curves.easeOutCubic,
@@ -201,30 +258,28 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
                 child: switch (_step) {
                   _SetupStep.mic => _PermissionCard(
                     key: const ValueKey('mic-card'),
-                    iconColor: const Color(0xffffb020),
-                    icon: Icons.mic_rounded,
-                    title: 'Talk to your friends without them even being there',
-                    subtitle: 'Microphone access is required to continue.',
+                    iconColor: visual.iconColor,
+                    icon: visual.icon,
+                    title: 'mic',
+                    subtitle: 'so your friends can hear you\nwhen you talk...',
                     checked: _micGranted,
                     onTap: _requestMicPermission,
                   ),
                   _SetupStep.notification => _PermissionCard(
                     key: const ValueKey('notification-card'),
-                    iconColor: const Color(0xffff5a5f),
-                    icon: Icons.notifications_rounded,
-                    title: 'Stay connected',
-                    subtitle:
-                        'Voice comes through even when the app isn\'t open.',
+                    iconColor: visual.iconColor,
+                    icon: visual.icon,
+                    title: 'notifications',
+                    subtitle: 'know when your friends are\ntalking to you',
                     checked: _notificationGranted,
                     onTap: _requestNotificationPermission,
                   ),
                   _SetupStep.background => _PermissionCard(
                     key: const ValueKey('background-card'),
-                    iconColor: const Color(0xff4c8dff),
-                    icon: Icons.battery_saver_rounded,
-                    title: 'Keep One One reliable',
-                    subtitle:
-                        'Allow background activity for dependable voice nudges.',
+                    iconColor: visual.iconColor,
+                    icon: visual.icon,
+                    title: 'background activity',
+                    subtitle: 'receive nudges when one one\nisn\'t open',
                     checked: _backgroundGranted,
                     onTap: _requestBackgroundPermission,
                   ),
@@ -232,9 +287,7 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
               ),
               SizedBox(height: 28.h),
               Text(
-                _step == _SetupStep.mic
-                    ? 'Microphone access is required to continue.'
-                    : 'You can update these later in Android Settings.',
+                '*we need those for one one to work',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: const Color.fromRGBO(255, 255, 255, 0.72),
@@ -246,6 +299,52 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// The big animated centerpiece for the current onboarding step: a looping,
+/// playful Lottie animation (voice waves / signal bursts / radio pulses)
+/// with a colored icon badge grounding it in the permission being requested.
+class _StepHero extends StatelessWidget {
+  const _StepHero({super.key, required this.visual});
+
+  final _StepVisual visual;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = 250.w;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Lottie.asset(
+            visual.lottieAsset,
+            width: size,
+            height: size,
+            fit: BoxFit.contain,
+            repeat: true,
+          ),
+          Container(
+            width: 86.w,
+            height: 86.w,
+            decoration: BoxDecoration(
+              color: visual.iconColor,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: visual.iconColor.withValues(alpha: 0.45),
+                  blurRadius: 28,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Icon(visual.icon, color: Colors.white, size: 38.sp),
+          ),
+        ],
       ),
     );
   }
