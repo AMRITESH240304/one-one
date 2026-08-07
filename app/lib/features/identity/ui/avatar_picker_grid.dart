@@ -2,102 +2,99 @@ import 'package:flutter/material.dart';
 
 import '../data/avatar_assets.dart';
 
-/// Pack switcher ("Avatar 1" / "Avatar 2") + grid of preset avatars.
+/// Single scrollable preset-avatar picker spanning every pack.
 ///
-/// Shared by onboarding ([ProfilePictureScreen]) and the Settings avatar
-/// section so both present the exact same picker.
+/// Pack origin is shown only as a section header for visual grouping — there
+/// is no separate pack selection step. Shared by onboarding
+/// ([ProfilePictureScreen]) and Settings so both present the same layout.
 class AvatarPickerGrid extends StatelessWidget {
   const AvatarPickerGrid({
     super.key,
     required this.avatars,
-    required this.selectedPack,
     required this.selectedAsset,
     required this.enabled,
     required this.accent,
-    required this.onPackChanged,
     required this.onAvatarSelected,
     this.physics,
     this.shrinkWrap = false,
   });
 
   final List<AvatarAsset> avatars;
-  final AvatarPack selectedPack;
   final String? selectedAsset;
   final bool enabled;
   final Color accent;
-  final ValueChanged<AvatarPack> onPackChanged;
   final ValueChanged<String> onAvatarSelected;
 
-  /// Scroll physics for the inner grid. Pass [NeverScrollableScrollPhysics]
+  /// Scroll physics for the outer list. Pass [NeverScrollableScrollPhysics]
   /// when embedding this inside another scrollable (e.g. a Settings list).
   final ScrollPhysics? physics;
 
-  /// Whether the inner grid should size itself to its content instead of
-  /// expanding to fill the available space. Set to true when embedding this
-  /// inside another scrollable.
+  /// Whether the list should size itself to its content instead of expanding.
   final bool shrinkWrap;
 
   @override
   Widget build(BuildContext context) {
-    final packAvatars = avatars
-        .where((avatar) => avatar.pack == selectedPack)
-        .toList();
+    final sections = <({AvatarPack pack, List<AvatarAsset> items})>[];
+    for (final pack in AvatarPack.values) {
+      final items = avatars
+          .where((avatar) => avatar.pack == pack)
+          .toList(growable: false);
+      if (items.isNotEmpty) {
+        sections.add((pack: pack, items: items));
+      }
+    }
 
-    final grid = GridView.builder(
-      key: ValueKey(selectedPack),
+    return ListView.builder(
       shrinkWrap: shrinkWrap,
       physics: physics,
-      itemCount: packAvatars.length,
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 4,
-        mainAxisSpacing: 16,
-        crossAxisSpacing: 16,
-      ),
-      itemBuilder: (context, index) {
-        final avatar = packAvatars[index];
-        final selected = avatar.assetPath == selectedAsset;
-        return _AvatarTile(
-          assetPath: avatar.assetPath,
-          label: 'Avatar ${index + 1}',
-          selected: selected,
-          accent: accent,
-          onTap: enabled ? () => onAvatarSelected(avatar.assetPath) : null,
+      itemCount: sections.length,
+      itemBuilder: (context, sectionIndex) {
+        final section = sections[sectionIndex];
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: sectionIndex == sections.length - 1 ? 0 : 20,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                section.pack.label.toUpperCase(),
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.6,
+                ),
+              ),
+              const SizedBox(height: 12),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: section.items.length,
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 4,
+                  mainAxisSpacing: 16,
+                  crossAxisSpacing: 16,
+                ),
+                itemBuilder: (context, index) {
+                  final avatar = section.items[index];
+                  final selected = avatar.assetPath == selectedAsset;
+                  return _AvatarTile(
+                    assetPath: avatar.assetPath,
+                    label: '${section.pack.label} ${index + 1}',
+                    selected: selected,
+                    accent: accent,
+                    onTap: enabled
+                        ? () => onAvatarSelected(avatar.assetPath)
+                        : null,
+                  );
+                },
+              ),
+            ],
+          ),
         );
       },
-    );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: shrinkWrap ? MainAxisSize.min : MainAxisSize.max,
-      children: [
-        SegmentedButton<AvatarPack>(
-          style: ButtonStyle(
-            foregroundColor: WidgetStateProperty.resolveWith(
-              (states) => states.contains(WidgetState.selected)
-                  ? Colors.black
-                  : Colors.white70,
-            ),
-            backgroundColor: WidgetStateProperty.resolveWith(
-              (states) => states.contains(WidgetState.selected)
-                  ? accent
-                  : Colors.transparent,
-            ),
-            side: const WidgetStatePropertyAll(
-              BorderSide(color: Colors.white24),
-            ),
-          ),
-          segments: [
-            for (final pack in AvatarPack.values)
-              ButtonSegment(value: pack, label: Text(pack.label)),
-          ],
-          selected: {selectedPack},
-          onSelectionChanged: enabled
-              ? (selection) => onPackChanged(selection.first)
-              : null,
-        ),
-        SizedBox(height: shrinkWrap ? 16 : 20),
-        shrinkWrap ? grid : Expanded(child: grid),
-      ],
     );
   }
 }

@@ -88,6 +88,7 @@ class AppUserProfile {
     String? avatarAsset,
     bool clearProfilePhotoUrl = false,
     bool clearProfilePhotoBase64 = false,
+    bool clearAvatarAsset = false,
   }) {
     return AppUserProfile(
       userId: userId,
@@ -104,7 +105,7 @@ class AppUserProfile {
       profilePhotoBase64: clearProfilePhotoBase64
           ? null
           : (profilePhotoBase64 ?? this.profilePhotoBase64),
-      avatarAsset: avatarAsset ?? this.avatarAsset,
+      avatarAsset: clearAvatarAsset ? null : (avatarAsset ?? this.avatarAsset),
     );
   }
 }

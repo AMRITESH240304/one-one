@@ -7,6 +7,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 import '../../../app/accent_theme.dart';
@@ -36,8 +37,10 @@ import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../../nudges/data/nudge_repository.dart';
 import '../../nudges/ui/nudge_screen.dart';
 import '../../talk/data/talk_repository.dart';
+import '../../talk/models/emoji_burst.dart';
 import '../../talk/models/talk_session.dart';
 import '../../talk/talk_feedback.dart';
+import '../../talk/ui/emoji_burst_overlay.dart';
 import '../data/identity_home_bootstrap.dart';
 import '../data/identity_repository.dart';
 import '../models/identity_session.dart';
@@ -88,6 +91,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Timer? _availabilityExpiryTimer;
   StreamSubscription<DatabaseEvent>? _membersSubscription;
   StreamSubscription<DatabaseEvent>? _userGroupsSubscription;
+  final List<StreamSubscription<DatabaseEvent>> _memberProfileSubscriptions =
+      [];
   Set<String>? _pendingUserGroupIds;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   StreamSubscription<void>? _nudgeActionSubscription;
@@ -100,6 +105,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Room? _room;
   EventsListener<RoomEvent>? _roomListener;
   Timer? _heartbeatTimer;
+  List<EmojiBurst> _emojiBursts = const [];
 
   // Automatic-offline-on-disconnect (with grace period) bookkeeping. See
   // _evaluatePeerPresenceForAutoOffline for the state machine.
@@ -219,6 +225,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _listenToMembers(selected.groupId);
       _listenToAvailability(selected.groupId);
       _listenToChatMessages(selected.groupId);
+      _listenToMemberProfiles(_members);
     }
   }
 
@@ -233,6 +240,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _membersSubscription?.cancel();
     _chatMessagesSubscription?.cancel();
     _userGroupsSubscription?.cancel();
+    for (final sub in _memberProfileSubscriptions) {
+      unawaited(sub.cancel());
+    }
+    _memberProfileSubscriptions.clear();
     _connectivitySubscription?.cancel();
     _nudgeActionSubscription?.cancel();
     _registrationRenewalSubscription?.cancel();
@@ -334,9 +345,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final audioRouteChanged =
         next.settings.audioOutputPreference !=
         _session.settings.audioOutputPreference;
-    setState(() => _session = next);
-    AccentThemeController.setAccentKey(next.settings.accentColorKey);
-    if (audioRouteChanged) unawaited(_applyPreferredAudioRoute());
+    // Defer so Settings save setState and this notify don't collide mid-frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final latest = widget.identityRepository.currentSession;
+      if (latest == null || latest.userId != _session.userId) return;
+      setState(() => _session = latest);
+      AccentThemeController.setAccentKey(latest.settings.accentColorKey);
+      if (audioRouteChanged) unawaited(_applyPreferredAudioRoute());
+    });
   }
 
   Future<void> _startConnectivityMonitoring() async {
@@ -417,6 +434,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           _precacheGroupMemberPhotos(
             membersByGroupId[selected.groupId] ?? const [],
           ),
+        );
+        _listenToMemberProfiles(
+          membersByGroupId[selected.groupId] ?? const [],
         );
       }
       _syncCarouselToSelectedGroup();
@@ -632,6 +652,124 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _members = members;
       _membersByGroupId = {..._membersByGroupId, groupId: members};
     });
+    _listenToMemberProfiles(members);
+  }
+
+  /// Fresh avatar/photo for friends: RTDB user profiles update independently
+  /// of membership, so re-read avatarAsset / photo fields without waiting
+  /// for a membership change (and without requiring a manual cache clear).
+  void _listenToMemberProfiles(List<GroupMemberSummary> members) {
+    for (final sub in _memberProfileSubscriptions) {
+      unawaited(sub.cancel());
+    }
+    _memberProfileSubscriptions.clear();
+
+    for (final member in members) {
+      if (member.userId == _session.userId) continue;
+      final userId = member.userId;
+      final sub = AppDatabase.instance().ref('users/$userId').onValue.listen((
+        event,
+      ) {
+        final value = event.snapshot.value;
+        if (value is! Map || !mounted) return;
+        final map = Map<Object?, Object?>.from(value);
+        final avatarRaw = map['avatarAsset']?.toString().trim();
+        final avatarAsset =
+            (avatarRaw != null && avatarRaw.isNotEmpty) ? avatarRaw : null;
+        final photoRaw = map['profilePhotoUrl']?.toString().trim();
+        final profilePhotoUrl =
+            (photoRaw != null && photoRaw.isNotEmpty) ? photoRaw : null;
+        final base64Raw = map['profilePhotoBase64']?.toString().trim();
+        final profilePhotoBase64 =
+            (base64Raw != null && base64Raw.isNotEmpty) ? base64Raw : null;
+        final displayName =
+            map['displayName']?.toString().trim().isNotEmpty == true
+            ? map['displayName']!.toString().trim()
+            : null;
+
+        _patchMemberProfile(
+          userId: userId,
+          displayName: displayName,
+          avatarAsset: avatarAsset,
+          profilePhotoUrl: profilePhotoUrl,
+          profilePhotoBase64: profilePhotoBase64,
+          clearAvatar: avatarAsset == null,
+          clearPhotoUrl: profilePhotoUrl == null,
+          clearPhotoBase64: profilePhotoBase64 == null,
+        );
+      });
+      _memberProfileSubscriptions.add(sub);
+    }
+  }
+
+  void _patchMemberProfile({
+    required String userId,
+    String? displayName,
+    String? avatarAsset,
+    String? profilePhotoUrl,
+    String? profilePhotoBase64,
+    required bool clearAvatar,
+    required bool clearPhotoUrl,
+    required bool clearPhotoBase64,
+  }) {
+    GroupMemberSummary? patch(GroupMemberSummary member) {
+      if (member.userId != userId) return member;
+      final next = GroupMemberSummary(
+        userId: member.userId,
+        displayName: displayName ?? member.displayName,
+        role: member.role,
+        memberState: member.memberState,
+        profilePhotoUrl: clearPhotoUrl
+            ? null
+            : (profilePhotoUrl ?? member.profilePhotoUrl),
+        profilePhotoBase64: clearPhotoBase64
+            ? null
+            : (profilePhotoBase64 ?? member.profilePhotoBase64),
+        avatarAsset: clearAvatar ? null : (avatarAsset ?? member.avatarAsset),
+      );
+      final same =
+          next.displayName == member.displayName &&
+          next.avatarAsset == member.avatarAsset &&
+          next.profilePhotoUrl == member.profilePhotoUrl &&
+          next.profilePhotoBase64 == member.profilePhotoBase64;
+      return same ? null : next;
+    }
+
+    final nextMembers = <GroupMemberSummary>[];
+    var membersChanged = false;
+    for (final member in _members) {
+      final patched = patch(member);
+      if (patched == null) {
+        nextMembers.add(member);
+      } else {
+        nextMembers.add(patched);
+        membersChanged = true;
+      }
+    }
+
+    final nextByGroup = <String, List<GroupMemberSummary>>{};
+    var byGroupChanged = false;
+    for (final entry in _membersByGroupId.entries) {
+      final list = <GroupMemberSummary>[];
+      var changed = false;
+      for (final member in entry.value) {
+        final patched = patch(member);
+        if (patched == null) {
+          list.add(member);
+        } else {
+          list.add(patched);
+          changed = true;
+        }
+      }
+      nextByGroup[entry.key] = changed ? list : entry.value;
+      if (changed) byGroupChanged = true;
+    }
+
+    if (!membersChanged && !byGroupChanged) return;
+    setState(() {
+      if (membersChanged) _members = nextMembers;
+      if (byGroupChanged) _membersByGroupId = nextByGroup;
+    });
   }
 
   Future<void> _precacheGroupMemberPhotos(
@@ -767,6 +905,39 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       senderDisplayName: _session.user.displayName,
       text: text,
     );
+  }
+
+  void _triggerEmojiBurst(String emoji) {
+    final trimmed = emoji.trim();
+    if (trimmed.isEmpty || !mounted) return;
+    if (_session.settings.hapticsEnabled) {
+      unawaited(HapticFeedback.selectionClick());
+    }
+    final id =
+        '${_session.userId}-${DateTime.now().microsecondsSinceEpoch}-$trimmed';
+    setState(() {
+      _emojiBursts = [
+        ..._emojiBursts.where((item) => item.id != id),
+        EmojiBurst(
+          id: id,
+          emoji: trimmed,
+          senderName: _session.user.displayName,
+        ),
+      ];
+      // Cap concurrent streams so rapid taps don't flood the overlay.
+      if (_emojiBursts.length > 2) {
+        _emojiBursts = _emojiBursts.sublist(_emojiBursts.length - 2);
+      }
+    });
+  }
+
+  void _onEmojiBurstFinished(String id) {
+    if (!mounted) return;
+    setState(() {
+      _emojiBursts = _emojiBursts
+          .where((burst) => burst.id != id)
+          .toList(growable: false);
+    });
   }
 
   void _showPeerLostConnection(String userId) {
@@ -2234,6 +2405,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       memberState: 'active',
       profilePhotoUrl: _session.user.profilePhotoUrl,
       profilePhotoBase64: _session.user.profilePhotoBase64,
+      avatarAsset: _session.user.avatarAsset,
     );
   }
 
@@ -2250,6 +2422,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             memberState: member.memberState,
             profilePhotoUrl: _session.user.profilePhotoUrl,
             profilePhotoBase64: _session.user.profilePhotoBase64,
+            avatarAsset: _session.user.avatarAsset,
           );
         })
         .toList(growable: false);
@@ -2500,7 +2673,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           SizedBox(height: 20.h),
                           ChatBubbleBar(
                             accent: accent,
+                            anyMemberOnline: anyMemberOnline,
                             onSend: _sendChatMessage,
+                            onEmojiSelected: _triggerEmojiBurst,
                           ),
                         ],
                         SizedBox(height: 28.h),
@@ -2511,6 +2686,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               ),
             ),
           ),
+          if (_emojiBursts.isNotEmpty)
+            EmojiBurstOverlay(
+              bursts: _emojiBursts,
+              onBurstFinished: _onEmojiBurstFinished,
+            ),
         ],
       ),
     );
@@ -2628,7 +2808,8 @@ class _HomeBackdrop extends StatelessWidget {
 
   bool _memberHasPhoto(GroupMemberSummary member) {
     return (member.profilePhotoUrl?.trim().isNotEmpty ?? false) ||
-        (member.profilePhotoBase64?.trim().isNotEmpty ?? false);
+        (member.profilePhotoBase64?.trim().isNotEmpty ?? false) ||
+        (member.avatarAsset?.trim().isNotEmpty ?? false);
   }
 
   @override
@@ -2636,7 +2817,8 @@ class _HomeBackdrop extends StatelessWidget {
     final hasMemberPhotos = members.any(_memberHasPhoto);
     final hasFallbackPhoto =
         (fallbackPhotoUrl?.trim().isNotEmpty ?? false) ||
-        (fallbackPhotoBase64?.trim().isNotEmpty ?? false);
+        (fallbackPhotoBase64?.trim().isNotEmpty ?? false) ||
+        (fallbackAvatarAsset?.trim().isNotEmpty ?? false);
     final showCollage = members.isNotEmpty ? true : hasFallbackPhoto;
 
     return Stack(
@@ -3943,7 +4125,7 @@ class _MainAvatarCircle extends StatelessWidget {
               Positioned(
                 right: size * 0.08,
                 top: size * 0.06,
-                child: _SleepZAnimation(size: size * 0.3),
+                child: _SleepZAnimation(size: size * 0.38),
               ),
             Align(
               alignment: Alignment.bottomCenter,
@@ -4006,8 +4188,8 @@ class _MainAvatarCircle extends StatelessWidget {
   }
 }
 
-/// Subtle looping "Z"s drifting up and fading, indicating the group is
-/// asleep (fully offline) and the main button is now a nudge trigger.
+/// Looping "Z"s drifting up and fading for the fully-offline nudge state.
+/// Sized and timed to be clearly legible at a glance without feeling noisy.
 class _SleepZAnimation extends StatefulWidget {
   const _SleepZAnimation({required this.size});
 
@@ -4021,7 +4203,7 @@ class _SleepZAnimationState extends State<_SleepZAnimation>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 1800),
+    duration: const Duration(milliseconds: 2000),
   )..repeat();
 
   @override
@@ -4041,7 +4223,7 @@ class _SleepZAnimationState extends State<_SleepZAnimation>
           builder: (context, _) {
             return Stack(
               clipBehavior: Clip.none,
-              children: [for (var i = 0; i < 2; i++) _buildZ(i)],
+              children: [for (var i = 0; i < 3; i++) _buildZ(i)],
             );
           },
         ),
@@ -4050,25 +4232,40 @@ class _SleepZAnimationState extends State<_SleepZAnimation>
   }
 
   Widget _buildZ(int i) {
-    // Two "Z"s staggered half a cycle apart, each drifting up-and-right
-    // while fading out, then looping.
-    final t = ((_controller.value + i * 0.5) % 1.0);
-    final opacity = t < 0.15
-        ? t / 0.15
-        : t > 0.75
-        ? (1 - t) / 0.25
+    // Three staggered "Z"s rise up-and-right with a fuller fade curve so
+    // each glyph reads clearly as it travels, then soft-exits.
+    final t = ((_controller.value + i * 0.33) % 1.0);
+    final opacity = t < 0.12
+        ? Curves.easeOut.transform(t / 0.12)
+        : t > 0.62
+        ? Curves.easeIn.transform((1 - t) / 0.38).clamp(0.0, 1.0)
         : 1.0;
+    final scale = 0.88 + 0.22 * Curves.easeOut.transform((t * 1.4).clamp(0.0, 1.0));
     return Positioned(
-      right: -t * widget.size * 0.4,
-      top: widget.size * 0.5 - t * widget.size * 0.9,
+      right: -t * widget.size * 0.55,
+      top: widget.size * 0.55 - t * widget.size * 1.05,
       child: Opacity(
         opacity: opacity.clamp(0.0, 1.0),
-        child: Text(
-          'z',
-          style: TextStyle(
-            color: Colors.white70,
-            fontSize: (widget.size * (0.35 + i * 0.15)),
-            fontWeight: FontWeight.w700,
+        child: Transform.scale(
+          scale: scale,
+          child: Text(
+            'Z',
+            style: GoogleFonts.nunito(
+              color: Colors.white.withValues(alpha: 0.92),
+              // Larger glyphs than the previous subtle design so the sleep
+              // state is obvious at a glance on the main circle.
+              fontSize: widget.size * (0.52 + i * 0.12),
+              fontWeight: FontWeight.w800,
+              height: 1,
+              letterSpacing: -0.5,
+              shadows: const [
+                Shadow(
+                  color: Colors.black54,
+                  blurRadius: 6,
+                  offset: Offset(0, 1),
+                ),
+              ],
+            ),
           ),
         ),
       ),

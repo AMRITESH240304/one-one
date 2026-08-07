@@ -71,4 +71,17 @@ void main() {
     expect(avatar.toJson()['avatarAsset'], 'assets/avatars/avatar_01.png');
     expect(avatar.hasProfilePhoto, isTrue);
   });
+
+  test('copyWith clearAvatarAsset drops the preset', () {
+    final avatar = profile().copyWith(
+      avatarAsset: 'assets/avatars/avatar_01.png',
+    );
+    final cleared = avatar.copyWith(
+      clearAvatarAsset: true,
+      profilePhotoUrl: 'https://example.com/photo.jpg',
+    );
+
+    expect(cleared.avatarAsset, isNull);
+    expect(cleared.profilePhotoUrl, 'https://example.com/photo.jpg');
+  });
 }

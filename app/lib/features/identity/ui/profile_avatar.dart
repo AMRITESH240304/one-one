@@ -12,7 +12,10 @@ import '../data/avatar_assets.dart';
 /// surfaced through [CachedNetworkImage]'s `errorWidget` (and logged via
 /// [debugPrint]) instead of silently rendering a blank space, which was
 /// previously hiding broken Cloudinary URLs.
-class ProfileImage extends StatelessWidget {
+///
+/// While an update is in-flight and source fields are briefly empty, the last
+/// successfully rendered avatar/photo is kept so the face never flashes blank.
+class ProfileImage extends StatefulWidget {
   const ProfileImage({
     super.key,
     this.profilePhotoUrl,
@@ -33,36 +36,86 @@ class ProfileImage extends StatelessWidget {
   final Duration fadeInDuration;
 
   @override
+  State<ProfileImage> createState() => _ProfileImageState();
+}
+
+class _ProfileImageState extends State<ProfileImage> {
+  String? _stickyAvatarAsset;
+  String? _stickyPhotoUrl;
+  String? _stickyPhotoBase64;
+
+  @override
+  void initState() {
+    super.initState();
+    _captureStickySources();
+  }
+
+  @override
+  void didUpdateWidget(covariant ProfileImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _captureStickySources();
+  }
+
+  /// Remembers the last non-empty visual source so a transient clear during
+  /// save never collapses the tile to a blank fallback.
+  void _captureStickySources() {
+    final asset = widget.avatarAsset?.trim();
+    if (asset != null &&
+        asset.isNotEmpty &&
+        AvatarAssets.isPresetAvatarPath(asset)) {
+      _stickyAvatarAsset = asset;
+      _stickyPhotoUrl = null;
+      _stickyPhotoBase64 = null;
+      return;
+    }
+
+    final url = widget.profilePhotoUrl?.trim();
+    if (url != null && url.isNotEmpty) {
+      _stickyAvatarAsset = null;
+      _stickyPhotoUrl = url;
+      _stickyPhotoBase64 = null;
+      return;
+    }
+
+    final encoded = widget.profilePhotoBase64?.trim();
+    if (encoded != null && encoded.isNotEmpty) {
+      _stickyAvatarAsset = null;
+      _stickyPhotoUrl = null;
+      _stickyPhotoBase64 = encoded;
+    }
+    // If everything is empty, keep existing sticky values as-is.
+  }
+
+  @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final resolvedBackgroundColor =
-        backgroundColor ?? colors.surfaceContainerHighest;
+        backgroundColorOrDefault(colors);
     final resolvedFallback =
-        fallback ?? Icon(Icons.person_outline, color: colors.onSurfaceVariant);
+        widget.fallback ??
+        Icon(Icons.person_outline, color: colors.onSurfaceVariant);
 
-    // A preset avatar and a Cloudinary photo are never meant to both be set
-    // (picking one clears the other), but if legacy/stale data ever has
-    // both, the preset avatar wins: it's the locally-bundled asset and
-    // avoids an unnecessary network fetch.
-    final asset = avatarAsset?.trim();
-    if (asset != null && AvatarAssets.isPresetAvatarPath(asset)) {
+    // Prefer live widget props when present; otherwise fall back to sticky.
+    final asset = _resolvedAsset();
+    if (asset != null) {
       return ColoredBox(
         color: resolvedBackgroundColor,
-        child: Image.asset(asset, fit: fit),
+        child: Image.asset(asset, fit: widget.fit),
       );
     }
 
-    final url = profilePhotoUrl?.trim();
-    if (url != null && url.isNotEmpty) {
+    final url = _resolvedUrl();
+    if (url != null) {
       return ColoredBox(
         color: resolvedBackgroundColor,
         child: CachedNetworkImage(
           imageUrl: url,
-          fit: fit,
-          fadeInDuration: fadeInDuration,
-          placeholder: (context, url) => Center(child: resolvedFallback),
+          fit: widget.fit,
+          fadeInDuration: widget.fadeInDuration,
+          placeholder: (context, url) =>
+              _stickyPlaceholder(resolvedBackgroundColor, resolvedFallback) ??
+              Center(child: resolvedFallback),
           errorWidget: (context, url, error) {
-            // Surface Cloudinary/network failures instead of failing silently.
             debugPrint(
               'ProfileImage: failed to load profile photo: '
               '${error.runtimeType}',
@@ -73,15 +126,15 @@ class ProfileImage extends StatelessWidget {
       );
     }
 
-    final encodedPhoto = profilePhotoBase64?.trim();
-    if (encodedPhoto != null && encodedPhoto.isNotEmpty) {
+    final encodedPhoto = _resolvedBase64();
+    if (encodedPhoto != null) {
       try {
         final bytes = base64Decode(encodedPhoto);
         return ColoredBox(
           color: resolvedBackgroundColor,
           child: Image.memory(
             bytes,
-            fit: fit,
+            fit: widget.fit,
             errorBuilder: (context, error, stackTrace) {
               debugPrint('ProfileImage: failed to decode base64 photo: $error');
               return Center(child: resolvedFallback);
@@ -90,7 +143,6 @@ class ProfileImage extends StatelessWidget {
         );
       } catch (error) {
         debugPrint('ProfileImage: failed to decode base64 photo: $error');
-        // Fall through to the icon avatar if legacy base64 data is invalid.
       }
     }
 
@@ -98,6 +150,60 @@ class ProfileImage extends StatelessWidget {
       color: resolvedBackgroundColor,
       child: Center(child: resolvedFallback),
     );
+  }
+
+  Color backgroundColorOrDefault(ColorScheme colors) {
+    return widget.backgroundColor ?? colors.surfaceContainerHighest;
+  }
+
+  /// While a network photo is loading, keep the previous preset visible so
+  /// the tile doesn't blank mid-update.
+  Widget? _stickyPlaceholder(Color background, Widget fallback) {
+    final sticky = _stickyAvatarAsset;
+    if (sticky == null) return null;
+    return ColoredBox(
+      color: background,
+      child: Image.asset(sticky, fit: widget.fit),
+    );
+  }
+
+  String? _resolvedAsset() {
+    final live = widget.avatarAsset?.trim();
+    if (live != null &&
+        live.isNotEmpty &&
+        AvatarAssets.isPresetAvatarPath(live)) {
+      return live;
+    }
+    // If a live URL/base64 is present, don't prefer a sticky preset over it.
+    final liveUrl = widget.profilePhotoUrl?.trim();
+    final liveBase64 = widget.profilePhotoBase64?.trim();
+    if ((liveUrl != null && liveUrl.isNotEmpty) ||
+        (liveBase64 != null && liveBase64.isNotEmpty)) {
+      return null;
+    }
+    final sticky = _stickyAvatarAsset?.trim();
+    if (sticky != null &&
+        sticky.isNotEmpty &&
+        AvatarAssets.isPresetAvatarPath(sticky)) {
+      return sticky;
+    }
+    return null;
+  }
+
+  String? _resolvedUrl() {
+    final live = widget.profilePhotoUrl?.trim();
+    if (live != null && live.isNotEmpty) return live;
+    final sticky = _stickyPhotoUrl?.trim();
+    if (sticky != null && sticky.isNotEmpty) return sticky;
+    return null;
+  }
+
+  String? _resolvedBase64() {
+    final live = widget.profilePhotoBase64?.trim();
+    if (live != null && live.isNotEmpty) return live;
+    final sticky = _stickyPhotoBase64?.trim();
+    if (sticky != null && sticky.isNotEmpty) return sticky;
+    return null;
   }
 }
 

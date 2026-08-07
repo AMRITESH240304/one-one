@@ -26,7 +26,6 @@ class _ProfilePictureScreenState extends State<ProfilePictureScreen> {
   static const _accent = Color(0xffF8BE03);
 
   Future<List<AvatarAsset>>? _avatarsFuture;
-  AvatarPack _selectedPack = AvatarPack.avatar1;
   String? _selected;
   bool _saving = false;
 
@@ -91,12 +90,9 @@ class _ProfilePictureScreenState extends State<ProfilePictureScreen> {
                     final avatars = snapshot.data!;
                     return AvatarPickerGrid(
                       avatars: avatars,
-                      selectedPack: _selectedPack,
                       selectedAsset: _selected,
                       enabled: !_saving,
                       accent: _accent,
-                      onPackChanged: (pack) =>
-                          setState(() => _selectedPack = pack),
                       onAvatarSelected: (asset) =>
                           setState(() => _selected = asset),
                     );

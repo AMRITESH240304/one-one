@@ -6,23 +6,96 @@ import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 import '../data/chat_message_repository.dart';
 
-/// Bottom row of preset message bubbles + a keyboard icon that morphs the
-/// row into a one-off custom-message composer. Works in any online/offline
-/// state — sending never depends on group presence.
+/// Bottom messages bar whose content depends on group online state:
+/// - All offline: predefined text chips + pinned keyboard.
+/// - Anyone online: emoji row (+ more) + pinned keyboard.
+///
+/// The keyboard icon is always outside the scrollable list so it stays
+/// visible without horizontal scrolling.
 class ChatBubbleBar extends StatefulWidget {
-  const ChatBubbleBar({super.key, required this.accent, required this.onSend});
+  const ChatBubbleBar({
+    super.key,
+    required this.accent,
+    required this.anyMemberOnline,
+    required this.onSend,
+    required this.onEmojiSelected,
+  });
 
   final Color accent;
+
+  /// When true (mixed or all online), text chips are replaced by emojis.
+  final bool anyMemberOnline;
 
   /// Sends a preset or custom message. Rethrows on failure so the bar can
   /// surface a brief inline error instead of silently swallowing it.
   final Future<void> Function(String text) onSend;
+
+  /// Fires when a fixed-row emoji or one from the "more emojis" picker is
+  /// chosen. Wired by the host to the existing emoji-burst path.
+  final ValueChanged<String> onEmojiSelected;
 
   static const List<String> presets = [
     "I'll join in 15 min",
     'Where is everyone?',
     'On my way',
     'Give me 5 min',
+  ];
+
+  static const List<String> quickEmojis = [
+    '😂',
+    '❤️',
+    '👍',
+    '🔥',
+    '👏',
+    '😮',
+    '🎉',
+    '👀',
+    '💯',
+    '🙏',
+  ];
+
+  /// Expanded set shown in the "more emojis" sheet.
+  static const List<String> moreEmojis = [
+    '😂',
+    '🤣',
+    '😊',
+    '😍',
+    '🥰',
+    '😘',
+    '😎',
+    '🤔',
+    '😮',
+    '😢',
+    '😭',
+    '😡',
+    '👍',
+    '👎',
+    '👏',
+    '🙌',
+    '🙏',
+    '💪',
+    '❤️',
+    '🧡',
+    '💛',
+    '💚',
+    '💙',
+    '💜',
+    '🖤',
+    '🔥',
+    '⭐',
+    '✨',
+    '🎉',
+    '🎊',
+    '👀',
+    '💯',
+    '✅',
+    '❌',
+    '👋',
+    '🤝',
+    '💤',
+    '🚀',
+    '🎯',
+    '💡',
   ];
 
   @override
@@ -88,32 +161,147 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
     }
   }
 
+  Future<void> _openMoreEmojis() async {
+    final emoji = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xff161616),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20.r)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(20.w, 12.h, 20.w, 20.h),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 36.w,
+                  height: 4.h,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+                SizedBox(height: 16.h),
+                Text(
+                  'More emojis',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16.sp,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                SizedBox(height: 16.h),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.45,
+                  ),
+                  child: SingleChildScrollView(
+                    child: Wrap(
+                      spacing: 10.w,
+                      runSpacing: 10.h,
+                      alignment: WrapAlignment.center,
+                      children: [
+                        for (final emoji in ChatBubbleBar.moreEmojis)
+                          InkWell(
+                            onTap: () => Navigator.pop(sheetContext, emoji),
+                            borderRadius: BorderRadius.circular(14.r),
+                            child: Container(
+                              width: 48.w,
+                              height: 48.w,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: const Color.fromRGBO(255, 255, 255, 0.08),
+                                borderRadius: BorderRadius.circular(14.r),
+                                border: Border.all(
+                                  color: const Color.fromRGBO(
+                                    255,
+                                    255,
+                                    255,
+                                    0.12,
+                                  ),
+                                ),
+                              ),
+                              child: Text(
+                                emoji,
+                                style: TextStyle(fontSize: 24.sp),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (emoji != null && mounted) {
+      widget.onEmojiSelected(emoji);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 220),
-      child: _composing ? _buildComposer() : _buildPresetRow(),
+      child: _composing
+          ? _buildComposer()
+          : _buildActionRow(
+              key: ValueKey(
+                widget.anyMemberOnline ? 'emoji-row' : 'preset-row',
+              ),
+            ),
     );
   }
 
-  Widget _buildPresetRow() {
+  /// Scrollable content on the leading side; keyboard (and optional more)
+  /// pinned at the trailing end outside the scroll view.
+  Widget _buildActionRow({required Key key}) {
+    final online = widget.anyMemberOnline;
     return SizedBox(
-      key: const ValueKey('preset-row'),
+      key: key,
       height: 40.h,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
+      child: Padding(
         padding: EdgeInsets.symmetric(horizontal: 16.w),
-        children: [
-          for (final preset in ChatBubbleBar.presets) ...[
-            _PresetChip(
-              label: preset,
-              enabled: !_sending,
-              onTap: () => unawaited(_sendPreset(preset)),
+        child: Row(
+          children: [
+            Expanded(
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  if (online) ...[
+                    for (final emoji in ChatBubbleBar.quickEmojis) ...[
+                      _EmojiChip(
+                        emoji: emoji,
+                        onTap: () => widget.onEmojiSelected(emoji),
+                      ),
+                      SizedBox(width: 8.w),
+                    ],
+                  ] else ...[
+                    for (final preset in ChatBubbleBar.presets) ...[
+                      _PresetChip(
+                        label: preset,
+                        enabled: !_sending,
+                        onTap: () => unawaited(_sendPreset(preset)),
+                      ),
+                      SizedBox(width: 8.w),
+                    ],
+                  ],
+                ],
+              ),
             ),
             SizedBox(width: 8.w),
+            if (online) ...[
+              _MoreEmojisButton(accent: widget.accent, onTap: _openMoreEmojis),
+              SizedBox(width: 8.w),
+            ],
+            _KeyboardButton(accent: widget.accent, onTap: _openComposer),
           ],
-          _KeyboardButton(accent: widget.accent, onTap: _openComposer),
-        ],
+        ),
       ),
     );
   }
@@ -223,6 +411,60 @@ class _PresetChip extends StatelessWidget {
                 fontSize: 12.sp,
                 fontWeight: FontWeight.w600,
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmojiChip extends StatelessWidget {
+  const _EmojiChip({required this.emoji, required this.onTap});
+
+  final String emoji;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xff1f1f1f),
+      borderRadius: BorderRadius.circular(20.r),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20.r),
+        onTap: onTap,
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 6.h),
+          child: Text(emoji, style: TextStyle(fontSize: 20.sp)),
+        ),
+      ),
+    );
+  }
+}
+
+class _MoreEmojisButton extends StatelessWidget {
+  const _MoreEmojisButton({required this.accent, required this.onTap});
+
+  final Color accent;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'More emojis',
+      child: Material(
+        color: accent.withValues(alpha: 0.16),
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Padding(
+            padding: EdgeInsets.all(9.r),
+            child: Icon(
+              Icons.add_reaction_outlined,
+              color: accent,
+              size: 18.sp,
             ),
           ),
         ),

@@ -38,8 +38,12 @@ class AccentThemeController {
   );
 
   static void setAccentKey(String key) {
-    accentKey.value = accentOptions.any((option) => option.key == key)
+    final next = accentOptions.any((option) => option.key == key)
         ? key
         : accentOptions.first.key;
+    // Avoid notifying listeners when nothing changed — a root rebuild of
+    // MaterialApp-dependent trees while widgets are mid-save/pop can crash.
+    if (accentKey.value == next) return;
+    accentKey.value = next;
   }
 }

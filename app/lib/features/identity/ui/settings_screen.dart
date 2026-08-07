@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../app/accent_theme.dart';
+import '../../../core/firebase/crashlytics_service.dart';
 import '../data/avatar_assets.dart';
 import '../data/identity_repository.dart';
 import '../models/identity_session.dart';
@@ -98,9 +99,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late _AvatarSectionMode _avatarSectionMode = _session.user.avatarAsset != null
       ? _AvatarSectionMode.avatar
       : _AvatarSectionMode.photo;
-  AvatarPack _avatarSectionPack = AvatarPack.avatar1;
+  /// Draft selection in the picker; only persisted when the user taps Save.
+  String? _pendingAvatarAsset;
   bool _avatarSaving = false;
   Future<List<AvatarAsset>>? _avatarsFuture;
+
+  String? get _effectiveAvatarSelection =>
+      _pendingAvatarAsset ?? _session.user.avatarAsset;
+
+  bool get _hasPendingAvatarChange {
+    final pending = _pendingAvatarAsset;
+    if (pending == null) return false;
+    return pending != _session.user.avatarAsset;
+  }
 
   @override
   void initState() {
@@ -148,8 +159,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted || session == null || session.userId != _session.userId) {
       return;
     }
-    setState(() {
-      _session = session;
+    // Defer: same-frame notify during an awaited save/pop can race Elements
+    // that are mid-deactivate (_dependents.isEmpty).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final latest = widget.identityRepository.currentSession;
+      if (latest == null || latest.userId != _session.userId) return;
+      setState(() {
+        _session = latest;
+        // Clear draft once the server selection matches the draft.
+        if (_pendingAvatarAsset != null &&
+            _pendingAvatarAsset == latest.user.avatarAsset) {
+          _pendingAvatarAsset = null;
+        }
+      });
     });
   }
 
@@ -163,7 +186,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _changeProfilePhoto() async {
-    if (_saving || _photoSaving) return;
+    if (_saving || _photoSaving || _avatarSaving) return;
+    unawaited(CrashlyticsService.log('settings_photo_save_start'));
     try {
       final currentUrl = _session.user.profilePhotoUrl?.trim();
       var recropCurrent = false;
@@ -202,22 +226,64 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _message = null;
       });
       final session = await widget.identityRepository.updateProfilePhoto(bytes);
+      unawaited(CrashlyticsService.log('settings_photo_save_network_ok'));
+      if (!mounted) return;
+      // Defer setState so it doesn't run in the same microtask as any sheet
+      // route disposal from the photo editor.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        unawaited(CrashlyticsService.log('settings_photo_save_setState'));
+        setState(() {
+          _acceptSession(session);
+          _avatarSectionMode = _AvatarSectionMode.photo;
+          _pendingAvatarAsset = null;
+          _message = 'Profile picture updated';
+          _photoSaving = false;
+        });
+      });
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'settings_photo_save_failed',
+          feature: 'settings',
+          screenName: 'settings',
+        ),
+      );
       if (!mounted) return;
       setState(() {
-        _acceptSession(session);
-        _avatarSectionMode = _AvatarSectionMode.photo;
-        _message = 'Profile picture updated';
+        _message = error.toString();
+        _photoSaving = false;
       });
-    } catch (error) {
-      if (!mounted) return;
-      setState(() => _message = error.toString());
-    } finally {
-      if (mounted) setState(() => _photoSaving = false);
     }
   }
 
-  Future<void> _selectPresetAvatar(String assetPath) async {
+  void _draftPresetAvatar(String assetPath) {
     if (_avatarSaving || _photoSaving) return;
+    setState(() {
+      _pendingAvatarAsset = assetPath;
+      _message = null;
+    });
+  }
+
+  Future<void> _savePresetAvatar() async {
+    final assetPath = _pendingAvatarAsset ?? _session.user.avatarAsset;
+    if (assetPath == null || _avatarSaving || _photoSaving) return;
+    if (assetPath == _session.user.avatarAsset &&
+        _session.user.profilePhotoUrl == null) {
+      setState(() {
+        _pendingAvatarAsset = null;
+        _message = 'Avatar already saved';
+      });
+      return;
+    }
+
+    unawaited(
+      CrashlyticsService.log(
+        'settings_avatar_save_start assetPath=$assetPath',
+      ),
+    );
     setState(() {
       _avatarSaving = true;
       _message = null;
@@ -226,17 +292,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final session = await widget.identityRepository.updatePresetAvatar(
         assetPath,
       );
+      unawaited(
+        CrashlyticsService.log(
+          'settings_avatar_save_network_ok '
+          'avatarAsset=${session.user.avatarAsset}',
+        ),
+      );
+      if (!mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        unawaited(CrashlyticsService.log('settings_avatar_save_setState'));
+        setState(() {
+          _acceptSession(session);
+          _avatarSectionMode = _AvatarSectionMode.avatar;
+          _pendingAvatarAsset = null;
+          _message = 'Avatar updated';
+          _avatarSaving = false;
+        });
+      });
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'settings_avatar_save_failed',
+          feature: 'settings',
+          screenName: 'settings',
+        ),
+      );
       if (!mounted) return;
       setState(() {
-        _acceptSession(session);
-        _avatarSectionMode = _AvatarSectionMode.avatar;
-        _message = 'Avatar updated';
+        _message = error.toString();
+        _avatarSaving = false;
       });
-    } catch (error) {
-      if (!mounted) return;
-      setState(() => _message = error.toString());
-    } finally {
-      if (mounted) setState(() => _avatarSaving = false);
     }
   }
 
@@ -268,20 +356,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
               final displayName = nameController.text.trim();
               if (displayName.isEmpty ||
                   displayName == _session.user.displayName) {
+                unawaited(
+                  CrashlyticsService.log('settings_edit_profile_pop_no_change'),
+                );
                 Navigator.pop(sheetContext);
                 return;
               }
+              unawaited(
+                CrashlyticsService.log('settings_edit_profile_save_start'),
+              );
               setSheetState(() => nameSaving = true);
               try {
                 final session = await widget.identityRepository
                     .updateDisplayName(displayName);
+                unawaited(
+                  CrashlyticsService.log('settings_edit_profile_network_ok'),
+                );
                 if (!mounted || !sheetContext.mounted) return;
-                setState(() {
-                  _acceptSession(session);
-                  _message = 'Profile updated';
-                });
+                // Pop first, then refresh parent state on the next frame so
+                // the sheet's InheritedWidget dependents are gone before the
+                // Settings subtree rebuilds.
+                unawaited(
+                  CrashlyticsService.log('settings_edit_profile_pop'),
+                );
                 Navigator.pop(sheetContext);
-              } catch (error) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  unawaited(
+                    CrashlyticsService.log('settings_edit_profile_setState'),
+                  );
+                  setState(() {
+                    _acceptSession(session);
+                    _message = 'Profile updated';
+                  });
+                });
+              } catch (error, stack) {
+                unawaited(
+                  CrashlyticsService.recordError(
+                    error,
+                    stack,
+                    reason: 'settings_edit_profile_save_failed',
+                    feature: 'settings',
+                    screenName: 'settings',
+                  ),
+                );
                 if (!sheetContext.mounted) return;
                 setSheetState(() => nameSaving = false);
                 ScaffoldMessenger.of(
@@ -361,6 +479,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _saveSettings() async {
+    unawaited(
+      CrashlyticsService.log(
+        'settings_prefs_save_start accent=$_accentColorKey',
+      ),
+    );
     setState(() {
       _saving = true;
       _message = null;
@@ -372,21 +495,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
         hapticsEnabled: _hapticsEnabled,
         audioOutputPreference: _audioOutputPreference,
       );
+      unawaited(CrashlyticsService.log('settings_prefs_save_network_ok'));
       _persistedAccentColorKey = session.settings.accentColorKey;
       _persistedHapticsEnabled = session.settings.hapticsEnabled;
       _persistedAudioOutputPreference = session.settings.audioOutputPreference;
       _hasUnsavedAccentPreview = false;
+      // Apply accent after local flags are consistent; no-op if already set.
       AccentThemeController.setAccentKey(session.settings.accentColorKey);
+      unawaited(CrashlyticsService.log('settings_prefs_accent_applied'));
+      if (!mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        unawaited(CrashlyticsService.log('settings_prefs_save_setState'));
+        setState(() {
+          _acceptSession(session);
+          _message = 'Settings saved';
+          _saving = false;
+        });
+      });
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'settings_prefs_save_failed',
+          feature: 'settings',
+          screenName: 'settings',
+        ),
+      );
       if (!mounted) return;
       setState(() {
-        _acceptSession(session);
-        _message = 'Settings saved';
+        _message = error.toString();
+        _saving = false;
       });
-    } catch (error) {
-      if (!mounted) return;
-      setState(() => _message = error.toString());
-    } finally {
-      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -572,9 +713,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 session: _session,
                 accent: accent,
                 photoSaving: _photoSaving,
-                enabled: !_saving && !_photoSaving,
+                enabled: !_saving && !_photoSaving && !_avatarSaving,
                 onChangePhoto: _changeProfilePhoto,
                 onEditProfile: _openProfileEditor,
+                draftAvatarAsset: _pendingAvatarAsset,
               ),
               const SizedBox(height: 30),
               const _SectionTitle('Avatar'),
@@ -586,13 +728,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onModeChanged: (mode) =>
                         setState(() => _avatarSectionMode = mode),
                     avatarsFuture: _avatarsFuture,
-                    selectedPack: _avatarSectionPack,
-                    onPackChanged: (pack) =>
-                        setState(() => _avatarSectionPack = pack),
-                    selectedAsset: _session.user.avatarAsset,
+                    selectedAsset: _effectiveAvatarSelection,
                     accent: accent,
                     avatarSaving: _avatarSaving,
-                    onAvatarSelected: _selectPresetAvatar,
+                    onAvatarSelected: _draftPresetAvatar,
+                    showSaveAvatar: _hasPendingAvatarChange || _avatarSaving,
+                    onSaveAvatar: _savePresetAvatar,
                     profilePhotoUrl: _session.user.profilePhotoUrl,
                     profilePhotoBase64: _session.user.profilePhotoBase64,
                     photoSaving: _photoSaving,
@@ -843,6 +984,7 @@ class _ProfileHeader extends StatelessWidget {
     required this.enabled,
     required this.onChangePhoto,
     required this.onEditProfile,
+    this.draftAvatarAsset,
   });
 
   final IdentitySession session;
@@ -851,9 +993,12 @@ class _ProfileHeader extends StatelessWidget {
   final bool enabled;
   final VoidCallback onChangePhoto;
   final VoidCallback onEditProfile;
+  final String? draftAvatarAsset;
 
   @override
   Widget build(BuildContext context) {
+    final avatarAsset = draftAvatarAsset ?? session.user.avatarAsset;
+    final usingDraftAvatar = draftAvatarAsset != null;
     return Column(
       children: [
         Stack(
@@ -866,9 +1011,13 @@ class _ProfileHeader extends StatelessWidget {
                 border: Border.all(color: accent, width: 2),
               ),
               child: ProfileAvatar(
-                profilePhotoUrl: session.user.profilePhotoUrl,
-                profilePhotoBase64: session.user.profilePhotoBase64,
-                avatarAsset: session.user.avatarAsset,
+                profilePhotoUrl: usingDraftAvatar
+                    ? null
+                    : session.user.profilePhotoUrl,
+                profilePhotoBase64: usingDraftAvatar
+                    ? null
+                    : session.user.profilePhotoBase64,
+                avatarAsset: avatarAsset,
                 radius: 48,
                 backgroundColor: const Color(0xff2b2b2b),
                 fallback: const Icon(
@@ -923,22 +1072,19 @@ class _ProfileHeader extends StatelessWidget {
 
 enum _AvatarSectionMode { avatar, photo }
 
-/// Lets existing users freely switch between a bundled preset avatar and
-/// their Cloudinary-uploaded photo. Switching tabs alone changes nothing —
-/// the active image only changes once the user taps a specific avatar or
-/// actually picks/uploads a photo, matching the rest of Settings' pattern of
-/// applying changes immediately without a confirmation step.
+/// Lets existing users switch between a bundled preset avatar and a custom
+/// photo. Preset choice is a draft until Save; photo applies when uploaded.
 class _AvatarSection extends StatelessWidget {
   const _AvatarSection({
     required this.mode,
     required this.onModeChanged,
     required this.avatarsFuture,
-    required this.selectedPack,
-    required this.onPackChanged,
     required this.selectedAsset,
     required this.accent,
     required this.avatarSaving,
     required this.onAvatarSelected,
+    required this.showSaveAvatar,
+    required this.onSaveAvatar,
     required this.profilePhotoUrl,
     required this.profilePhotoBase64,
     required this.photoSaving,
@@ -949,12 +1095,12 @@ class _AvatarSection extends StatelessWidget {
   final _AvatarSectionMode mode;
   final ValueChanged<_AvatarSectionMode> onModeChanged;
   final Future<List<AvatarAsset>>? avatarsFuture;
-  final AvatarPack selectedPack;
-  final ValueChanged<AvatarPack> onPackChanged;
   final String? selectedAsset;
   final Color accent;
   final bool avatarSaving;
   final ValueChanged<String> onAvatarSelected;
+  final bool showSaveAvatar;
+  final VoidCallback onSaveAvatar;
   final String? profilePhotoUrl;
   final String? profilePhotoBase64;
   final bool photoSaving;
@@ -1003,12 +1149,12 @@ class _AvatarSection extends StatelessWidget {
               ? _AvatarTabContent(
                   key: const ValueKey('avatar-tab'),
                   avatarsFuture: avatarsFuture,
-                  selectedPack: selectedPack,
-                  onPackChanged: onPackChanged,
                   selectedAsset: selectedAsset,
                   accent: accent,
                   enabled: enabled,
                   onAvatarSelected: onAvatarSelected,
+                  showSave: showSaveAvatar,
+                  onSave: onSaveAvatar,
                   saving: avatarSaving,
                 )
               : _PhotoTabContent(
@@ -1030,22 +1176,22 @@ class _AvatarTabContent extends StatelessWidget {
   const _AvatarTabContent({
     super.key,
     required this.avatarsFuture,
-    required this.selectedPack,
-    required this.onPackChanged,
     required this.selectedAsset,
     required this.accent,
     required this.enabled,
     required this.onAvatarSelected,
+    required this.showSave,
+    required this.onSave,
     required this.saving,
   });
 
   final Future<List<AvatarAsset>>? avatarsFuture;
-  final AvatarPack selectedPack;
-  final ValueChanged<AvatarPack> onPackChanged;
   final String? selectedAsset;
   final Color accent;
   final bool enabled;
   final ValueChanged<String> onAvatarSelected;
+  final bool showSave;
+  final VoidCallback onSave;
   final bool saving;
 
   @override
@@ -1061,31 +1207,52 @@ class _AvatarTabContent extends StatelessWidget {
             ),
           );
         }
-        return SizedBox(
-          height: 300,
-          child: Stack(
-            children: [
-              AvatarPickerGrid(
-                avatars: snapshot.data!,
-                selectedPack: selectedPack,
-                selectedAsset: selectedAsset,
-                enabled: enabled,
-                accent: accent,
-                onPackChanged: onPackChanged,
-                onAvatarSelected: onAvatarSelected,
-                physics: const NeverScrollableScrollPhysics(),
-              ),
-              if (saving)
-                const Positioned.fill(
-                  child: ColoredBox(
-                    color: Color(0x991b1b1b),
-                    child: Center(
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  ),
+        return Stack(
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Nested under Settings' ListView so every avatar across both
+                // packs is reachable via the outer scroll.
+                AvatarPickerGrid(
+                  avatars: snapshot.data!,
+                  selectedAsset: selectedAsset,
+                  enabled: enabled,
+                  accent: accent,
+                  onAvatarSelected: onAvatarSelected,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
                 ),
-            ],
-          ),
+                if (showSave) ...[
+                  const SizedBox(height: 18),
+                  FilledButton.icon(
+                    onPressed: saving ? null : onSave,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(50),
+                      backgroundColor: accent,
+                      foregroundColor: Colors.black,
+                    ),
+                    icon: saving
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.black,
+                            ),
+                          )
+                        : const Icon(Icons.check_rounded),
+                    label: Text(saving ? 'Saving…' : 'Save avatar'),
+                  ),
+                ],
+              ],
+            ),
+            if (saving)
+              const Positioned.fill(
+                child: IgnorePointer(
+                  child: ColoredBox(color: Color(0x661b1b1b)),
+                ),
+              ),
+          ],
         );
       },
     );
