@@ -518,7 +518,7 @@ export async function deleteGroup(input: GroupMemberActionInput) {
       [`groupMembers/${input.groupId}`]: null,
       [`livekitRooms/${input.groupId}`]: null,
       [`memberAvailability/${input.groupId}`]: null,
-      [`handRaises/${input.groupId}`]: null,
+      [`groupMessages/${input.groupId}`]: null,
       [`talkLocks/${input.groupId}`]: null,
       [`talkSessions/${input.groupId}`]: null,
       [`statusEvents/${input.groupId}`]: null,
@@ -793,7 +793,6 @@ async function cleanupMemberState(groupId: string, userId: string, reason: strin
   const updates: Record<string, unknown> = {
     [`userGroups/${userId}/${groupId}`]: null,
     [`memberAvailability/${groupId}/${userId}`]: null,
-    [`handRaises/${groupId}/${userId}`]: null,
     [`dailyUsage/${groupId}/${userId}`]: null
   };
 

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
+import '../features/identity/data/avatar_assets.dart';
 import '../features/identity/data/identity_repository.dart';
 import '../features/identity/models/identity_session.dart';
+import '../features/identity/ui/avatar_picker_grid.dart';
 
 class ProfilePictureScreen extends StatefulWidget {
   const ProfilePictureScreen({
@@ -21,27 +23,18 @@ class ProfilePictureScreen extends StatefulWidget {
 }
 
 class _ProfilePictureScreenState extends State<ProfilePictureScreen> {
-  static const _avatars = [
-    'assets/avatars/avatar_01.png',
-    'assets/avatars/avatar_02.png',
-    'assets/avatars/avatar_03.png',
-    'assets/avatars/avatar_04.png',
-    'assets/avatars/avatar_05.png',
-    'assets/avatars/avatar_06.png',
-    'assets/avatars/avatar_07.png',
-    'assets/avatars/avatar_08.png',
-    'assets/avatars/avatar_09.png',
-    'assets/avatars/avatar_10.png',
-    'assets/avatars2/avatar_01.png',
-    'assets/avatars2/avatar_02.png',
-    'assets/avatars2/avatar_03.png',
-    'assets/avatars2/avatar_04.png',
-    'assets/avatars2/avatar_05.png',
-    'assets/avatars2/avatar_06.png',
-  ];
+  static const _accent = Color(0xffF8BE03);
 
+  Future<List<AvatarAsset>>? _avatarsFuture;
+  AvatarPack _selectedPack = AvatarPack.avatar1;
   String? _selected;
   bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _avatarsFuture = AvatarAssets.loadAll();
+  }
 
   Future<void> _continue() async {
     final avatar = _selected;
@@ -85,43 +78,27 @@ class _ProfilePictureScreenState extends State<ProfilePictureScreen> {
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.white60, fontSize: 13.sp),
               ),
-              SizedBox(height: 32.h),
+              SizedBox(height: 24.h),
               Expanded(
-                child: GridView.builder(
-                  itemCount: _avatars.length,
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 4,
-                    mainAxisSpacing: 16,
-                    crossAxisSpacing: 16,
-                  ),
-                  itemBuilder: (context, index) {
-                    final avatar = _avatars[index];
-                    final selected = avatar == _selected;
-                    return Semantics(
-                      button: true,
-                      selected: selected,
-                      label: 'Avatar ${index + 1}',
-                      child: InkResponse(
-                        onTap: _saving
-                            ? null
-                            : () => setState(() => _selected = avatar),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 160),
-                          padding: const EdgeInsets.all(3),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: selected
-                                  ? const Color(0xffF8BE03)
-                                  : Colors.transparent,
-                              width: 3,
-                            ),
-                          ),
-                          child: ClipOval(
-                            child: Image.asset(avatar, fit: BoxFit.cover),
-                          ),
-                        ),
-                      ),
+                child: FutureBuilder<List<AvatarAsset>>(
+                  future: _avatarsFuture,
+                  builder: (context, snapshot) {
+                    if (!snapshot.hasData) {
+                      return const Center(
+                        child: CircularProgressIndicator(color: _accent),
+                      );
+                    }
+                    final avatars = snapshot.data!;
+                    return AvatarPickerGrid(
+                      avatars: avatars,
+                      selectedPack: _selectedPack,
+                      selectedAsset: _selected,
+                      enabled: !_saving,
+                      accent: _accent,
+                      onPackChanged: (pack) =>
+                          setState(() => _selectedPack = pack),
+                      onAvatarSelected: (asset) =>
+                          setState(() => _selected = asset),
                     );
                   },
                 ),
@@ -131,7 +108,7 @@ class _ProfilePictureScreenState extends State<ProfilePictureScreen> {
                 onPressed: _selected == null || _saving ? null : _continue,
                 style: FilledButton.styleFrom(
                   minimumSize: Size.fromHeight(54.h),
-                  backgroundColor: const Color(0xffF8BE03),
+                  backgroundColor: _accent,
                   foregroundColor: Colors.black,
                 ),
                 child: _saving

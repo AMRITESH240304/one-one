@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
+import '../data/avatar_assets.dart';
+
 /// Renders a profile photo filling its bounds, falling back to [fallback]
 /// (or a person icon) when there is no photo or the photo fails to load.
 ///
@@ -38,6 +40,18 @@ class ProfileImage extends StatelessWidget {
     final resolvedFallback =
         fallback ?? Icon(Icons.person_outline, color: colors.onSurfaceVariant);
 
+    // A preset avatar and a Cloudinary photo are never meant to both be set
+    // (picking one clears the other), but if legacy/stale data ever has
+    // both, the preset avatar wins: it's the locally-bundled asset and
+    // avoids an unnecessary network fetch.
+    final asset = avatarAsset?.trim();
+    if (asset != null && AvatarAssets.isPresetAvatarPath(asset)) {
+      return ColoredBox(
+        color: resolvedBackgroundColor,
+        child: Image.asset(asset, fit: fit),
+      );
+    }
+
     final url = profilePhotoUrl?.trim();
     if (url != null && url.isNotEmpty) {
       return ColoredBox(
@@ -56,14 +70,6 @@ class ProfileImage extends StatelessWidget {
             return Center(child: resolvedFallback);
           },
         ),
-      );
-    }
-
-    final asset = avatarAsset?.trim();
-    if (asset != null && asset.startsWith('assets/avatars')) {
-      return ColoredBox(
-        color: resolvedBackgroundColor,
-        child: Image.asset(asset, fit: fit),
       );
     }
 

@@ -194,19 +194,6 @@ class AnalyticsService {
     );
   }
 
-  static Future<void> logHandRaise({
-    required String groupId,
-    required bool raised,
-  }) {
-    return _log(
-      'hand_raise',
-      parameters: {
-        'group_id_suffix': _idSuffix(groupId),
-        'raised': raised ? 1 : 0,
-      },
-    );
-  }
-
   static Future<void> logDailyUsageCapReached({required String groupId}) {
     return _log(
       'daily_usage_cap_reached',

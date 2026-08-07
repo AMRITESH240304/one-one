@@ -22,6 +22,7 @@ import '../models/app_user_profile.dart';
 import '../models/identity_session.dart';
 import '../models/user_device_record.dart';
 import '../models/user_settings_record.dart';
+import 'avatar_assets.dart';
 import 'device_identity_store.dart';
 
 class IdentityRepository {
@@ -358,7 +359,7 @@ class IdentityRepository {
   }
 
   Future<IdentitySession> updatePresetAvatar(String assetPath) async {
-    if (!assetPath.startsWith('assets/avatars')) {
+    if (!AvatarAssets.isPresetAvatarPath(assetPath)) {
       throw ArgumentError.value(assetPath, 'assetPath', 'Unsupported avatar.');
     }
     final user = _auth.currentUser;

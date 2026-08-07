@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../app/accent_theme.dart';
+import '../data/avatar_assets.dart';
 import '../data/identity_repository.dart';
 import '../models/identity_session.dart';
+import 'avatar_picker_grid.dart';
 import 'legal_document_screen.dart';
 import 'profile_avatar.dart';
 import 'profile_photo_editor.dart';
@@ -93,9 +95,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _hasUnsavedAccentPreview = false;
   String? _message;
 
+  late _AvatarSectionMode _avatarSectionMode = _session.user.avatarAsset != null
+      ? _AvatarSectionMode.avatar
+      : _AvatarSectionMode.photo;
+  AvatarPack _avatarSectionPack = AvatarPack.avatar1;
+  bool _avatarSaving = false;
+  Future<List<AvatarAsset>>? _avatarsFuture;
+
   @override
   void initState() {
     super.initState();
+    _avatarsFuture = AvatarAssets.loadAll();
     final currentSession = widget.identityRepository.currentSession;
     if (currentSession != null && currentSession.userId == _session.userId) {
       _session = currentSession;
@@ -195,6 +205,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) return;
       setState(() {
         _acceptSession(session);
+        _avatarSectionMode = _AvatarSectionMode.photo;
         _message = 'Profile picture updated';
       });
     } catch (error) {
@@ -202,6 +213,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
       setState(() => _message = error.toString());
     } finally {
       if (mounted) setState(() => _photoSaving = false);
+    }
+  }
+
+  Future<void> _selectPresetAvatar(String assetPath) async {
+    if (_avatarSaving || _photoSaving) return;
+    setState(() {
+      _avatarSaving = true;
+      _message = null;
+    });
+    try {
+      final session = await widget.identityRepository.updatePresetAvatar(
+        assetPath,
+      );
+      if (!mounted) return;
+      setState(() {
+        _acceptSession(session);
+        _avatarSectionMode = _AvatarSectionMode.avatar;
+        _message = 'Avatar updated';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _message = error.toString());
+    } finally {
+      if (mounted) setState(() => _avatarSaving = false);
     }
   }
 
@@ -542,6 +577,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onEditProfile: _openProfileEditor,
               ),
               const SizedBox(height: 30),
+              const _SectionTitle('Avatar'),
+              const SizedBox(height: 12),
+              _SettingsSurface(
+                children: [
+                  _AvatarSection(
+                    mode: _avatarSectionMode,
+                    onModeChanged: (mode) =>
+                        setState(() => _avatarSectionMode = mode),
+                    avatarsFuture: _avatarsFuture,
+                    selectedPack: _avatarSectionPack,
+                    onPackChanged: (pack) =>
+                        setState(() => _avatarSectionPack = pack),
+                    selectedAsset: _session.user.avatarAsset,
+                    accent: accent,
+                    avatarSaving: _avatarSaving,
+                    onAvatarSelected: _selectPresetAvatar,
+                    profilePhotoUrl: _session.user.profilePhotoUrl,
+                    profilePhotoBase64: _session.user.profilePhotoBase64,
+                    photoSaving: _photoSaving,
+                    onChangePhoto: _changeProfilePhoto,
+                    enabled: !_saving && !_avatarSaving && !_photoSaving,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 28),
               if (widget.groupName != null && widget.onManageGroup != null) ...[
                 const _SectionTitle('Group'),
                 const SizedBox(height: 12),
@@ -855,6 +915,254 @@ class _ProfileHeader extends StatelessWidget {
           icon: const Icon(Icons.edit_outlined, size: 18),
           label: const Text('Edit profile'),
           style: TextButton.styleFrom(foregroundColor: accent),
+        ),
+      ],
+    );
+  }
+}
+
+enum _AvatarSectionMode { avatar, photo }
+
+/// Lets existing users freely switch between a bundled preset avatar and
+/// their Cloudinary-uploaded photo. Switching tabs alone changes nothing —
+/// the active image only changes once the user taps a specific avatar or
+/// actually picks/uploads a photo, matching the rest of Settings' pattern of
+/// applying changes immediately without a confirmation step.
+class _AvatarSection extends StatelessWidget {
+  const _AvatarSection({
+    required this.mode,
+    required this.onModeChanged,
+    required this.avatarsFuture,
+    required this.selectedPack,
+    required this.onPackChanged,
+    required this.selectedAsset,
+    required this.accent,
+    required this.avatarSaving,
+    required this.onAvatarSelected,
+    required this.profilePhotoUrl,
+    required this.profilePhotoBase64,
+    required this.photoSaving,
+    required this.onChangePhoto,
+    required this.enabled,
+  });
+
+  final _AvatarSectionMode mode;
+  final ValueChanged<_AvatarSectionMode> onModeChanged;
+  final Future<List<AvatarAsset>>? avatarsFuture;
+  final AvatarPack selectedPack;
+  final ValueChanged<AvatarPack> onPackChanged;
+  final String? selectedAsset;
+  final Color accent;
+  final bool avatarSaving;
+  final ValueChanged<String> onAvatarSelected;
+  final String? profilePhotoUrl;
+  final String? profilePhotoBase64;
+  final bool photoSaving;
+  final VoidCallback onChangePhoto;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SegmentedButton<_AvatarSectionMode>(
+          style: ButtonStyle(
+            foregroundColor: WidgetStateProperty.resolveWith(
+              (states) => states.contains(WidgetState.selected)
+                  ? Colors.black
+                  : Colors.white70,
+            ),
+            backgroundColor: WidgetStateProperty.resolveWith(
+              (states) => states.contains(WidgetState.selected)
+                  ? accent
+                  : Colors.transparent,
+            ),
+          ),
+          segments: const [
+            ButtonSegment(
+              value: _AvatarSectionMode.avatar,
+              icon: Icon(Icons.face_retouching_natural_outlined),
+              label: Text('Avatar'),
+            ),
+            ButtonSegment(
+              value: _AvatarSectionMode.photo,
+              icon: Icon(Icons.photo_camera_outlined),
+              label: Text('Photo'),
+            ),
+          ],
+          selected: {mode},
+          onSelectionChanged: enabled
+              ? (selection) => onModeChanged(selection.first)
+              : null,
+        ),
+        const SizedBox(height: 18),
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 200),
+          child: mode == _AvatarSectionMode.avatar
+              ? _AvatarTabContent(
+                  key: const ValueKey('avatar-tab'),
+                  avatarsFuture: avatarsFuture,
+                  selectedPack: selectedPack,
+                  onPackChanged: onPackChanged,
+                  selectedAsset: selectedAsset,
+                  accent: accent,
+                  enabled: enabled,
+                  onAvatarSelected: onAvatarSelected,
+                  saving: avatarSaving,
+                )
+              : _PhotoTabContent(
+                  key: const ValueKey('photo-tab'),
+                  profilePhotoUrl: profilePhotoUrl,
+                  profilePhotoBase64: profilePhotoBase64,
+                  accent: accent,
+                  enabled: enabled,
+                  saving: photoSaving,
+                  onChangePhoto: onChangePhoto,
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _AvatarTabContent extends StatelessWidget {
+  const _AvatarTabContent({
+    super.key,
+    required this.avatarsFuture,
+    required this.selectedPack,
+    required this.onPackChanged,
+    required this.selectedAsset,
+    required this.accent,
+    required this.enabled,
+    required this.onAvatarSelected,
+    required this.saving,
+  });
+
+  final Future<List<AvatarAsset>>? avatarsFuture;
+  final AvatarPack selectedPack;
+  final ValueChanged<AvatarPack> onPackChanged;
+  final String? selectedAsset;
+  final Color accent;
+  final bool enabled;
+  final ValueChanged<String> onAvatarSelected;
+  final bool saving;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<AvatarAsset>>(
+      future: avatarsFuture,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 40),
+            child: Center(
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          );
+        }
+        return SizedBox(
+          height: 300,
+          child: Stack(
+            children: [
+              AvatarPickerGrid(
+                avatars: snapshot.data!,
+                selectedPack: selectedPack,
+                selectedAsset: selectedAsset,
+                enabled: enabled,
+                accent: accent,
+                onPackChanged: onPackChanged,
+                onAvatarSelected: onAvatarSelected,
+                physics: const NeverScrollableScrollPhysics(),
+              ),
+              if (saving)
+                const Positioned.fill(
+                  child: ColoredBox(
+                    color: Color(0x991b1b1b),
+                    child: Center(
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _PhotoTabContent extends StatelessWidget {
+  const _PhotoTabContent({
+    super.key,
+    required this.profilePhotoUrl,
+    required this.profilePhotoBase64,
+    required this.accent,
+    required this.enabled,
+    required this.saving,
+    required this.onChangePhoto,
+  });
+
+  final String? profilePhotoUrl;
+  final String? profilePhotoBase64;
+  final Color accent;
+  final bool enabled;
+  final bool saving;
+  final VoidCallback onChangePhoto;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasPhoto =
+        (profilePhotoUrl?.trim().isNotEmpty ?? false) ||
+        (profilePhotoBase64?.trim().isNotEmpty ?? false);
+
+    return Row(
+      children: [
+        ClipOval(
+          child: SizedBox(
+            width: 64,
+            height: 64,
+            child: ProfileImage(
+              profilePhotoUrl: profilePhotoUrl,
+              profilePhotoBase64: profilePhotoBase64,
+              backgroundColor: const Color(0xff2b2b2b),
+              fallback: const Icon(
+                Icons.person_outline,
+                color: Colors.white54,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                hasPhoto ? 'Your uploaded photo' : 'No photo uploaded yet',
+                style: const TextStyle(color: Colors.white),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: enabled ? onChangePhoto : null,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: accent,
+                  side: BorderSide(color: accent),
+                ),
+                icon: saving
+                    ? SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: accent,
+                        ),
+                      )
+                    : const Icon(Icons.upload_outlined, size: 18),
+                label: Text(hasPhoto ? 'Change photo' : 'Upload photo'),
+              ),
+            ],
+          ),
         ),
       ],
     );

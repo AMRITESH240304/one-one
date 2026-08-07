@@ -15,6 +15,7 @@ import {
 import { maxVoiceNudgeBytes } from "../notifications/voiceNudgeValidation.js";
 import { respondToNudge } from "../notifications/nudgeResponseService.js";
 import {
+  sendChatMessageNotification,
   sendFriendLiveNotification,
   sendGoneOfflineNotification,
   sendNudgeNotification
@@ -149,6 +150,21 @@ export function createNotificationRoutes() {
         senderUserId: authRequest.auth.uid,
         targetScope: body.targetScope,
         targetUserId: "targetUserId" in body ? body.targetUserId : undefined
+      });
+
+      response.status(200).json(result);
+    })
+  );
+
+  router.post(
+    "/v1/groups/:groupId/chat-messages/notify",
+    requireFirebaseAuth,
+    asyncHandler(async (request, response) => {
+      const authRequest = request as AuthenticatedRequest;
+      const groupId = z.string().min(1).parse(request.params.groupId);
+      const result = await sendChatMessageNotification({
+        groupId,
+        senderUserId: authRequest.auth.uid
       });
 
       response.status(200).json(result);
