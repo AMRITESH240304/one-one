@@ -165,75 +165,79 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
     final emoji = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: const Color(0xff161616),
+      // Without this, a non-scroll-controlled sheet caps its own height to
+      // a fraction of the screen — on shorter screens (or while live in a
+      // channel with the header chrome already visible) the fixed handle +
+      // title + grid could exceed that cap and overflow underneath it even
+      // though the grid itself was wrapped in a scroll view. Scroll-
+      // controlling the sheet and scrolling the *entire* body (below) fixes
+      // that for any screen size.
+      isScrollControlled: true,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20.r)),
       ),
       builder: (sheetContext) {
+        final maxSheetHeight =
+            MediaQuery.sizeOf(sheetContext).height * 0.7 -
+            MediaQuery.viewInsetsOf(sheetContext).bottom;
         return SafeArea(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(20.w, 12.h, 20.w, 20.h),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 36.w,
-                  height: 4.h,
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                ),
-                SizedBox(height: 16.h),
-                Text(
-                  'More emojis',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 16.sp,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                SizedBox(height: 16.h),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.45,
-                  ),
-                  child: SingleChildScrollView(
-                    child: Wrap(
-                      spacing: 10.w,
-                      runSpacing: 10.h,
-                      alignment: WrapAlignment.center,
-                      children: [
-                        for (final emoji in ChatBubbleBar.moreEmojis)
-                          InkWell(
-                            onTap: () => Navigator.pop(sheetContext, emoji),
-                            borderRadius: BorderRadius.circular(14.r),
-                            child: Container(
-                              width: 48.w,
-                              height: 48.w,
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                color: const Color.fromRGBO(255, 255, 255, 0.08),
-                                borderRadius: BorderRadius.circular(14.r),
-                                border: Border.all(
-                                  color: const Color.fromRGBO(
-                                    255,
-                                    255,
-                                    255,
-                                    0.12,
-                                  ),
-                                ),
-                              ),
-                              child: Text(
-                                emoji,
-                                style: TextStyle(fontSize: 24.sp),
-                              ),
-                            ),
-                          ),
-                      ],
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: maxSheetHeight.clamp(200.h, double.infinity),
+            ),
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(20.w, 12.h, 20.w, 20.h),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 36.w,
+                    height: 4.h,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(999),
                     ),
                   ),
-                ),
-              ],
+                  SizedBox(height: 16.h),
+                  Text(
+                    'More emojis',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16.sp,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  SizedBox(height: 16.h),
+                  Wrap(
+                    spacing: 10.w,
+                    runSpacing: 10.h,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      for (final emoji in ChatBubbleBar.moreEmojis)
+                        InkWell(
+                          onTap: () => Navigator.pop(sheetContext, emoji),
+                          borderRadius: BorderRadius.circular(14.r),
+                          child: Container(
+                            width: 48.w,
+                            height: 48.w,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: const Color.fromRGBO(255, 255, 255, 0.08),
+                              borderRadius: BorderRadius.circular(14.r),
+                              border: Border.all(
+                                color: const Color.fromRGBO(255, 255, 255, 0.12),
+                              ),
+                            ),
+                            child: Text(
+                              emoji,
+                              style: TextStyle(fontSize: 24.sp),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         );
@@ -325,10 +329,16 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
           ),
           Expanded(
             child: Container(
-              padding: EdgeInsets.symmetric(horizontal: 14.w),
+              // Taller, roomier pill than before (the previous container
+              // felt cramped for composing a message) — extra vertical
+              // padding plus a min height, while staying single-line so it
+              // doesn't grow unpredictably and crowd the pinned close/send
+              // buttons on either side.
+              constraints: BoxConstraints(minHeight: 52.h),
+              padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 12.h),
               decoration: BoxDecoration(
                 color: const Color(0xff2a2a2a),
-                borderRadius: BorderRadius.circular(20.r),
+                borderRadius: BorderRadius.circular(26.r),
               ),
               child: Row(
                 children: [
@@ -341,7 +351,7 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
                       inputFormatters: [
                         _WordLimitFormatter(ChatMessageRepository.maxWords),
                       ],
-                      style: TextStyle(color: Colors.white, fontSize: 14.sp),
+                      style: TextStyle(color: Colors.white, fontSize: 16.sp),
                       decoration: const InputDecoration(
                         hintText: 'Message the group…',
                         hintStyle: TextStyle(color: Colors.white38),
@@ -352,6 +362,7 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
                       onSubmitted: (_) => unawaited(_sendCustom()),
                     ),
                   ),
+                  SizedBox(width: 8.w),
                   Text(
                     '$wordCount/${ChatMessageRepository.maxWords}',
                     style: TextStyle(

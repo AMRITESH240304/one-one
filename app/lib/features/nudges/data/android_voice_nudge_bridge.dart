@@ -12,6 +12,8 @@ class AndroidVoiceNudgeBridge {
       StreamController<void>.broadcast();
   static final StreamController<void> _registrationSignals =
       StreamController<void>.broadcast();
+  static final StreamController<NudgeDeliveryResult> _deliveryResults =
+      StreamController<NudgeDeliveryResult>.broadcast();
   static bool _handlerInstalled = false;
 
   static Stream<void> get actionSignals {
@@ -24,6 +26,14 @@ class AndroidVoiceNudgeBridge {
     return _registrationSignals.stream;
   }
 
+  /// Real-time played/failed outcomes for ring + voice nudges this device
+  /// sent, pushed the instant the receiver's device genuinely starts (or
+  /// fails to start) playback. Only fires while the app is foregrounded.
+  static Stream<NudgeDeliveryResult> get deliveryResults {
+    _installHandler();
+    return _deliveryResults.stream;
+  }
+
   static void _installHandler() {
     if (_handlerInstalled || !Platform.isAndroid) return;
     _handlerInstalled = true;
@@ -33,6 +43,14 @@ class AndroidVoiceNudgeBridge {
       } else if (call.method == 'onFcmRegistrationRenewed') {
         debugPrint('[OneOneFCM][DART-06] Native registration renewed');
         _registrationSignals.add(null);
+      } else if (call.method == 'onNudgeDeliveryResult') {
+        final raw = call.arguments;
+        if (raw is Map) {
+          final result = NudgeDeliveryResult.tryParse(
+            raw.map((key, value) => MapEntry(key.toString(), value)),
+          );
+          if (result != null) _deliveryResults.add(result);
+        }
       }
     });
   }
@@ -114,6 +132,46 @@ class NudgeNotificationAction {
       action: action,
       eventId: eventId,
       groupId: groupId,
+    );
+  }
+}
+
+/// Outcome of a ring/voice nudge this device sent, reported once the
+/// receiver's device genuinely started (or failed to start) playback.
+class NudgeDeliveryResult {
+  const NudgeDeliveryResult({
+    required this.eventId,
+    required this.status,
+    this.reason,
+    this.recipientName,
+  });
+
+  final String eventId;
+
+  /// `played` or `failed`.
+  final String status;
+
+  /// Machine-readable reason code (e.g. `receiver_volume_muted`) when known.
+  final String? reason;
+  final String? recipientName;
+
+  bool get played => status == 'played';
+
+  static NudgeDeliveryResult? tryParse(Map<String, dynamic> raw) {
+    final eventId = raw['eventId']?.toString().trim() ?? '';
+    final status = raw['status']?.toString().trim() ?? '';
+    if (eventId.isEmpty || !const {'played', 'failed'}.contains(status)) {
+      return null;
+    }
+    return NudgeDeliveryResult(
+      eventId: eventId,
+      status: status,
+      reason: raw['reason']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['reason'].toString().trim(),
+      recipientName: raw['recipientName']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['recipientName'].toString().trim(),
     );
   }
 }

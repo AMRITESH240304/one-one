@@ -12,6 +12,7 @@ import '../../../core/network/api_client.dart';
 import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
 import '../../identity/ui/profile_avatar.dart';
+import '../data/android_voice_nudge_bridge.dart';
 import '../data/nudge_repository.dart';
 import '../nudge_cooldowns.dart';
 
@@ -77,6 +78,17 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   Duration _elapsed = Duration.zero;
   String? _message;
   bool _messageIsError = false;
+  bool _messagePending = false;
+
+  // Real-time delivery confirmation (nudge reliability checklist): once a
+  // ring/voice nudge is accepted by the backend, the sheet stays open
+  // awaiting the receiver's genuine playback outcome instead of closing
+  // immediately — push nudges have no such confirmation and are unaffected.
+  StreamSubscription<NudgeDeliveryResult>? _deliverySub;
+  String? _awaitingEventId;
+  Timer? _deliveryTimeoutTimer;
+
+  static const _deliveryConfirmationTimeout = Duration(seconds: 12);
 
   @override
   void initState() {
@@ -86,6 +98,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     _cooldownTicker = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (mounted) setState(() {});
     });
+    _deliverySub = AndroidVoiceNudgeBridge.deliveryResults.listen(
+      _onDeliveryResult,
+    );
   }
 
   List<GroupMemberSummary> get _friends => widget.members
@@ -101,15 +116,76 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       !_busy &&
       !_startingRecording &&
       !_finishingRecording &&
-      !_recording;
+      !_recording &&
+      _awaitingEventId == null;
 
   @override
   void dispose() {
     _recordingTimer?.cancel();
     _cooldownTicker?.cancel();
+    _deliveryTimeoutTimer?.cancel();
+    unawaited(_deliverySub?.cancel());
     if (_recording) unawaited(_recorder.stop());
     unawaited(_recorder.dispose());
     super.dispose();
+  }
+
+  /// Begins waiting for the receiver's genuine playback outcome for the
+  /// ring/voice nudge identified by [eventId] instead of closing the sheet.
+  /// Falls back to a generic "wasn't played" message if no result arrives
+  /// within [_deliveryConfirmationTimeout] (e.g. the receiver is offline).
+  void _beginAwaitingDeliveryConfirmation(String? eventId, {required String waitingMessage}) {
+    if (eventId == null || eventId.isEmpty) return;
+    _deliveryTimeoutTimer?.cancel();
+    setState(() {
+      _awaitingEventId = eventId;
+      _message = waitingMessage;
+      _messageIsError = false;
+      _messagePending = true;
+    });
+    _deliveryTimeoutTimer = Timer(_deliveryConfirmationTimeout, () {
+      if (!mounted || _awaitingEventId != eventId) return;
+      setState(() {
+        _awaitingEventId = null;
+        _message = 'Nudge wasn\u2019t played, try again.';
+        _messageIsError = true;
+        _messagePending = false;
+      });
+    });
+  }
+
+  void _onDeliveryResult(NudgeDeliveryResult result) {
+    if (!mounted || result.eventId != _awaitingEventId) return;
+    _deliveryTimeoutTimer?.cancel();
+    final recipient = result.recipientName;
+    setState(() {
+      _awaitingEventId = null;
+      _messagePending = false;
+      if (result.played) {
+        _message = recipient == null
+            ? 'Nudge successfully playing on their device'
+            : 'Nudge successfully playing on $recipient\u2019s device';
+        _messageIsError = false;
+      } else {
+        _message = _deliveryFailureMessage(result.reason);
+        _messageIsError = true;
+      }
+    });
+    Timer(const Duration(seconds: 3), () {
+      if (mounted && _canSend) Navigator.of(context).pop();
+    });
+  }
+
+  String _deliveryFailureMessage(String? reason) {
+    switch (reason) {
+      case 'receiver_volume_muted':
+        return 'Nudge wasn\u2019t played \u2014 their volume is muted or too low.';
+      case 'playback_error':
+      case 'download_error':
+        return 'Nudge wasn\u2019t played due to an error on their device.';
+      default:
+        return 'Nudge wasn\u2019t played, try again.';
+    }
   }
 
   /// Remaining local cooldown for [kind]. Purely a UX affordance — the
@@ -131,6 +207,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         durationSeconds: seconds,
       ),
       kind: NudgeKind.ring,
+      awaitsDeliveryConfirmation: true,
+      waitingMessage: 'Ringing\u2026 confirming it played',
     );
   }
 
@@ -146,19 +224,28 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   Future<void> _send(
     Future<Object?> Function() action, {
     required NudgeKind kind,
+    bool awaitsDeliveryConfirmation = false,
+    String waitingMessage = '',
   }) async {
     if (!_canSend) return;
     setState(() {
       _busy = true;
       _message = null;
       _messageIsError = false;
+      _messagePending = false;
     });
     try {
-      await action();
+      final result = await action();
       _cooldowns.record(kind);
       if (!mounted) return;
-      // Clear busy before pop so PopScope allows the dismiss.
       setState(() => _busy = false);
+      if (awaitsDeliveryConfirmation && result is Map) {
+        final eventId = result['notificationEventId']?.toString();
+        if (eventId != null && eventId.isNotEmpty) {
+          _beginAwaitingDeliveryConfirmation(eventId, waitingMessage: waitingMessage);
+          return;
+        }
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) Navigator.of(context).pop();
       });
@@ -277,6 +364,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
     String? path;
     var sent = false;
+    String? voiceEventId;
     try {
       path = await _recorder.stop();
       if (!send || path == null) return;
@@ -290,7 +378,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         return;
       }
       final file = File(path);
-      await _repository.sendVoice(
+      final response = await _repository.sendVoice(
         groupId: widget.group.groupId,
         target: _target,
         audio: await file.readAsBytes(),
@@ -298,6 +386,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       );
       _cooldowns.record(NudgeKind.voice);
       sent = true;
+      voiceEventId = response['notificationEventId']?.toString();
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -321,7 +410,12 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           _sendingVoice = false;
           _elapsed = Duration.zero;
         });
-        if (sent) {
+        if (sent && voiceEventId != null && voiceEventId.isNotEmpty) {
+          _beginAwaitingDeliveryConfirmation(
+            voiceEventId,
+            waitingMessage: 'Sent\u2026 confirming it played',
+          );
+        } else if (sent) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) Navigator.of(context).pop();
           });
@@ -363,7 +457,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
     return PopScope(
       canPop:
-          !_busy && !_recording && !_startingRecording && !_finishingRecording,
+          !_busy &&
+          !_recording &&
+          !_startingRecording &&
+          !_finishingRecording &&
+          _awaitingEventId == null,
       child: Material(
         color: const Color(0xff141414),
         borderRadius: BorderRadius.vertical(top: Radius.circular(28.r)),
@@ -768,6 +866,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                           ? 'Invite a friend before sending a nudge.'
                           : _message!,
                       isError: _friends.isEmpty || _messageIsError,
+                      isPending: _friends.isEmpty ? false : _messagePending,
                     ),
                   ),
                 ],
@@ -965,14 +1064,23 @@ class _NudgeRecipient extends StatelessWidget {
 }
 
 class _NudgeStatus extends StatelessWidget {
-  const _NudgeStatus({required this.message, required this.isError});
+  const _NudgeStatus({
+    required this.message,
+    required this.isError,
+    this.isPending = false,
+  });
 
   final String message;
   final bool isError;
+  final bool isPending;
 
   @override
   Widget build(BuildContext context) {
-    final color = isError ? const Color(0xffff6b6f) : const Color(0xff9bdc28);
+    final color = isPending
+        ? const Color(0xffe0a83c)
+        : isError
+        ? const Color(0xffff6b6f)
+        : const Color(0xff9bdc28);
     return Container(
       padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 10.h),
       decoration: BoxDecoration(
@@ -982,11 +1090,20 @@ class _NudgeStatus extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(
-            isError ? Icons.error_outline_rounded : Icons.check_circle_outline,
-            color: color,
-            size: 17.sp,
-          ),
+          if (isPending)
+            SizedBox(
+              width: 15.sp,
+              height: 15.sp,
+              child: CircularProgressIndicator(strokeWidth: 2, color: color),
+            )
+          else
+            Icon(
+              isError
+                  ? Icons.error_outline_rounded
+                  : Icons.check_circle_outline,
+              color: color,
+              size: 17.sp,
+            ),
           SizedBox(width: 8.w),
           Expanded(
             child: Text(

@@ -9,6 +9,7 @@ import { createHealthRoutes } from "./routes/healthRoutes.js";
 import { createLiveKitRoutes } from "./routes/liveKitRoutes.js";
 import { createNotificationRoutes } from "./routes/notificationRoutes.js";
 import { createSubscriptionRoutes } from "./routes/subscriptionRoutes.js";
+import { createWellKnownRoutes } from "./routes/wellKnownRoutes.js";
 
 export function createApp() {
   const app = express();
@@ -29,6 +30,7 @@ export function createApp() {
   );
 
   app.use(createHealthRoutes());
+  app.use(createWellKnownRoutes());
   app.use(createGroupRoutes());
   app.use(createLiveKitRoutes());
   app.use(createNotificationRoutes());

@@ -34,6 +34,7 @@ class MainActivity : FlutterFragmentActivity() {
             VoiceNudgeContract.flutterChannel,
         )
         NudgeActionDispatcher.attach(voiceNudgeChannel)
+        NudgeDeliveryResultDispatcher.attach(voiceNudgeChannel)
         captureNudgeAction(intent)
         inviteLinkChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -206,6 +207,7 @@ class MainActivity : FlutterFragmentActivity() {
         }
         if (::voiceNudgeChannel.isInitialized) {
             NudgeActionDispatcher.detach(voiceNudgeChannel)
+            NudgeDeliveryResultDispatcher.detach(voiceNudgeChannel)
         }
         if (::voicePipChannel.isInitialized) {
             VoicePipActionDispatcher.detach(voicePipChannel)

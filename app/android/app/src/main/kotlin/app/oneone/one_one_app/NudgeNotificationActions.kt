@@ -76,6 +76,32 @@ object NudgeActionDispatcher {
     }
 }
 
+/**
+ * Bridges real-time nudge delivery confirmation (#5) straight to Flutter
+ * while the sender's send-nudge bottom sheet is open. Only fires when the
+ * app is in the foreground and Flutter is attached — if the sender has
+ * backgrounded the app or closed the sheet, the result is simply not shown
+ * live (the outcome is still logged server-side either way).
+ */
+object NudgeDeliveryResultDispatcher {
+    @Volatile
+    private var channel: MethodChannel? = null
+
+    fun attach(methodChannel: MethodChannel) {
+        channel = methodChannel
+    }
+
+    fun detach(methodChannel: MethodChannel) {
+        if (channel === methodChannel) channel = null
+    }
+
+    fun signal(result: Map<String, String?>) {
+        Handler(Looper.getMainLooper()).post {
+            channel?.invokeMethod("onNudgeDeliveryResult", result)
+        }
+    }
+}
+
 class NudgeNotificationActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val responseAction = when (intent.action) {

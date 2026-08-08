@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -2517,6 +2518,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final groupMixed = !groupAllOffline && !groupAllOnline;
     final anyMemberOnline = live || anyFriendOnline;
 
+    // Read the live system-reported bottom inset (gesture pill vs. a full
+    // 3-button nav bar) directly from MediaQuery here, before `SafeArea`
+    // below would otherwise silently consume it for its descendants. Used
+    // to size the real gap under the lowest pinned controls (messages bar /
+    // main button row) instead of assuming a fixed layout — see
+    // `bottomSystemInset` usage further down.
+    final bottomSystemInset = MediaQuery.paddingOf(context).bottom;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -2529,7 +2538,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             fallbackAvatarAsset: _session.user.avatarAsset,
             accent: accent,
           ),
+          // `bottom: false` here because bottom clearance for the pinned
+          // controls at the end of the column is now applied explicitly
+          // (see `bottomSystemInset` below) so 3-button-nav devices get
+          // real extra space instead of a single fixed gap that assumes a
+          // gesture-nav-sized inset.
           SafeArea(
+            bottom: false,
             child: RefreshIndicator(
               onRefresh: _loadGroups,
               color: Colors.black,
@@ -2566,8 +2581,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                               _remoteConnectionQualityByUserId,
                           onInvite: inviteAction,
                           allOffline: groupAllOffline,
-                          showNudge: groupMixed,
-                          onNudge: _busy ? null : _openNudges,
                         ),
                         if (_message != null) ...[
                           SizedBox(height: 10.h),
@@ -2594,6 +2607,31 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                               currentUserId: _session.userId,
                               accent: accent,
                               onExpire: _dismissExpiredChatMessage,
+                            ),
+                          ),
+                        // Compact nudge + walkie-talkie/call quick actions,
+                        // stacked vertically, sitting just above the
+                        // join/carousel/create row — replaces the old
+                        // oversized nudge circle that used to sit next to
+                        // the invite button (it no longer appears there).
+                        if (groupMixed || anyMemberOnline)
+                          Padding(
+                            padding: EdgeInsets.only(
+                              bottom: 10.h,
+                              right: 16.w,
+                            ),
+                            child: Align(
+                              alignment: Alignment.centerRight,
+                              child: _QuickActionStack(
+                                showNudge: groupMixed,
+                                onNudge: _busy ? null : _openNudges,
+                                showCallToggle: anyMemberOnline,
+                                callToggleEnabled:
+                                    viewingActiveGroup && !_connectionModeBusy,
+                                callModeActive: _isCallMode,
+                                onToggleCallMode: _toggleConnectionMode,
+                                accent: accent,
+                              ),
                             ),
                           ),
                         SizedBox(
@@ -2624,14 +2662,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                             onJoinGroup: _openJoinGroup,
                           ),
                         ),
-                        if (items.length > 1) ...[
-                          SizedBox(height: 8.h),
-                          _CarouselDotIndicator(
-                            count: items.length,
-                            index: _carouselIndex.clamp(0, items.length - 1),
-                          ),
-                        ],
-                        SizedBox(height: 18.h),
+                        // Swipe-indicator dots removed (swiping is
+                        // discoverable enough without them); the vertical
+                        // space they used to occupy is folded into the gap
+                        // below so the button row settles down naturally
+                        // instead of leaving an empty gap.
+                        SizedBox(height: 30.h),
                         Text(
                           viewingActiveGroup
                               ? (_isCallMode
@@ -2678,7 +2714,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                             onEmojiSelected: _triggerEmojiBurst,
                           ),
                         ],
-                        SizedBox(height: 28.h),
+                        // Explicit, adaptive bottom clearance below the
+                        // lowest interactive controls (messages bar / main
+                        // button row): `bottomSystemInset` is measured live
+                        // via MediaQuery from the Scaffold's own context
+                        // (captured further up in build, before the
+                        // surrounding SafeArea consumes it) rather than
+                        // assuming a fixed layout, so 3-button-nav devices
+                        // (larger reserved bottom area) get real extra
+                        // clearance while gesture-nav devices (near-zero
+                        // inset) keep the original tight gap.
+                        SizedBox(height: 28.h + bottomSystemInset),
                       ],
                     ),
                   ),
@@ -3202,8 +3248,6 @@ class _FriendsStrip extends StatelessWidget {
     required this.connectionQualityByUserId,
     required this.onInvite,
     required this.allOffline,
-    required this.showNudge,
-    required this.onNudge,
   });
 
   final String? groupName;
@@ -3216,11 +3260,6 @@ class _FriendsStrip extends StatelessWidget {
   /// Whether every member of this group (including the local user) is
   /// currently offline. Dims member avatars when true.
   final bool allOffline;
-
-  /// Whether to show the nudge bell trailing the avatar row — only in the
-  /// "mixed" state (some online, some offline).
-  final bool showNudge;
-  final VoidCallback? onNudge;
 
   @override
   Widget build(BuildContext context) {
@@ -3268,58 +3307,10 @@ class _FriendsStrip extends StatelessWidget {
                 SizedBox(width: 12.w),
               ],
               _AddFriendChip(onTap: onInvite),
-              if (showNudge) ...[
-                SizedBox(width: 12.w),
-                _NudgeBellChip(onTap: onNudge),
-              ],
             ],
           ),
         ),
       ],
-    );
-  }
-}
-
-class _NudgeBellChip extends StatelessWidget {
-  const _NudgeBellChip({required this.onTap});
-
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Opacity(
-        opacity: onTap == null ? 0.45 : 1,
-        child: Column(
-          children: [
-            Container(
-              width: 52.w,
-              height: 52.w,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: const Color(0xff2a2a2a),
-                border: Border.all(color: const Color(0xffffb347), width: 1.5),
-              ),
-              child: Icon(
-                Icons.notifications_active_rounded,
-                color: const Color(0xffffb347),
-                size: 22.sp,
-              ),
-            ),
-            SizedBox(height: 4.h),
-            Text(
-              'nudge',
-              style: TextStyle(
-                color: Colors.white70,
-                fontSize: 10.sp,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
@@ -3410,10 +3401,37 @@ class _FriendChip extends StatelessWidget {
               Positioned(
                 right: -4,
                 bottom: -2,
-                child: Text(
-                  live ? '🟢' : '🌙',
-                  style: TextStyle(fontSize: 14.sp),
-                ),
+                // Away state uses a Material "dark mode" glyph inside a
+                // small circular badge (subtle shadow) instead of the old
+                // 🌙 emoji, sized down noticeably from the previous glyph.
+                // NOTE: no HTML/CSS reference file was available in this
+                // session, so colors are mapped to existing app tokens
+                // (avatar-chip background + white70 icon) rather than the
+                // exact reference values — adjust here if the reference
+                // surfaces later.
+                child: live
+                    ? Text('🟢', style: TextStyle(fontSize: 14.sp))
+                    : Container(
+                        width: 15.w,
+                        height: 15.w,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: const Color(0xff2a2a2a),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Colors.black45,
+                              blurRadius: 3,
+                              offset: Offset(0, 1),
+                            ),
+                          ],
+                        ),
+                        child: Icon(
+                          Icons.dark_mode_rounded,
+                          color: Colors.white70,
+                          size: 9.sp,
+                        ),
+                      ),
               ),
             ],
           ),
@@ -3601,6 +3619,127 @@ class _AddFriendChip extends StatelessWidget {
   }
 }
 
+/// Compact vertical stack of two small emoji/icon quick-action buttons that
+/// sits just above the join/carousel/create row: a nudge (wave) trigger and
+/// the walkie-talkie/call-mode toggle. Each button shows independently
+/// based on its own trigger condition (same conditions the old nudge chip
+/// and the [_CallModeControls] pill already used), so the stack can show
+/// just one button, both, or neither.
+///
+/// NOTE: there's no dedicated walkie-talkie image asset in the codebase
+/// (searched `assets/` — only avatar art, lottie files, and app icons
+/// exist), so this reuses the same walkie/call icon pair already used by
+/// [_CallModeControls] rather than inventing a new asset.
+class _QuickActionStack extends StatelessWidget {
+  const _QuickActionStack({
+    required this.showNudge,
+    required this.onNudge,
+    required this.showCallToggle,
+    required this.callToggleEnabled,
+    required this.callModeActive,
+    required this.onToggleCallMode,
+    required this.accent,
+  });
+
+  final bool showNudge;
+  final VoidCallback? onNudge;
+  final bool showCallToggle;
+  final bool callToggleEnabled;
+  final bool callModeActive;
+  final VoidCallback onToggleCallMode;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!showNudge && !showCallToggle) return const SizedBox.shrink();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (showNudge) ...[
+          Semantics(
+            button: true,
+            label: 'Nudge the group',
+            child: _QuickActionButton(
+              onTap: onNudge,
+              background: const Color(0xffffb347).withValues(alpha: 0.18),
+              border: const Color(0xffffb347),
+              child: const Text('👋', style: TextStyle(fontSize: 20)),
+            ),
+          ),
+          if (showCallToggle) SizedBox(height: 8.h),
+        ],
+        if (showCallToggle)
+          Opacity(
+            opacity: callToggleEnabled ? 1 : 0.45,
+            child: Semantics(
+              button: true,
+              label: callModeActive
+                  ? 'Switch to walkie-talkie mode'
+                  : 'Switch to call mode',
+              child: _QuickActionButton(
+                onTap: callToggleEnabled ? onToggleCallMode : null,
+                background: (callModeActive ? accent : Colors.white)
+                    .withValues(alpha: 0.14),
+                border: callModeActive ? accent : Colors.white24,
+                // Brief scale+fade crossfade between the walkie-talkie and
+                // call icons so the mode switch reads as intentional rather
+                // than an abrupt icon swap.
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 240),
+                  transitionBuilder: (child, animation) => ScaleTransition(
+                    scale: animation,
+                    child: FadeTransition(opacity: animation, child: child),
+                  ),
+                  child: Icon(
+                    callModeActive
+                        ? Icons.settings_voice_rounded
+                        : Icons.record_voice_over_rounded,
+                    key: ValueKey(callModeActive),
+                    color: callModeActive ? accent : Colors.white70,
+                    size: 20.sp,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _QuickActionButton extends StatelessWidget {
+  const _QuickActionButton({
+    required this.onTap,
+    required this.background,
+    required this.border,
+    required this.child,
+  });
+
+  final VoidCallback? onTap;
+  final Color background;
+  final Color border;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: background,
+      shape: CircleBorder(side: BorderSide(color: border, width: 1.5)),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        // 44dp minimum so the tap target stays comfortable even though the
+        // glyph inside is intentionally small.
+        child: SizedBox(
+          width: 44.w,
+          height: 44.w,
+          child: Center(child: child),
+        ),
+      ),
+    );
+  }
+}
+
 /// Call / walkie-talkie mode toggle. Only rendered by the parent once at
 /// least one member of the group is online — see the `AnimatedSize` wrapper
 /// in `_HomeScreenState.build`.
@@ -3665,38 +3804,6 @@ class _CallModeControls extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Page-indicator dots shown below the group carousel when the user has
-/// more than one group, so position/count is obvious at a glance.
-class _CarouselDotIndicator extends StatelessWidget {
-  const _CarouselDotIndicator({required this.count, required this.index});
-
-  final int count;
-  final int index;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        for (var i = 0; i < count; i++)
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 220),
-            curve: Curves.easeOutCubic,
-            margin: EdgeInsets.symmetric(horizontal: 3.w),
-            width: i == index ? 16.w : 6.w,
-            height: 6.w,
-            decoration: BoxDecoration(
-              color: i == index
-                  ? Colors.white
-                  : const Color.fromRGBO(255, 255, 255, 0.35),
-              borderRadius: BorderRadius.circular(3.r),
-            ),
-          ),
-      ],
     );
   }
 }
@@ -4121,27 +4228,27 @@ class _MainAvatarCircle extends StatelessWidget {
                 tileSize: size,
               ),
             ),
-            if (nudgeMode)
-              Positioned(
-                right: size * 0.08,
-                top: size * 0.06,
-                child: _SleepZAnimation(size: size * 0.38),
-              ),
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: Padding(
-                padding: EdgeInsets.only(bottom: size * 0.08),
-                child: Icon(
-                  nudgeMode ? Icons.notifications_active_rounded : Icons.mic,
-                  color: talkActive
-                      ? const Color(0xffffd54f)
-                      : nudgeMode
-                      ? const Color(0xffffb347)
-                      : Colors.white,
-                  size: talkActive ? size * 0.22 : size * 0.18,
+            // Mic only appears when this card is the one actually connected
+            // to live voice communication — showing it on every card
+            // (including groups you're not in a call with) misleadingly
+            // implied a mic control that wasn't relevant there. The nudge
+            // bell is unrelated to mic availability and keeps its own gate.
+            if (nudgeMode || connected)
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: EdgeInsets.only(bottom: size * 0.08),
+                  child: Icon(
+                    nudgeMode ? Icons.notifications_active_rounded : Icons.mic,
+                    color: talkActive
+                        ? const Color(0xffffd54f)
+                        : nudgeMode
+                        ? const Color(0xffffb347)
+                        : Colors.white,
+                    size: talkActive ? size * 0.22 : size * 0.18,
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -4180,20 +4287,38 @@ class _MainAvatarCircle extends StatelessWidget {
       );
     }
 
-    return AnimatedOpacity(
+    final content = AnimatedOpacity(
       duration: const Duration(milliseconds: 180),
       opacity: talkBusy ? 0.65 : 1,
       child: circle,
     );
+
+    if (!nudgeMode) return content;
+
+    // Sleeping "Z"s orbit just outside the button's circular edge when the
+    // whole group is offline. This Stack has no ClipOval ancestor (unlike
+    // the member-photo content above) and uses Clip.none, so the orbit ring
+    // is free to render outside the button's boundary instead of being
+    // trapped inside it.
+    return Stack(
+      alignment: Alignment.center,
+      clipBehavior: Clip.none,
+      children: [content, IgnorePointer(child: _SleepZAnimation(circleSize: size))],
+    );
   }
 }
 
-/// Looping "Z"s drifting up and fading for the fully-offline nudge state.
-/// Sized and timed to be clearly legible at a glance without feeling noisy.
+/// Rounded "Z" badges that orbit just outside the main button's edge for the
+/// fully-offline nudge state. Each glyph starts near-opaque as it emerges
+/// from the button and fades out progressively over the rest of its lap
+/// around the ring, so the loop reads as travelling-and-dissolving rather
+/// than a hard cut. Deliberately larger and rounder (circular badge behind
+/// the glyph) than the original in-circle design, which read as too subtle.
 class _SleepZAnimation extends StatefulWidget {
-  const _SleepZAnimation({required this.size});
+  const _SleepZAnimation({required this.circleSize});
 
-  final double size;
+  /// Diameter of the main button circle this animation orbits around.
+  final double circleSize;
 
   @override
   State<_SleepZAnimation> createState() => _SleepZAnimationState();
@@ -4201,9 +4326,13 @@ class _SleepZAnimation extends StatefulWidget {
 
 class _SleepZAnimationState extends State<_SleepZAnimation>
     with SingleTickerProviderStateMixin {
+  static const int _zCount = 3;
+
+  // One full orbit per cycle; slow enough to read as a smooth drift rather
+  // than a spin, matching the "smooth over a full orbit" requirement.
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 2000),
+    duration: const Duration(milliseconds: 3600),
   )..repeat();
 
   @override
@@ -4214,57 +4343,73 @@ class _SleepZAnimationState extends State<_SleepZAnimation>
 
   @override
   Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: SizedBox(
-        width: widget.size,
-        height: widget.size,
-        child: AnimatedBuilder(
-          animation: _controller,
-          builder: (context, _) {
-            return Stack(
-              clipBehavior: Clip.none,
-              children: [for (var i = 0; i < 3; i++) _buildZ(i)],
-            );
-          },
-        ),
+    // Ring sits outside the button's edge with a clear visual gap, and the
+    // bounding box gives the orbiting glyphs room to render without being
+    // clipped by anything up the tree.
+    final orbitRadius = widget.circleSize / 2 + widget.circleSize * 0.2;
+    final boxSize = (orbitRadius + widget.circleSize * 0.26) * 2;
+    return SizedBox(
+      width: boxSize,
+      height: boxSize,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              for (var i = 0; i < _zCount; i++)
+                _buildZ(i, orbitRadius: orbitRadius, boxSize: boxSize),
+            ],
+          );
+        },
       ),
     );
   }
 
-  Widget _buildZ(int i) {
-    // Three staggered "Z"s rise up-and-right with a fuller fade curve so
-    // each glyph reads clearly as it travels, then soft-exits.
-    final t = ((_controller.value + i * 0.33) % 1.0);
-    final opacity = t < 0.12
-        ? Curves.easeOut.transform(t / 0.12)
-        : t > 0.62
-        ? Curves.easeIn.transform((1 - t) / 0.38).clamp(0.0, 1.0)
-        : 1.0;
-    final scale = 0.88 + 0.22 * Curves.easeOut.transform((t * 1.4).clamp(0.0, 1.0));
+  Widget _buildZ(int i, {required double orbitRadius, required double boxSize}) {
+    final t = (_controller.value + i / _zCount) % 1.0;
+
+    // Quick ease-in as the glyph emerges, then a long, smooth fade across
+    // the remainder of the lap down to fully transparent right as it
+    // completes the ring — continuous at the t=0/t=1 seam (both ~0), so the
+    // loop never pops or looks choppy.
+    const fadeInFraction = 0.08;
+    final opacity = t < fadeInFraction
+        ? Curves.easeOut.transform(t / fadeInFraction)
+        : Curves.easeIn.transform(
+            (1 - (t - fadeInFraction) / (1 - fadeInFraction)).clamp(0.0, 1.0),
+          );
+
+    final angle = -math.pi / 2 + t * 2 * math.pi;
+    final glyphSize = widget.circleSize * (0.24 + i * 0.02);
+    final badgeSize = glyphSize * 1.4;
+    final center = boxSize / 2;
+    final cx = center + orbitRadius * math.cos(angle);
+    final cy = center + orbitRadius * math.sin(angle);
+
     return Positioned(
-      right: -t * widget.size * 0.55,
-      top: widget.size * 0.55 - t * widget.size * 1.05,
+      left: cx - badgeSize / 2,
+      top: cy - badgeSize / 2,
       child: Opacity(
         opacity: opacity.clamp(0.0, 1.0),
-        child: Transform.scale(
-          scale: scale,
+        child: Container(
+          width: badgeSize,
+          height: badgeSize,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.white.withValues(alpha: 0.18),
+            boxShadow: const [
+              BoxShadow(color: Colors.black45, blurRadius: 6, offset: Offset(0, 2)),
+            ],
+          ),
           child: Text(
             'Z',
             style: GoogleFonts.nunito(
-              color: Colors.white.withValues(alpha: 0.92),
-              // Larger glyphs than the previous subtle design so the sleep
-              // state is obvious at a glance on the main circle.
-              fontSize: widget.size * (0.52 + i * 0.12),
+              color: Colors.white,
+              fontSize: glyphSize,
               fontWeight: FontWeight.w800,
               height: 1,
-              letterSpacing: -0.5,
-              shadows: const [
-                Shadow(
-                  color: Colors.black54,
-                  blurRadius: 6,
-                  offset: Offset(0, 1),
-                ),
-              ],
             ),
           ),
         ),

@@ -59,6 +59,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 showNudgeResponse(message)
                 return
             }
+            VoiceNudgeContract.kindDeliveryResult -> {
+                forwardDeliveryResult(message)
+                return
+            }
             VoiceNudgeContract.kindVoice,
             VoiceNudgeContract.kindRing -> Unit
             else -> {
@@ -318,6 +322,33 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             VoiceNudgeDiagnostics.tag,
             "[NUDGE-ACTION-03] sender received response=$responseAction " +
                 "snoozeMinutes=${snoozeMinutes ?: "none"}",
+        )
+    }
+
+    /**
+     * Real-time delivery confirmation (#5): only meaningful while the
+     * sender's send-nudge bottom sheet is open, so it's forwarded straight
+     * to Flutter with no persistent notification of its own.
+     */
+    private fun forwardDeliveryResult(message: RemoteMessage) {
+        val data = message.data
+        val eventId = data["eventId"] ?: return
+        val status = data["status"] ?: return
+        Log.i(
+            VoiceNudgeDiagnostics.tag,
+            "[NUDGE-DELIVERY-02] sender received status=$status " +
+                "eventSuffix=${eventId.takeLast(6)} reason=${data["reason"].orEmpty()}",
+        )
+        NudgeDeliveryResultDispatcher.signal(
+            mapOf(
+                "eventId" to eventId,
+                "groupId" to data["groupId"],
+                "kind" to data["kind"],
+                "status" to status,
+                "reason" to data["reason"]?.takeIf { it.isNotBlank() },
+                "recipientUserId" to data["recipientUserId"],
+                "recipientName" to data["recipientName"],
+            ),
         )
     }
 

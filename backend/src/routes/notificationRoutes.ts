@@ -14,6 +14,7 @@ import {
 } from "../notifications/voiceNudgeService.js";
 import { maxVoiceNudgeBytes } from "../notifications/voiceNudgeValidation.js";
 import { respondToNudge } from "../notifications/nudgeResponseService.js";
+import { recordNudgeDelivery, verifyAckTicket } from "../notifications/nudgeDeliveryService.js";
 import {
   sendChatMessageNotification,
   sendFriendLiveNotification,
@@ -50,7 +51,8 @@ const voiceNudgeQuerySchema = z.object({
 const recipientDeviceSchema = z.object({
   userId: z.string().min(1),
   deviceId: z.string().min(1),
-  fcmToken: z.string().min(1)
+  fcmToken: z.string().min(1),
+  displayName: z.string().min(1).optional()
 });
 
 const voiceNudgeUploadSchema = z.discriminatedUnion("targetScope", [
@@ -86,6 +88,12 @@ const ringNudgeSchema = z.object({
 
 const voiceNudgeAckSchema = z.object({
   status: z.enum(["played", "failed"])
+});
+
+const nudgeAckSchema = z.object({
+  status: z.enum(["played", "failed"]),
+  reason: z.string().min(1).max(120).optional(),
+  health: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
 });
 
 const nudgeResponseSchema = z.discriminatedUnion("action", [
@@ -228,10 +236,11 @@ export function createNotificationRoutes() {
           }
         }
 
-        const devices: Array<{ userId: string; deviceId: string; fcmToken: string }> = [];
+        const devices: Array<{ userId: string; deviceId: string; fcmToken: string; displayName?: string }> = [];
         for (const uid of recipientUserIds) {
           const devSnap = await db.ref(`userDevices/${uid}`).get();
           if (!devSnap.exists()) continue;
+          const recipientDisplayName = await readDisplayNameForAck(db, uid);
           const devs = devSnap.val() as Record<string, unknown>;
           for (const [devId, dv] of Object.entries(devs)) {
             if (
@@ -241,7 +250,7 @@ export function createNotificationRoutes() {
             ) {
               const tok = (dv as Record<string, unknown>).fcmToken;
               if (typeof tok === "string" && tok) {
-                devices.push({ userId: uid, deviceId: devId, fcmToken: tok });
+                devices.push({ userId: uid, deviceId: devId, fcmToken: tok, displayName: recipientDisplayName });
               }
             }
           }
@@ -308,10 +317,11 @@ export function createNotificationRoutes() {
         }
 
         // Read recipient devices (FCM tokens) from RTDB
-        const devices: Array<{ userId: string; deviceId: string; fcmToken: string }> = [];
+        const devices: Array<{ userId: string; deviceId: string; fcmToken: string; displayName?: string }> = [];
         for (const uid of recipientUserIds) {
           const devSnap = await db.ref(`userDevices/${uid}`).get();
           if (!devSnap.exists()) continue;
+          const recipientDisplayName = await readDisplayNameForAck(db, uid);
           const devs = devSnap.val() as Record<string, unknown>;
           for (const [devId, dv] of Object.entries(devs)) {
             if (
@@ -321,7 +331,7 @@ export function createNotificationRoutes() {
             ) {
               const tok = (dv as Record<string, unknown>).fcmToken;
               if (typeof tok === "string" && tok) {
-                devices.push({ userId: uid, deviceId: devId, fcmToken: tok });
+                devices.push({ userId: uid, deviceId: devId, fcmToken: tok, displayName: recipientDisplayName });
               }
             }
           }
@@ -507,5 +517,39 @@ export function createNotificationRoutes() {
     })
   );
 
+  // Real-time delivery confirmation for ring + voice nudges. The receiving
+  // device calls this the moment the nudge genuinely starts playing (or
+  // definitively fails to), and the sender is pushed a live result. No auth
+  // header required — the signed ack ticket itself is the credential.
+  router.post(
+    "/v1/nudges/:eventId/ack",
+    asyncHandler(async (request, response) => {
+      const eventId = z.string().min(1).parse(request.params.eventId);
+      const token = request.header("x-one-one-delivery-token") ?? "";
+      const ticket = verifyAckTicket(token);
+      if (ticket.eventId !== eventId) {
+        response.status(403).json({ error: "invalid_ack_ticket", message: "Delivery token does not match this event." });
+        return;
+      }
+      const body = nudgeAckSchema.parse(request.body);
+      const result = await recordNudgeDelivery({
+        ticket,
+        status: body.status,
+        reason: body.reason,
+        health: body.health
+      });
+      response.status(200).json(result);
+    })
+  );
+
   return router;
+}
+
+async function readDisplayNameForAck(
+  db: ReturnType<typeof getRealtimeDatabase>,
+  userId: string
+): Promise<string | undefined> {
+  const snapshot = await db.ref(`users/${userId}/displayName`).get();
+  const name = snapshot.val()?.toString().trim();
+  return name || undefined;
 }
