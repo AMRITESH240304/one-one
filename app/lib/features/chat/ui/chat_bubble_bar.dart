@@ -105,11 +105,46 @@ class ChatBubbleBar extends StatefulWidget {
 class _ChatBubbleBarState extends State<ChatBubbleBar> {
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focusNode = FocusNode();
+  final ScrollController _chipScrollController = ScrollController();
   bool _composing = false;
   bool _sending = false;
+  bool _showTrailingChipFade = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _chipScrollController.addListener(_updateChipScrollFade);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateChipScrollFade());
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatBubbleBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.anyMemberOnline != widget.anyMemberOnline) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_chipScrollController.hasClients) {
+          _chipScrollController.jumpTo(0);
+        }
+        _updateChipScrollFade();
+      });
+    }
+  }
+
+  void _updateChipScrollFade() {
+    if (!_chipScrollController.hasClients) return;
+    final position = _chipScrollController.position;
+    final canScroll = position.maxScrollExtent > 0;
+    final atEnd = position.pixels >= position.maxScrollExtent - 2;
+    final show = canScroll && !atEnd;
+    if (show != _showTrailingChipFade && mounted) {
+      setState(() => _showTrailingChipFade = show);
+    }
+  }
 
   @override
   void dispose() {
+    _chipScrollController.removeListener(_updateChipScrollFade);
+    _chipScrollController.dispose();
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -274,29 +309,34 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
         child: Row(
           children: [
             Expanded(
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                children: [
-                  if (online) ...[
-                    for (final emoji in ChatBubbleBar.quickEmojis) ...[
-                      _EmojiChip(
-                        emoji: emoji,
-                        onTap: () => widget.onEmojiSelected(emoji),
-                      ),
-                      SizedBox(width: 8.w),
-                    ],
-                  ] else ...[
-                    for (final preset in ChatBubbleBar.presets) ...[
-                      _PresetChip(
-                        label: preset,
-                        enabled: !_sending,
-                        onTap: () => unawaited(_sendPreset(preset)),
-                      ),
-                      SizedBox(width: 8.w),
-                    ],
-                  ],
-                ],
-              ),
+              child: online
+                  ? ListView(
+                      scrollDirection: Axis.horizontal,
+                      children: [
+                        for (final emoji in ChatBubbleBar.quickEmojis) ...[
+                          _EmojiChip(
+                            emoji: emoji,
+                            onTap: () => widget.onEmojiSelected(emoji),
+                          ),
+                          SizedBox(width: 8.w),
+                        ],
+                      ],
+                    )
+                  : _FadedHorizontalChipList(
+                      controller: _chipScrollController,
+                      showTrailingFade: _showTrailingChipFade,
+                      onScroll: _updateChipScrollFade,
+                      children: [
+                        for (final preset in ChatBubbleBar.presets) ...[
+                          _PresetChip(
+                            label: preset,
+                            enabled: !_sending,
+                            onTap: () => unawaited(_sendPreset(preset)),
+                          ),
+                          SizedBox(width: 8.w),
+                        ],
+                      ],
+                    ),
             ),
             SizedBox(width: 8.w),
             if (online) ...[
@@ -387,6 +427,55 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
             visualDensity: VisualDensity.compact,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Horizontal chip row with a trailing fade when content continues off-screen.
+class _FadedHorizontalChipList extends StatelessWidget {
+  const _FadedHorizontalChipList({
+    required this.controller,
+    required this.showTrailingFade,
+    required this.onScroll,
+    required this.children,
+  });
+
+  final ScrollController controller;
+  final bool showTrailingFade;
+  final VoidCallback onScroll;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return NotificationListener<ScrollNotification>(
+      onNotification: (notification) {
+        if (notification is ScrollUpdateNotification ||
+            notification is ScrollMetricsNotification) {
+          onScroll();
+        }
+        return false;
+      },
+      child: ShaderMask(
+        blendMode: BlendMode.dstIn,
+        shaderCallback: (bounds) {
+          if (!showTrailingFade) {
+            return const LinearGradient(
+              colors: [Colors.white, Colors.white],
+            ).createShader(bounds);
+          }
+          return const LinearGradient(
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+            colors: [Colors.white, Colors.white, Colors.transparent],
+            stops: [0.0, 0.74, 1.0],
+          ).createShader(bounds);
+        },
+        child: ListView(
+          controller: controller,
+          scrollDirection: Axis.horizontal,
+          children: children,
+        ),
       ),
     );
   }

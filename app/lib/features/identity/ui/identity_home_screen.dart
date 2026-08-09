@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -2580,7 +2579,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           connectionQualityByUserId:
                               _remoteConnectionQualityByUserId,
                           onInvite: inviteAction,
-                          allOffline: groupAllOffline,
                         ),
                         if (_message != null) ...[
                           SizedBox(height: 10.h),
@@ -2599,7 +2597,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           ),
                         ],
                         const Spacer(),
-                        if (_chatMessages.isNotEmpty)
+                        if (_chatMessages.isNotEmpty) ...[
                           Padding(
                             padding: EdgeInsets.symmetric(horizontal: 16.w),
                             child: ChatBubbleFeed(
@@ -2609,33 +2607,72 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                               onExpire: _dismissExpiredChatMessage,
                             ),
                           ),
-                        // Compact nudge + walkie-talkie/call quick actions,
-                        // stacked vertically, sitting just above the
-                        // join/carousel/create row — replaces the old
-                        // oversized nudge circle that used to sit next to
-                        // the invite button (it no longer appears there).
-                        if (groupMixed || anyMemberOnline)
-                          Padding(
-                            padding: EdgeInsets.only(
-                              bottom: 10.h,
-                              right: 16.w,
-                            ),
-                            child: Align(
-                              alignment: Alignment.centerRight,
-                              child: _QuickActionStack(
-                                showNudge: groupMixed,
-                                onNudge: _busy ? null : _openNudges,
-                                showCallToggle: anyMemberOnline,
-                                callToggleEnabled:
-                                    viewingActiveGroup && !_connectionModeBusy,
-                                callModeActive: _isCallMode,
-                                onToggleCallMode: _toggleConnectionMode,
-                                accent: accent,
+                          SizedBox(height: 12.h),
+                        ],
+                        // Status hint + optional quick actions share one
+                        // horizontal band: the hint stays padded and
+                        // centered, while actions sit on the right without
+                        // creating extra vertical gaps above the main row.
+                        Padding(
+                          padding: EdgeInsets.fromLTRB(12.w, 0, 12.w, 8.h),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              // Matching trailing spacer so the hint stays
+                              // optical-center when actions are present.
+                              SizedBox(
+                                width: (groupMixed || anyMemberOnline)
+                                    ? (groupMixed && anyMemberOnline
+                                          ? 96.w
+                                          : 44.w)
+                                    : 12.w,
                               ),
-                            ),
+                              Expanded(
+                                child: Text(
+                                  viewingActiveGroup
+                                      ? (_isCallMode
+                                            ? 'In a call — mic always on'
+                                            : 'Tap to Talk')
+                                      : _isOnline
+                                      ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
+                                      : !_serviceReady
+                                      ? 'invite a friend to enable voice service'
+                                      : 'send a nudge to go online together',
+                                  textAlign: TextAlign.center,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: const Color.fromRGBO(
+                                      255,
+                                      255,
+                                      255,
+                                      0.55,
+                                    ),
+                                    fontSize: 13.sp,
+                                    fontWeight: FontWeight.w500,
+                                    height: 1.3,
+                                  ),
+                                ),
+                              ),
+                              if (groupMixed || anyMemberOnline)
+                                _QuickActionStack(
+                                  showNudge: groupMixed,
+                                  onNudge: _busy ? null : _openNudges,
+                                  showCallToggle: anyMemberOnline,
+                                  callToggleEnabled:
+                                      viewingActiveGroup &&
+                                      !_connectionModeBusy,
+                                  callModeActive: _isCallMode,
+                                  onToggleCallMode: _toggleConnectionMode,
+                                  accent: accent,
+                                )
+                              else
+                                SizedBox(width: 12.w),
+                            ],
                           ),
+                        ),
                         SizedBox(
-                          height: 200.h,
+                          height: 160.h,
                           child: _ExperienceCarousel(
                             items: items,
                             index: _carouselIndex,
@@ -2662,28 +2699,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                             onJoinGroup: _openJoinGroup,
                           ),
                         ),
-                        // Swipe-indicator dots removed (swiping is
-                        // discoverable enough without them); the vertical
-                        // space they used to occupy is folded into the gap
-                        // below so the button row settles down naturally
-                        // instead of leaving an empty gap.
-                        SizedBox(height: 30.h),
-                        Text(
-                          viewingActiveGroup
-                              ? (_isCallMode
-                                    ? 'In a call — mic always on'
-                                    : 'Tap to Talk')
-                              : _isOnline
-                              ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
-                              : !_serviceReady
-                              ? 'invite a friend to enable voice service'
-                              : 'send a nudge to go online together',
-                          style: TextStyle(
-                            color: const Color.fromRGBO(255, 255, 255, 0.55),
-                            fontSize: 13.sp,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
+                        // Call-mode pill stays under the main button row so
+                        // the status band above stays a single clean line.
                         AnimatedSize(
                           duration: const Duration(milliseconds: 260),
                           curve: Curves.easeOutCubic,
@@ -2691,7 +2708,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           child: anyMemberOnline
                               ? Padding(
                                   key: const ValueKey('call-mode-controls'),
-                                  padding: EdgeInsets.only(top: 16.h),
+                                  padding: EdgeInsets.only(top: 4.h),
                                   child: _CallModeControls(
                                     active: _isCallMode,
                                     enabled:
@@ -2706,7 +2723,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                                 ),
                         ),
                         if (focusedGroup != null) ...[
-                          SizedBox(height: 20.h),
+                          SizedBox(height: 8.h),
                           ChatBubbleBar(
                             accent: accent,
                             anyMemberOnline: anyMemberOnline,
@@ -2714,17 +2731,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                             onEmojiSelected: _triggerEmojiBurst,
                           ),
                         ],
-                        // Explicit, adaptive bottom clearance below the
-                        // lowest interactive controls (messages bar / main
-                        // button row): `bottomSystemInset` is measured live
-                        // via MediaQuery from the Scaffold's own context
-                        // (captured further up in build, before the
-                        // surrounding SafeArea consumes it) rather than
-                        // assuming a fixed layout, so 3-button-nav devices
-                        // (larger reserved bottom area) get real extra
-                        // clearance while gesture-nav devices (near-zero
-                        // inset) keep the original tight gap.
-                        SizedBox(height: 28.h + bottomSystemInset),
+                        // Live system inset + a short base gap so the main
+                        // button row sits near the bottom without crowding
+                        // the nav area.
+                        SizedBox(height: 8.h + bottomSystemInset),
                       ],
                     ),
                   ),
@@ -3247,7 +3257,6 @@ class _FriendsStrip extends StatelessWidget {
     required this.speakingUserIds,
     required this.connectionQualityByUserId,
     required this.onInvite,
-    required this.allOffline,
   });
 
   final String? groupName;
@@ -3256,10 +3265,6 @@ class _FriendsStrip extends StatelessWidget {
   final Set<String> speakingUserIds;
   final Map<String, ConnectionQuality> connectionQualityByUserId;
   final VoidCallback? onInvite;
-
-  /// Whether every member of this group (including the local user) is
-  /// currently offline. Dims member avatars when true.
-  final bool allOffline;
 
   @override
   Widget build(BuildContext context) {
@@ -3299,7 +3304,6 @@ class _FriendsStrip extends StatelessWidget {
                   isSpeaking:
                       speakingUserIds.contains(friend.userId) ||
                       (availability[friend.userId]?.isTalking ?? false),
-                  dimmed: allOffline,
                   connectionQuality:
                       connectionQualityByUserId[friend.userId] ??
                       ConnectionQuality.unknown,
@@ -3323,7 +3327,6 @@ class _FriendChip extends StatelessWidget {
     required this.avatarAsset,
     required this.availability,
     required this.isSpeaking,
-    required this.dimmed,
     required this.connectionQuality,
   });
 
@@ -3333,10 +3336,6 @@ class _FriendChip extends StatelessWidget {
   final String? avatarAsset;
   final MemberAvailability availability;
   final bool isSpeaking;
-
-  /// True when the whole group is offline — greys out the avatar so the
-  /// main button's nudge-trigger state reads clearly.
-  final bool dimmed;
   final ConnectionQuality connectionQuality;
 
   @override
@@ -3355,13 +3354,8 @@ class _FriendChip extends StatelessWidget {
         ? const Color(0xff7CFF6B)
         : Colors.white24;
 
-    return AnimatedOpacity(
-      duration: const Duration(milliseconds: 220),
-      // Greys out the avatar row when the whole group is offline, so the
-      // nudge-trigger state of the main button reads clearly at a glance.
-      opacity: dimmed ? 0.4 : 1,
-      child: Column(
-        children: [
+    return Column(
+      children: [
           Stack(
             clipBehavior: Clip.none,
             alignment: Alignment.center,
@@ -3469,8 +3463,7 @@ class _FriendChip extends StatelessWidget {
             ),
           ],
         ],
-      ),
-    );
+      );
   }
 }
 
@@ -3619,12 +3612,12 @@ class _AddFriendChip extends StatelessWidget {
   }
 }
 
-/// Compact vertical stack of two small emoji/icon quick-action buttons that
-/// sits just above the join/carousel/create row: a nudge (wave) trigger and
-/// the walkie-talkie/call-mode toggle. Each button shows independently
-/// based on its own trigger condition (same conditions the old nudge chip
-/// and the [_CallModeControls] pill already used), so the stack can show
-/// just one button, both, or neither.
+/// Compact horizontal pair of small emoji/icon quick-action buttons that
+/// shares the status-hint band above the join/carousel/create row: a nudge
+/// (wave) trigger and the walkie-talkie/call-mode toggle. Each button shows
+/// independently based on its own trigger condition (same conditions the
+/// old nudge chip and the [_CallModeControls] pill already used), so the
+/// band can show just one button, both, or neither.
 ///
 /// NOTE: there's no dedicated walkie-talkie image asset in the codebase
 /// (searched `assets/` — only avatar art, lottie files, and app icons
@@ -3652,10 +3645,10 @@ class _QuickActionStack extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!showNudge && !showCallToggle) return const SizedBox.shrink();
-    return Column(
+    return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (showNudge) ...[
+        if (showNudge)
           Semantics(
             button: true,
             label: 'Nudge the group',
@@ -3666,8 +3659,7 @@ class _QuickActionStack extends StatelessWidget {
               child: const Text('👋', style: TextStyle(fontSize: 20)),
             ),
           ),
-          if (showCallToggle) SizedBox(height: 8.h),
-        ],
+        if (showNudge && showCallToggle) SizedBox(width: 8.w),
         if (showCallToggle)
           Opacity(
             opacity: callToggleEnabled ? 1 : 0.45,
@@ -4232,20 +4224,42 @@ class _MainAvatarCircle extends StatelessWidget {
             // to live voice communication — showing it on every card
             // (including groups you're not in a call with) misleadingly
             // implied a mic control that wasn't relevant there. The nudge
-            // bell is unrelated to mic availability and keeps its own gate.
-            if (nudgeMode || connected)
+            // state is just the bare wave emoji (same as the vertical
+            // quick-action control), with no badge/circle behind it.
+            if (nudgeMode)
               Align(
                 alignment: Alignment.bottomCenter,
                 child: Padding(
-                  padding: EdgeInsets.only(bottom: size * 0.08),
-                  child: Icon(
-                    nudgeMode ? Icons.notifications_active_rounded : Icons.mic,
-                    color: talkActive
-                        ? const Color(0xffffd54f)
-                        : nudgeMode
-                        ? const Color(0xffffb347)
-                        : Colors.white,
-                    size: talkActive ? size * 0.22 : size * 0.18,
+                  padding: EdgeInsets.only(bottom: size * 0.1),
+                  child: Text('👋', style: TextStyle(fontSize: size * 0.22)),
+                ),
+              )
+            else if (connected)
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: EdgeInsets.only(bottom: size * 0.06),
+                  child: Container(
+                    width: size * 0.42,
+                    height: size * 0.42,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.black.withValues(alpha: 0.45),
+                      border: Border.all(
+                        color: talkActive
+                            ? const Color(0xffffd54f)
+                            : Colors.white70,
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Icon(
+                      Icons.mic_rounded,
+                      color: talkActive
+                          ? const Color(0xffffd54f)
+                          : Colors.white,
+                      size: size * 0.26,
+                    ),
                   ),
                 ),
               ),
@@ -4295,30 +4309,34 @@ class _MainAvatarCircle extends StatelessWidget {
 
     if (!nudgeMode) return content;
 
-    // Sleeping "Z"s orbit just outside the button's circular edge when the
-    // whole group is offline. This Stack has no ClipOval ancestor (unlike
-    // the member-photo content above) and uses Clip.none, so the orbit ring
-    // is free to render outside the button's boundary instead of being
-    // trapped inside it.
-    return Stack(
-      alignment: Alignment.center,
-      clipBehavior: Clip.none,
-      children: [content, IgnorePointer(child: _SleepZAnimation(circleSize: size))],
+    // Rising "Z"s sit outside ClipOval so they can keep travelling past the
+    // button's ring and fade out in open space (instead of being clipped or
+    // orbiting the edge). Same up-and-right drift as the previous design.
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          content,
+          Positioned(
+            right: size * 0.08,
+            top: size * 0.06,
+            child: IgnorePointer(child: _SleepZAnimation(size: size * 0.3)),
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// Rounded "Z" badges that orbit just outside the main button's edge for the
-/// fully-offline nudge state. Each glyph starts near-opaque as it emerges
-/// from the button and fades out progressively over the rest of its lap
-/// around the ring, so the loop reads as travelling-and-dissolving rather
-/// than a hard cut. Deliberately larger and rounder (circular badge behind
-/// the glyph) than the original in-circle design, which read as too subtle.
+/// Looping "Z"s drifting up-and-right and fading for the fully-offline nudge
+/// state. Hosted outside the button ClipOval so glyphs clear the ring before
+/// dissolving.
 class _SleepZAnimation extends StatefulWidget {
-  const _SleepZAnimation({required this.circleSize});
+  const _SleepZAnimation({required this.size});
 
-  /// Diameter of the main button circle this animation orbits around.
-  final double circleSize;
+  final double size;
 
   @override
   State<_SleepZAnimation> createState() => _SleepZAnimationState();
@@ -4326,13 +4344,9 @@ class _SleepZAnimation extends StatefulWidget {
 
 class _SleepZAnimationState extends State<_SleepZAnimation>
     with SingleTickerProviderStateMixin {
-  static const int _zCount = 3;
-
-  // One full orbit per cycle; slow enough to read as a smooth drift rather
-  // than a spin, matching the "smooth over a full orbit" requirement.
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 3600),
+    duration: const Duration(milliseconds: 2000),
   )..repeat();
 
   @override
@@ -4343,73 +4357,57 @@ class _SleepZAnimationState extends State<_SleepZAnimation>
 
   @override
   Widget build(BuildContext context) {
-    // Ring sits outside the button's edge with a clear visual gap, and the
-    // bounding box gives the orbiting glyphs room to render without being
-    // clipped by anything up the tree.
-    final orbitRadius = widget.circleSize / 2 + widget.circleSize * 0.2;
-    final boxSize = (orbitRadius + widget.circleSize * 0.26) * 2;
     return SizedBox(
-      width: boxSize,
-      height: boxSize,
+      width: widget.size,
+      height: widget.size,
       child: AnimatedBuilder(
         animation: _controller,
         builder: (context, _) {
           return Stack(
             clipBehavior: Clip.none,
-            children: [
-              for (var i = 0; i < _zCount; i++)
-                _buildZ(i, orbitRadius: orbitRadius, boxSize: boxSize),
-            ],
+            children: [for (var i = 0; i < 3; i++) _buildZ(i)],
           );
         },
       ),
     );
   }
 
-  Widget _buildZ(int i, {required double orbitRadius, required double boxSize}) {
-    final t = (_controller.value + i / _zCount) % 1.0;
-
-    // Quick ease-in as the glyph emerges, then a long, smooth fade across
-    // the remainder of the lap down to fully transparent right as it
-    // completes the ring — continuous at the t=0/t=1 seam (both ~0), so the
-    // loop never pops or looks choppy.
-    const fadeInFraction = 0.08;
-    final opacity = t < fadeInFraction
-        ? Curves.easeOut.transform(t / fadeInFraction)
-        : Curves.easeIn.transform(
-            (1 - (t - fadeInFraction) / (1 - fadeInFraction)).clamp(0.0, 1.0),
-          );
-
-    final angle = -math.pi / 2 + t * 2 * math.pi;
-    final glyphSize = widget.circleSize * (0.24 + i * 0.02);
-    final badgeSize = glyphSize * 1.4;
-    final center = boxSize / 2;
-    final cx = center + orbitRadius * math.cos(angle);
-    final cy = center + orbitRadius * math.sin(angle);
-
+  Widget _buildZ(int i) {
+    // Three staggered "Z"s rise up-and-right. Travel is long enough that they
+    // clearly pass the button outline; the fade starts later so most of the
+    // dissolve happens once they're outside the ring.
+    final t = ((_controller.value + i * 0.33) % 1.0);
+    final opacity = t < 0.12
+        ? Curves.easeOut.transform(t / 0.12)
+        : t > 0.55
+        ? Curves.easeIn.transform((1 - t) / 0.45).clamp(0.0, 1.0)
+        : 1.0;
+    final scale =
+        0.88 + 0.22 * Curves.easeOut.transform((t * 1.4).clamp(0.0, 1.0));
     return Positioned(
-      left: cx - badgeSize / 2,
-      top: cy - badgeSize / 2,
+      // Extra outward travel vs the older in-circle version so glyphs leave
+      // the ring before fully fading.
+      right: -t * widget.size * 0.85,
+      top: widget.size * 0.55 - t * widget.size * 1.45,
       child: Opacity(
         opacity: opacity.clamp(0.0, 1.0),
-        child: Container(
-          width: badgeSize,
-          height: badgeSize,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: Colors.white.withValues(alpha: 0.18),
-            boxShadow: const [
-              BoxShadow(color: Colors.black45, blurRadius: 6, offset: Offset(0, 2)),
-            ],
-          ),
+        child: Transform.scale(
+          scale: scale,
           child: Text(
             'Z',
             style: GoogleFonts.nunito(
-              color: Colors.white,
-              fontSize: glyphSize,
+              color: Colors.white.withValues(alpha: 0.92),
+              fontSize: widget.size * (0.42 + i * 0.1),
               fontWeight: FontWeight.w800,
               height: 1,
+              letterSpacing: -0.5,
+              shadows: const [
+                Shadow(
+                  color: Colors.black54,
+                  blurRadius: 6,
+                  offset: Offset(0, 1),
+                ),
+              ],
             ),
           ),
         ),
