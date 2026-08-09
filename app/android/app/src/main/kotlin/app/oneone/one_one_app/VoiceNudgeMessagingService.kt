@@ -1,10 +1,140 @@
 package app.oneone.one_one_app
 
+import android.app.AlarmManager
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+
+// ── B5: Local nudge expiry (10-minute timeout, on-device) ──
+//
+// When a nudge arrives on the receiver's device we record its timestamp and
+// schedule an AlarmManager broadcast 10 minutes later.  If the broadcast
+// fires and the nudge hasn't been accepted yet, we show a local expiry
+// notification to both the receiver and (via FCM) the sender.  Accepting
+// the nudge cancels the alarm so the expiry never fires spuriously.
+
+object NudgeExpiryTracker {
+    private const val prefsName = "one_one_nudge_expiry"
+    private const val keyPrefix = "nudge_arrival_"
+    const val expiryMinutes = 10L
+    const val actionExpiry = "app.oneone.action.NUDGE_EXPIRED"
+
+    /** Record a nudge arrival and schedule its expiry alarm. */
+    fun scheduleExpiry(
+        context: Context,
+        eventId: String,
+        senderName: String,
+        recipientUserId: String,
+        groupId: String?,
+        recipientName: String?,
+        isSenderSide: Boolean = false,
+    ) {
+        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putLong("${keyPrefix}$eventId", System.currentTimeMillis())
+            .apply()
+
+        val alarmManager = context.getSystemService(AlarmManager::class.java)
+        val intent = Intent(context, NudgeExpiryReceiver::class.java).apply {
+            action = actionExpiry
+            putExtra("eventId", eventId)
+            putExtra("senderName", senderName)
+            putExtra("recipientUserId", recipientUserId)
+            putExtra("groupId", groupId)
+            putExtra("recipientName", recipientName)
+            putExtra("isSenderSide", isSenderSide)
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            eventId.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val triggerAt = SystemClock.elapsedRealtime() + expiryMinutes * 60_000L
+        alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
+    }
+
+    /** Cancel the expiry alarm — called when the user accepts the nudge. */
+    fun cancelExpiry(context: Context, eventId: String) {
+        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        prefs.edit().remove("${keyPrefix}$eventId").apply()
+
+        val alarmManager = context.getSystemService(AlarmManager::class.java)
+        val intent = Intent(context, NudgeExpiryReceiver::class.java).apply {
+            action = actionExpiry
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            eventId.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        alarmManager.cancel(pendingIntent)
+    }
+
+    /** Check if a nudge has been stored (hasn't expired and hasn't been accepted). */
+    fun hasArrived(context: Context, eventId: String): Boolean {
+        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        return prefs.contains("${keyPrefix}$eventId")
+    }
+}
+
+class NudgeExpiryReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != NudgeExpiryTracker.actionExpiry) return
+        val eventId = intent.getStringExtra("eventId") ?: return
+        val senderName = intent.getStringExtra("senderName") ?: "Someone"
+        val recipientUserId = intent.getStringExtra("recipientUserId") ?: return
+        val groupId = intent.getStringExtra("groupId")
+        val recipientName = intent.getStringExtra("recipientName") ?: "You"
+        val isSenderSide = intent.getBooleanExtra("isSenderSide", false)
+
+        // Only fire if the nudge is still pending (not already accepted).
+        if (!NudgeExpiryTracker.hasArrived(context, eventId)) return
+        NudgeExpiryTracker.cancelExpiry(context, eventId)
+
+        val manager = context.getSystemService(NotificationManager::class.java)
+
+        if (isSenderSide) {
+            // Notify sender: "Your nudge to [Recipient] was not accepted in time."
+            manager.notify(
+                VoiceNudgeNotifications.idFor("expiry_sender_$eventId"),
+                VoiceNudgeNotifications.buildGeneral(
+                    context,
+                    "Nudge expired ⏰",
+                    "Your nudge to $senderName was not accepted in time.",
+                    groupId,
+                ),
+            )
+            Log.i(
+                VoiceNudgeDiagnostics.tag,
+                "[NUDGE-EXPIRY-02] Sender nudge expired eventId=${eventId.takeLast(6)} recipient=$senderName",
+            )
+        } else {
+            // Notify receiver: "Nudge from [Sender] has expired."
+            manager.notify(
+                VoiceNudgeNotifications.idFor("expiry_recv_$eventId"),
+                VoiceNudgeNotifications.buildGeneral(
+                    context,
+                    "Nudge expired ⏰",
+                    "Nudge from $senderName has expired.",
+                    groupId,
+                ),
+            )
+            Log.i(
+                VoiceNudgeDiagnostics.tag,
+                "[NUDGE-EXPIRY-01] Receiver nudge expired eventId=${eventId.takeLast(6)} sender=$senderName",
+            )
+        }
+    }
+}
 
 class VoiceNudgeMessagingService : FirebaseMessagingService() {
     override fun onRegistered(installationId: String) {
@@ -48,6 +178,8 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 return
             }
             VoiceNudgeContract.kindPush -> {
+                // B5: Schedule 10-min expiry for push nudges.
+                scheduleNudgeExpiry(data)
                 showActionableNotification(message)
                 return
             }
@@ -70,6 +202,9 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 return
             }
         }
+
+        // B5: Schedule 10-min expiry for voice + ring nudges.
+        scheduleNudgeExpiry(data)
 
         val eventId = data["eventId"]
         if (eventId == null) {
@@ -118,6 +253,15 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             }
         } catch (error: RuntimeException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E3] Native playback start", error)
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = if (error is SecurityException) "permission_denied_foreground_service" else "playback_service_start_error",
+                eventId = eventId,
+                kind = kind,
+                extras = mapOf(
+                    "error" to (error.message ?: "unknown"),
+                    "error_class" to error.javaClass.simpleName,
+                ),
+            )
             val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
             val largeIcon = NotificationAvatarHelper.largeIcon(this, data["senderPhotoUrl"], senderName)
             manager.notify(
@@ -309,12 +453,34 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         val responseAction = data["responseAction"] ?: return
         val snoozeMinutes = data["snoozeMinutes"]?.toIntOrNull()
         val responderName = data["responderName"]?.take(80).orEmpty().ifBlank { "Your friend" }
+        // B5: Nudge response arrived — cancel sender's expiry alarm.
+        NudgeExpiryTracker.cancelExpiry(this, eventId)
         if (responseAction == "accept") {
             NudgeActionStore.save(
                 this,
                 PendingNudgeAction("connect", eventId, groupId),
             )
             NudgeActionDispatcher.signal()
+
+            // B6: Attempt to wake the sender's app / keep it alive so Flutter
+            // can reconnect to LiveKit automatically.  If the app is backgrounded
+            // but Flutter is still alive, the signal above will trigger the
+            // reconnect.  If the app is killed, the notification below gives
+            // the user a tap-to-join fallback.
+            try {
+                val serviceIntent = Intent(this, VoiceSessionService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+            } catch (error: RuntimeException) {
+                Log.w(
+                    VoiceNudgeDiagnostics.tag,
+                    "[NUDGE-ACTION-04] Could not start foreground service " +
+                        "for auto-reconnect: ${error.message}",
+                )
+            }
         }
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         manager.notify(
@@ -344,6 +510,8 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         val data = message.data
         val eventId = data["eventId"] ?: return
         val status = data["status"] ?: return
+        // B5: Delivery result arrived — cancel the sender's expiry alarm.
+        NudgeExpiryTracker.cancelExpiry(this, eventId)
         Log.i(
             VoiceNudgeDiagnostics.tag,
             "[NUDGE-DELIVERY-02] sender received status=$status " +
@@ -365,5 +533,22 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
     private fun isExpired(rawExpiry: String?): Boolean {
         val expiresAtSeconds = rawExpiry?.toLongOrNull() ?: return true
         return System.currentTimeMillis() / 1000 >= expiresAtSeconds
+    }
+
+    /** B5: Schedule a 10-minute expiry alarm for a received nudge. */
+    private fun scheduleNudgeExpiry(data: Map<String, String>) {
+        val eventId = data["eventId"] ?: return
+        val senderName = data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
+        val recipientUserId = data["recipientUserId"] ?: return
+        val groupId = data["groupId"]
+        val recipientName = data["recipientName"]
+        NudgeExpiryTracker.scheduleExpiry(
+            this,
+            eventId,
+            senderName,
+            recipientUserId,
+            groupId,
+            recipientName,
+        )
     }
 }

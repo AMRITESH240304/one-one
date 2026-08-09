@@ -90,4 +90,52 @@ class ChatMessageRepository {
       // Non-fatal — see doc comment above.
     }
   }
+
+  // ── B8: Emoji burst transport via RTDB ──
+  //
+  // Emoji bursts during live sessions are written to a short-lived RTDB
+  // node.  Remote participants listen and trigger the local burst animation.
+  // Each burst auto-expires after 3 seconds via `expiresAt`.
+
+  static const Duration emojiBurstLifetime = Duration(seconds: 3);
+
+  DatabaseReference emojiBurstsRef(String groupId) =>
+      _database.ref('emojiBursts/$groupId');
+
+  Future<void> sendEmojiBurst({
+    required String groupId,
+    required String senderUserId,
+    required String senderDisplayName,
+    required String emoji,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final ref = emojiBurstsRef(groupId).push();
+    final burstId = ref.key;
+    if (burstId == null) return;
+
+    await ref.set({
+      'burstId': burstId,
+      'groupId': groupId,
+      'senderUserId': senderUserId,
+      'senderDisplayName': senderDisplayName,
+      'emoji': emoji,
+      'createdAt': now,
+      'expiresAt': now + emojiBurstLifetime.inSeconds,
+    });
+  }
+
+  Stream<Map<String, dynamic>> watchEmojiBursts(String groupId) {
+    return emojiBurstsRef(groupId)
+        .orderByChild('createdAt')
+        .limitToLast(3)
+        .onChildAdded
+        .map((event) {
+          final data = event.snapshot.value;
+          if (data is Map) {
+            return Map<String, dynamic>.from(data);
+          }
+          return <String, dynamic>{};
+        })
+        .where((data) => data['senderUserId'] != null);
+  }
 }

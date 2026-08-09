@@ -1,5 +1,6 @@
 package app.oneone.one_one_app
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,8 +9,11 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
+import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.MethodChannel
 
 object VoicePipContract {
@@ -66,6 +70,27 @@ class VoiceSessionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // B1: On API 34+ (and especially 36), starting a foreground service of
+        // type "microphone" requires android.permission.FOREGROUND_SERVICE_MICROPHONE
+        // (declared in the manifest) AND android.permission.RECORD_AUDIO to be
+        // granted at runtime. If RECORD_AUDIO is missing, fail gracefully instead
+        // of crashing the process.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val recordGranted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!recordGranted) {
+                Log.e(
+                    "OneOneVoicePip",
+                    "[VOICE-SESSION-ERR] Cannot start foreground service: " +
+                        "RECORD_AUDIO not granted at runtime. " +
+                        "foregroundServiceMicrophone=${checkSelfPermission(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE) == PackageManager.PERMISSION_GRANTED}",
+                )
+                stopSelf()
+                return START_NOT_STICKY
+            }
+        }
         startForeground(notificationId, notification())
         return START_NOT_STICKY
     }
@@ -100,6 +125,22 @@ class VoiceSessionService : Service() {
         private const val notificationId = 7012
 
         fun start(context: Context) {
+            // B1: Guard against starting when RECORD_AUDIO isn't granted at
+            // runtime — API 34+ requires it for foreground service type "microphone".
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val recordGranted = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!recordGranted) {
+                    Log.w(
+                        "OneOneVoicePip",
+                        "[VOICE-SESSION] Skipping VoiceSessionService start: " +
+                            "RECORD_AUDIO permission not granted at runtime.",
+                    )
+                    return
+                }
+            }
             val intent = Intent(context, VoiceSessionService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

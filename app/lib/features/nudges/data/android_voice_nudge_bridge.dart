@@ -106,6 +106,40 @@ class AndroidVoiceNudgeBridge {
     if (raw == null) return null;
     return NudgeNotificationAction.tryParse(raw);
   }
+
+  /// B5: Schedule a 10-minute expiry alarm on the sender's device after a
+  /// nudge is successfully dispatched.  The native MessagingService
+  /// automatically cancels it when a delivery result or accept response
+  /// arrives; this just starts the countdown.
+  Future<void> scheduleSenderNudgeExpiry({
+    required String eventId,
+    required String recipientName,
+    required String recipientUserId,
+  }) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<void>('scheduleSenderNudgeExpiry', {
+        'eventId': eventId,
+        'recipientName': recipientName,
+        'recipientUserId': recipientUserId,
+      });
+    } catch (_) {
+      // Non-fatal — expiry is best-effort.
+    }
+  }
+
+  Future<void> cancelSenderNudgeExpiry(String eventId) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<void>('cancelSenderNudgeExpiry', eventId);
+    } catch (_) {
+      // Non-fatal.
+    }
+  }
+
+  /// Shared instance so multiple widgets can call platform methods without
+  /// re-creating the channel handler.
+  static final AndroidVoiceNudgeBridge shared = AndroidVoiceNudgeBridge();
 }
 
 class NudgeNotificationAction {
@@ -145,6 +179,7 @@ class NudgeDeliveryResult {
     this.reason,
     this.recipientName,
     this.recipientUserId,
+    this.ambientNoiseLevel,
   });
 
   final String eventId;
@@ -157,7 +192,20 @@ class NudgeDeliveryResult {
   final String? recipientName;
   final String? recipientUserId;
 
+  /// B7: `high`, `medium`, `low`, or null if not sampled.
+  final String? ambientNoiseLevel;
+
   bool get played => status == 'played';
+
+  /// Human-readable description of the ambient noise level for UI display.
+  String? get ambientNoiseLabel {
+    return switch (ambientNoiseLevel) {
+      'high' => '🔊 surroundings are loud',
+      'medium' => '🔉 moderate noise',
+      'low' => '🔈 quiet surroundings',
+      _ => null,
+    };
+  }
 
   static NudgeDeliveryResult? tryParse(Map<String, dynamic> raw) {
     final eventId = raw['eventId']?.toString().trim() ?? '';
@@ -178,6 +226,10 @@ class NudgeDeliveryResult {
           raw['recipientUserId']?.toString().trim().isEmpty ?? true
           ? null
           : raw['recipientUserId'].toString().trim(),
+      ambientNoiseLevel:
+          raw['ambientNoiseLevel']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['ambientNoiseLevel'].toString().trim(),
     );
   }
 }

@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:livekit_client/livekit_client.dart';
+import 'package:livekit_noise_filter/livekit_noise_filter.dart';
 
 import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
@@ -87,6 +88,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Set<String> _speakingUserIds = const {};
   List<GroupChatMessage> _chatMessages = const [];
   StreamSubscription<DatabaseEvent>? _chatMessagesSubscription;
+  StreamSubscription<Map<String, dynamic>>? _emojiBurstSubscription;
   /// Opacity of the middle chat feed (for go-online fade-out).
   double _chatFeedOpacity = 1;
   /// When non-zero, ignore RTDB rows with `createdAt` before this (unix sec).
@@ -247,6 +249,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _availabilityExpiryTimer?.cancel();
     _membersSubscription?.cancel();
     _chatMessagesSubscription?.cancel();
+    _emojiBurstSubscription?.cancel();
     _userGroupsSubscription?.cancel();
     for (final sub in _memberProfileSubscriptions) {
       unawaited(sub.cancel());
@@ -458,6 +461,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _listenToMembers(selected.groupId);
         _listenToAvailability(selected.groupId);
         _listenToChatMessages(selected.groupId);
+        _listenToEmojiBursts(selected.groupId);
       }
     } catch (error) {
       if (!mounted) return;
@@ -918,6 +922,52 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         );
   }
 
+  // ── B8: Emoji burst listener ──
+  /// Listens for emoji bursts from remote participants and triggers the
+  /// local burst animation. Only active while the group has online members.
+  void _listenToEmojiBursts(String groupId) {
+    unawaited(_emojiBurstSubscription?.cancel());
+    _emojiBurstSubscription = _chatMessageRepository
+        .watchEmojiBursts(groupId)
+        .listen((data) {
+          if (!mounted || _selectedGroup?.groupId != groupId) return;
+          final senderUserId = data['senderUserId']?.toString();
+          if (senderUserId == _session.userId) return;
+          final emoji = data['emoji']?.toString().trim() ?? '';
+          if (emoji.isEmpty) return;
+          final senderName = data['senderDisplayName']?.toString().trim() ?? 'friend';
+          final burstId = data['burstId']?.toString();
+          if (burstId == null) return;
+
+          final id = 'remote-${burstId}';
+          if (!mounted) return;
+          setState(() {
+            _emojiBursts = [
+              ..._emojiBursts.where((item) => item.id != id),
+              EmojiBurst(
+                id: id,
+                emoji: emoji,
+                senderName: senderName,
+              ),
+            ];
+            if (_emojiBursts.length > 2) {
+              _emojiBursts = _emojiBursts.sublist(_emojiBursts.length - 2);
+            }
+          });
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          unawaited(
+            CrashlyticsService.recordError(
+              error,
+              stackTrace,
+              reason: 'emoji_burst_listener_failed',
+              feature: 'chat',
+            ),
+          );
+        },
+      );
+  }
+
   /// When the group transitions offline → anyone live, fade and drop past
   /// bubbles so the middle stays clean for emoji / voice. Newer messages
   /// (created after this gate) can still appear while online.
@@ -1032,6 +1082,19 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _emojiBursts = _emojiBursts.sublist(_emojiBursts.length - 2);
       }
     });
+
+    // B8: Send emoji burst to remote participants via RTDB.
+    final group = _selectedGroup;
+    if (group != null && _isOnline) {
+      unawaited(
+        _chatMessageRepository.sendEmojiBurst(
+          groupId: group.groupId,
+          senderUserId: _session.userId,
+          senderDisplayName: _session.user.displayName,
+          emoji: trimmed,
+        ),
+      );
+    }
   }
 
   void _onEmojiBurstFinished(String id) {
@@ -1309,6 +1372,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _listenToMembers(group.groupId);
     _listenToAvailability(group.groupId);
     _listenToChatMessages(group.groupId);
+    _listenToEmojiBursts(group.groupId);
   }
 
   Future<void> _onGroupCarouselChanged(int index) async {
@@ -2060,6 +2124,19 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final localParticipant = room.localParticipant;
     if (localParticipant == null) {
       throw StateError('LiveKit connected without a local participant.');
+    }
+
+    // B9: Apply noise filter to the local audio track for all voice sessions.
+    try {
+      final noiseFilter = LiveKitNoiseFilter();
+      // Attach the filter to the local participant's audio track so noise
+      // suppression is active during walkie-talkie and call mode.
+      await localParticipant.setAudioProcessor(noiseFilter);
+      debugPrint('[LiveKit] Noise filter applied to local audio track.');
+    } catch (error) {
+      // Non-fatal — noise filter is a quality-of-life improvement, not
+      // a requirement for the session.
+      debugPrint('[LiveKit] Noise filter setup failed (non-fatal): $error');
     }
 
     await localParticipant

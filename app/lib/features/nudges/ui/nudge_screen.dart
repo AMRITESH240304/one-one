@@ -115,6 +115,24 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   /// Re-surface the latest failure reason for anyone who didn't receive the
   /// previous nudge (until success or [NudgeFailureMemory.timeout]).
+  /// B5: Schedules a 10-minute expiry alarm on the sender's device so the
+  /// sender gets a local notification if the receiver doesn't accept in time.
+  void _scheduleSenderExpiry(
+    String eventId,
+    List<_PendingRecipient> expected,
+  ) {
+    if (!Platform.isAndroid) return;
+    final first = expected.firstOrNull;
+    if (first == null) return;
+    unawaited(
+      AndroidVoiceNudgeBridge.shared.scheduleSenderNudgeExpiry(
+        eventId: eventId,
+        recipientName: first.displayName,
+        recipientUserId: first.userId,
+      ),
+    );
+  }
+
   void _restorePersistedFailures() {
     final failures = NudgeFailureMemory.instance.active;
     if (failures.isEmpty) return;
@@ -334,9 +352,14 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       if (expected.length <= 1 && played.length == 1) {
         final name = played.first.recipientName ??
             expected.values.firstOrNull?.displayName;
-        return name == null
-            ? 'Everyone received the nudge \u2713'
-            : 'Nudge successfully playing on $name\u2019s device';
+        final noiseLabel = played.first.ambientNoiseLabel;
+        if (name == null) {
+          return 'Everyone received the nudge \u2713';
+        }
+        if (noiseLabel != null) {
+          return 'Nudge playing on $name\u2019s device \u2014 $noiseLabel';
+        }
+        return 'Nudge successfully playing on $name\u2019s device';
       }
       return 'Everyone received the nudge \u2713';
     }
@@ -505,12 +528,21 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       if (awaitsDeliveryConfirmation && result is Map) {
         final eventId = result['notificationEventId']?.toString();
         if (eventId != null && eventId.isNotEmpty) {
+          // B5: Schedule sender-side 10-minute expiry alarm.
+          _scheduleSenderExpiry(eventId, expected);
           _beginAwaitingDeliveryConfirmation(
             eventId,
             waitingMessage: waitingMessage,
             expected: expected,
           );
           return;
+        }
+      }
+      // B5: Also schedule expiry for push nudges (no delivery confirmation).
+      if (!awaitsDeliveryConfirmation && result is Map) {
+        final eventId = result['notificationEventId']?.toString();
+        if (eventId != null && eventId.isNotEmpty) {
+          _scheduleSenderExpiry(eventId, expected);
         }
       }
       // Push (and unconfirmed ring/voice) — brief success, then 3s dismiss.
