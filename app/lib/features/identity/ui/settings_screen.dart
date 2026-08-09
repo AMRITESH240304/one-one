@@ -28,7 +28,7 @@ class SettingsScreen extends StatefulWidget {
   final String? groupName;
   final Future<bool> Function()? onManageGroup;
 
-  /// Opens settings with a dark fade/slide transition (no white flash).
+  /// Opens settings drifting in from the left (settings control side).
   static Future<void> open(
     BuildContext context, {
     required IdentitySession session,
@@ -40,8 +40,8 @@ class SettingsScreen extends StatefulWidget {
       PageRouteBuilder<void>(
         opaque: true,
         barrierColor: const Color(0xff101010),
-        transitionDuration: const Duration(milliseconds: 280),
-        reverseTransitionDuration: const Duration(milliseconds: 240),
+        transitionDuration: const Duration(milliseconds: 320),
+        reverseTransitionDuration: const Duration(milliseconds: 260),
         pageBuilder: (context, animation, secondaryAnimation) {
           return AnnotatedRegion<SystemUiOverlayStyle>(
             value: SystemUiOverlayStyle.light,
@@ -65,8 +65,9 @@ class SettingsScreen extends StatefulWidget {
           return FadeTransition(
             opacity: curved,
             child: SlideTransition(
+              // From the left edge where the settings icon sits — not bottom-up.
               position: Tween<Offset>(
-                begin: const Offset(0, 0.04),
+                begin: const Offset(-0.22, 0),
                 end: Offset.zero,
               ).animate(curved),
               child: child,
@@ -94,24 +95,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _photoSaving = false;
   bool _accountActionInProgress = false;
   bool _hasUnsavedAccentPreview = false;
+  /// While true, never rebuild this route from session listenable updates —
+  /// parent rebuilds during the edit-profile sheet's deactivate race
+  /// `_dependents.isEmpty` assertions.
+  bool _profileEditorOpen = false;
   String? _message;
 
-  late _AvatarSectionMode _avatarSectionMode = _session.user.avatarAsset != null
-      ? _AvatarSectionMode.avatar
-      : _AvatarSectionMode.photo;
-  /// Draft selection in the picker; only persisted when the user taps Save.
-  String? _pendingAvatarAsset;
-  bool _avatarSaving = false;
   Future<List<AvatarAsset>>? _avatarsFuture;
-
-  String? get _effectiveAvatarSelection =>
-      _pendingAvatarAsset ?? _session.user.avatarAsset;
-
-  bool get _hasPendingAvatarChange {
-    final pending = _pendingAvatarAsset;
-    if (pending == null) return false;
-    return pending != _session.user.avatarAsset;
-  }
 
   @override
   void initState() {
@@ -159,20 +149,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted || session == null || session.userId != _session.userId) {
       return;
     }
+    // Keep data fresh without rebuilding while the edit-profile sheet (or its
+    // nested photo picker) owns modal elements under this route.
+    if (_profileEditorOpen) {
+      _session = session;
+      return;
+    }
     // Defer: same-frame notify during an awaited save/pop can race Elements
     // that are mid-deactivate (_dependents.isEmpty).
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || _profileEditorOpen) return;
       final latest = widget.identityRepository.currentSession;
       if (latest == null || latest.userId != _session.userId) return;
-      setState(() {
-        _session = latest;
-        // Clear draft once the server selection matches the draft.
-        if (_pendingAvatarAsset != null &&
-            _pendingAvatarAsset == latest.user.avatarAsset) {
-          _pendingAvatarAsset = null;
-        }
-      });
+      setState(() => _session = latest);
     });
   }
 
@@ -186,7 +175,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _changeProfilePhoto() async {
-    if (_saving || _photoSaving || _avatarSaving) return;
+    if (_saving || _photoSaving || _profileEditorOpen) return;
     unawaited(CrashlyticsService.log('settings_photo_save_start'));
     try {
       final currentUrl = _session.user.profilePhotoUrl?.trim();
@@ -235,8 +224,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         unawaited(CrashlyticsService.log('settings_photo_save_setState'));
         setState(() {
           _acceptSession(session);
-          _avatarSectionMode = _AvatarSectionMode.photo;
-          _pendingAvatarAsset = null;
           _message = 'Profile picture updated';
           _photoSaving = false;
         });
@@ -259,75 +246,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  void _draftPresetAvatar(String assetPath) {
-    if (_avatarSaving || _photoSaving) return;
-    setState(() {
-      _pendingAvatarAsset = assetPath;
-      _message = null;
-    });
-  }
-
-  Future<void> _savePresetAvatar() async {
-    final assetPath = _pendingAvatarAsset ?? _session.user.avatarAsset;
-    if (assetPath == null || _avatarSaving || _photoSaving) return;
-    if (assetPath == _session.user.avatarAsset &&
-        _session.user.profilePhotoUrl == null) {
-      setState(() {
-        _pendingAvatarAsset = null;
-        _message = 'Avatar already saved';
-      });
-      return;
-    }
-
-    unawaited(
-      CrashlyticsService.log(
-        'settings_avatar_save_start assetPath=$assetPath',
-      ),
-    );
-    setState(() {
-      _avatarSaving = true;
-      _message = null;
-    });
-    try {
-      final session = await widget.identityRepository.updatePresetAvatar(
-        assetPath,
-      );
-      unawaited(
-        CrashlyticsService.log(
-          'settings_avatar_save_network_ok '
-          'avatarAsset=${session.user.avatarAsset}',
-        ),
-      );
-      if (!mounted) return;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        unawaited(CrashlyticsService.log('settings_avatar_save_setState'));
-        setState(() {
-          _acceptSession(session);
-          _avatarSectionMode = _AvatarSectionMode.avatar;
-          _pendingAvatarAsset = null;
-          _message = 'Avatar updated';
-          _avatarSaving = false;
-        });
-      });
-    } catch (error, stack) {
-      unawaited(
-        CrashlyticsService.recordError(
-          error,
-          stack,
-          reason: 'settings_avatar_save_failed',
-          feature: 'settings',
-          screenName: 'settings',
-        ),
-      );
-      if (!mounted) return;
-      setState(() {
-        _message = error.toString();
-        _avatarSaving = false;
-      });
-    }
-  }
-
   Future<Uint8List?> _openProfilePhotoEditor({
     required bool recropCurrent,
     required String? currentUrl,
@@ -338,291 +256,63 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ProfilePhotoEditor.pickAndCrop(context);
   }
 
-  /// Edit Profile: name + avatar/photo selection, saved together in one
-  /// action. Photo upload keeps its own dedicated "Change photo" flow
-  /// within this sheet (picking + cropping + upload is inherently a
-  /// separate multi-step action), but persists into the same session/UI
-  /// immediately since there is nothing else on this sheet to combine it
-  /// with; name and preset-avatar selection share the single "Save
-  /// profile" action below.
+  /// Edit Profile: display name + full avatar/photo section. Saves via a
+  /// pinned floating bar so the user never has to scroll to find it.
   Future<void> _openProfileEditor() async {
-    final nameController = TextEditingController(
-      text: _session.user.displayName,
-    );
-    String? pendingAvatarAsset;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: const Color(0xff1b1b1b),
-      barrierColor: Colors.black87,
-      showDragHandle: true,
-      builder: (sheetContext) {
-        var saving = false;
-        var changingPhoto = false;
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            Future<void> changePhoto() async {
-              if (saving || changingPhoto) return;
-              setSheetState(() => changingPhoto = true);
-              try {
-                unawaited(
-                  CrashlyticsService.log('settings_edit_profile_photo_start'),
-                );
-                final bytes = await _openProfilePhotoEditor(
-                  recropCurrent: false,
-                  currentUrl: _session.user.profilePhotoUrl,
-                );
-                if (bytes == null) return;
-                if (!mounted || !sheetContext.mounted) return;
-                final session = await widget.identityRepository
-                    .updateProfilePhoto(bytes);
-                unawaited(
-                  CrashlyticsService.log(
-                    'settings_edit_profile_photo_network_ok',
-                  ),
-                );
-                if (!mounted) return;
-                setState(() {
-                  _acceptSession(session);
-                  _avatarSectionMode = _AvatarSectionMode.photo;
-                  pendingAvatarAsset = null;
-                });
-                if (sheetContext.mounted) setSheetState(() {});
-              } catch (error, stack) {
-                unawaited(
-                  CrashlyticsService.recordError(
-                    error,
-                    stack,
-                    reason: 'settings_edit_profile_photo_failed',
-                    feature: 'settings',
-                    screenName: 'settings',
-                  ),
-                );
-                if (sheetContext.mounted) {
-                  ScaffoldMessenger.of(
-                    sheetContext,
-                  ).showSnackBar(SnackBar(content: Text(error.toString())));
-                }
-              } finally {
-                if (sheetContext.mounted) {
-                  setSheetState(() => changingPhoto = false);
-                }
-              }
-            }
+    _profileEditorOpen = true;
+    _EditProfileSheetResult? result;
+    try {
+      result = await showModalBottomSheet<_EditProfileSheetResult>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: const Color(0xff1b1b1b),
+        barrierColor: Colors.black87,
+        showDragHandle: true,
+        // Keep the sheet alive until the reverse animation finishes so its
+        // elements are not half-deactivated under a parent rebuild.
+        builder: (sheetContext) {
+          return _EditProfileSheet(
+            session: _session,
+            accentColorKey: _accentColorKey,
+            avatarsFuture: _avatarsFuture,
+            identityRepository: widget.identityRepository,
+          );
+        },
+      );
+    } finally {
+      // Stay "open" for one more frame after the route is gone so any
+      // deferred session listenable callbacks still skip setState while
+      // modal dependents are clearing.
+    }
 
-            Future<void> save() async {
-              if (saving) return;
-              final displayName = nameController.text.trim();
-              final nameChanged =
-                  displayName.isNotEmpty &&
-                  displayName != _session.user.displayName;
-              final avatarChanged =
-                  pendingAvatarAsset != null &&
-                  pendingAvatarAsset != _session.user.avatarAsset;
-              if (!nameChanged && !avatarChanged) {
-                unawaited(
-                  CrashlyticsService.log('settings_edit_profile_pop_no_change'),
-                );
-                Navigator.pop(sheetContext);
-                return;
-              }
+    if (!mounted) {
+      _profileEditorOpen = false;
+      return;
+    }
 
-              unawaited(
-                CrashlyticsService.log(
-                  'settings_edit_profile_save_start '
-                  'name=$nameChanged avatar=$avatarChanged',
-                ),
-              );
-              setSheetState(() => saving = true);
-              try {
-                var session = _session;
-                if (nameChanged) {
-                  session = await widget.identityRepository.updateDisplayName(
-                    displayName,
-                  );
-                  unawaited(
-                    CrashlyticsService.log(
-                      'settings_edit_profile_name_network_ok',
-                    ),
-                  );
-                }
-                if (avatarChanged) {
-                  session = await widget.identityRepository.updatePresetAvatar(
-                    pendingAvatarAsset!,
-                  );
-                  unawaited(
-                    CrashlyticsService.log(
-                      'settings_edit_profile_avatar_network_ok',
-                    ),
-                  );
-                }
-                if (!mounted || !sheetContext.mounted) return;
+    // Two end-of-frame waits: (1) modal route dispose, (2) InheritedElement
+    // dependent bookkeeping. Avoid `_dependents.isEmpty` races.
+    await WidgetsBinding.instance.endOfFrame;
+    await Future<void>.delayed(Duration.zero);
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) {
+      _profileEditorOpen = false;
+      return;
+    }
 
-                // Update the parent's session state FIRST and let that
-                // frame settle *before* removing the sheet's route (the
-                // pop is deferred to the following frame below). The
-                // previous ordering (pop immediately, then setState via
-                // postFrameCallback) still let this sheet's elements start
-                // deactivating in the same frame the parent's Inherited
-                // ancestors (Theme/MediaQuery this sheet also reads from)
-                // were being notified, which is the race that surfaced as
-                // a `_dependents.isEmpty` assertion failure on save.
-                // Settling the parent's rebuild first removes that race.
-                unawaited(
-                  CrashlyticsService.log('settings_edit_profile_state_notify'),
-                );
-                setState(() {
-                  _acceptSession(session);
-                  if (avatarChanged) {
-                    _avatarSectionMode = _AvatarSectionMode.avatar;
-                  }
-                  _pendingAvatarAsset = null;
-                  _message = 'Profile updated';
-                });
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  unawaited(CrashlyticsService.log('settings_edit_profile_pop'));
-                  if (sheetContext.mounted) Navigator.pop(sheetContext);
-                });
-              } catch (error, stack) {
-                unawaited(
-                  CrashlyticsService.recordError(
-                    error,
-                    stack,
-                    reason: 'settings_edit_profile_save_failed',
-                    feature: 'settings',
-                    screenName: 'settings',
-                  ),
-                );
-                if (!sheetContext.mounted) return;
-                setSheetState(() => saving = false);
-                ScaffoldMessenger.of(
-                  sheetContext,
-                ).showSnackBar(SnackBar(content: Text(error.toString())));
-              }
-            }
-
-            final draftAsset = pendingAvatarAsset ?? _session.user.avatarAsset;
-            final busy = saving || changingPhoto;
-            return ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: MediaQuery.sizeOf(context).height * 0.85,
-              ),
-              child: SingleChildScrollView(
-                child: Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    24,
-                    8,
-                    24,
-                    MediaQuery.viewInsetsOf(context).bottom + 28,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Text(
-                        'Edit profile',
-                        style: Theme.of(context).textTheme.headlineSmall
-                            ?.copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w700,
-                            ),
-                      ),
-                      const SizedBox(height: 6),
-                      const Text(
-                        'This is how friends see you in your groups.',
-                        style: TextStyle(color: Colors.white60),
-                      ),
-                      const SizedBox(height: 22),
-                      TextField(
-                        controller: nameController,
-                        autofocus: true,
-                        textCapitalization: TextCapitalization.words,
-                        textInputAction: TextInputAction.done,
-                        onSubmitted: busy ? null : (_) => save(),
-                        style: const TextStyle(color: Colors.white),
-                        decoration: _darkInputDecoration('Display name'),
-                      ),
-                      const SizedBox(height: 24),
-                      Row(
-                        children: [
-                          const Expanded(
-                            child: Text(
-                              'Avatar',
-                              style: TextStyle(
-                                color: Colors.white70,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          TextButton.icon(
-                            onPressed: busy ? null : changePhoto,
-                            icon: changingPhoto
-                                ? const SizedBox.square(
-                                    dimension: 14,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.photo_camera_outlined,
-                                    size: 16,
-                                  ),
-                            label: const Text('Change photo'),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      FutureBuilder<List<AvatarAsset>>(
-                        future: _avatarsFuture,
-                        builder: (context, snapshot) {
-                          if (!snapshot.hasData) {
-                            return const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 24),
-                              child: Center(
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              ),
-                            );
-                          }
-                          return AvatarPickerGrid(
-                            avatars: snapshot.data!,
-                            selectedAsset: draftAsset,
-                            enabled: !busy,
-                            accent: accentColorForKey(_accentColorKey),
-                            onAvatarSelected: (asset) =>
-                                setSheetState(() => pendingAvatarAsset = asset),
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 20),
-                      FilledButton(
-                        onPressed: busy ? null : save,
-                        style: FilledButton.styleFrom(
-                          minimumSize: const Size.fromHeight(52),
-                        ),
-                        child: saving
-                            ? const SizedBox.square(
-                                dimension: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Text('Save profile'),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-    nameController.dispose();
+    final latest = widget.identityRepository.currentSession;
+    setState(() {
+      if (result?.session != null) {
+        _acceptSession(result!.session!);
+      } else if (latest != null && latest.userId == _session.userId) {
+        _acceptSession(latest);
+      }
+      if (result?.message != null) {
+        _message = result!.message;
+      }
+      _profileEditorOpen = false;
+    });
   }
 
   void _setHapticsEnabled(bool value) {
@@ -874,34 +564,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 session: _session,
                 accent: accent,
                 photoSaving: _photoSaving,
-                enabled: !_saving && !_photoSaving && !_avatarSaving,
+                enabled: !_saving && !_photoSaving && !_profileEditorOpen,
                 onChangePhoto: _changeProfilePhoto,
                 onEditProfile: _openProfileEditor,
-                draftAvatarAsset: _pendingAvatarAsset,
-              ),
-              const SizedBox(height: 30),
-              const _SectionTitle('Avatar'),
-              const SizedBox(height: 12),
-              _SettingsSurface(
-                children: [
-                  _AvatarSection(
-                    mode: _avatarSectionMode,
-                    onModeChanged: (mode) =>
-                        setState(() => _avatarSectionMode = mode),
-                    avatarsFuture: _avatarsFuture,
-                    selectedAsset: _effectiveAvatarSelection,
-                    accent: accent,
-                    avatarSaving: _avatarSaving,
-                    onAvatarSelected: _draftPresetAvatar,
-                    showSaveAvatar: _hasPendingAvatarChange || _avatarSaving,
-                    onSaveAvatar: _savePresetAvatar,
-                    profilePhotoUrl: _session.user.profilePhotoUrl,
-                    profilePhotoBase64: _session.user.profilePhotoBase64,
-                    photoSaving: _photoSaving,
-                    onChangePhoto: _changeProfilePhoto,
-                    enabled: !_saving && !_avatarSaving && !_photoSaving,
-                  ),
-                ],
               ),
               const SizedBox(height: 28),
               if (widget.groupName != null && widget.onManageGroup != null) ...[
@@ -1145,7 +810,6 @@ class _ProfileHeader extends StatelessWidget {
     required this.enabled,
     required this.onChangePhoto,
     required this.onEditProfile,
-    this.draftAvatarAsset,
   });
 
   final IdentitySession session;
@@ -1154,12 +818,9 @@ class _ProfileHeader extends StatelessWidget {
   final bool enabled;
   final VoidCallback onChangePhoto;
   final VoidCallback onEditProfile;
-  final String? draftAvatarAsset;
 
   @override
   Widget build(BuildContext context) {
-    final avatarAsset = draftAvatarAsset ?? session.user.avatarAsset;
-    final usingDraftAvatar = draftAvatarAsset != null;
     return Column(
       children: [
         Stack(
@@ -1172,13 +833,9 @@ class _ProfileHeader extends StatelessWidget {
                 border: Border.all(color: accent, width: 2),
               ),
               child: ProfileAvatar(
-                profilePhotoUrl: usingDraftAvatar
-                    ? null
-                    : session.user.profilePhotoUrl,
-                profilePhotoBase64: usingDraftAvatar
-                    ? null
-                    : session.user.profilePhotoBase64,
-                avatarAsset: avatarAsset,
+                profilePhotoUrl: session.user.profilePhotoUrl,
+                profilePhotoBase64: session.user.profilePhotoBase64,
+                avatarAsset: session.user.avatarAsset,
                 radius: 48,
                 backgroundColor: const Color(0xff2b2b2b),
                 fallback: const Icon(
@@ -1227,6 +884,334 @@ class _ProfileHeader extends StatelessWidget {
           style: TextButton.styleFrom(foregroundColor: accent),
         ),
       ],
+    );
+  }
+}
+
+class _EditProfileSheetResult {
+  const _EditProfileSheetResult({this.session, this.message});
+
+  final IdentitySession? session;
+  final String? message;
+}
+
+/// Self-contained edit-profile sheet. Owns the [TextEditingController] so
+/// dispose is tied to the modal route's element tree — not a parent callback
+/// that can fire while the field is still listening.
+class _EditProfileSheet extends StatefulWidget {
+  const _EditProfileSheet({
+    required this.session,
+    required this.accentColorKey,
+    required this.avatarsFuture,
+    required this.identityRepository,
+  });
+
+  final IdentitySession session;
+  final String accentColorKey;
+  final Future<List<AvatarAsset>>? avatarsFuture;
+  final IdentityRepository identityRepository;
+
+  @override
+  State<_EditProfileSheet> createState() => _EditProfileSheetState();
+}
+
+class _EditProfileSheetState extends State<_EditProfileSheet> {
+  late final TextEditingController _nameController;
+  late IdentitySession _session;
+  String? _pendingAvatarAsset;
+  late _AvatarSectionMode _avatarSectionMode;
+  bool _saving = false;
+  bool _changingPhoto = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _session = widget.session;
+    _nameController = TextEditingController(text: _session.user.displayName);
+    _avatarSectionMode = _session.user.avatarAsset != null
+        ? _AvatarSectionMode.avatar
+        : _AvatarSectionMode.photo;
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  Future<Uint8List?> _pickPhoto({
+    required bool recropCurrent,
+    required String? currentUrl,
+  }) {
+    if (recropCurrent) {
+      return ProfilePhotoEditor.recropNetworkPhoto(context, currentUrl!);
+    }
+    return ProfilePhotoEditor.pickAndCrop(context);
+  }
+
+  /// Drop focus first so [TextField] detaches cleanly before route pop.
+  Future<void> _popSheet(_EditProfileSheetResult result) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    // Let the field process unfocus before the element tree starts deactivating.
+    await Future<void>.delayed(Duration.zero);
+    if (!mounted) return;
+    Navigator.of(context).pop(result);
+  }
+
+  Future<void> _changePhoto() async {
+    if (_saving || _changingPhoto) return;
+    setState(() => _changingPhoto = true);
+    try {
+      unawaited(CrashlyticsService.log('settings_edit_profile_photo_start'));
+      final bytes = await _pickPhoto(
+        recropCurrent: false,
+        currentUrl: _session.user.profilePhotoUrl,
+      );
+      if (bytes == null || !mounted) return;
+      final session =
+          await widget.identityRepository.updateProfilePhoto(bytes);
+      unawaited(
+        CrashlyticsService.log('settings_edit_profile_photo_network_ok'),
+      );
+      if (!mounted) return;
+      setState(() {
+        _session = session;
+        _pendingAvatarAsset = null;
+        _avatarSectionMode = _AvatarSectionMode.photo;
+      });
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'settings_edit_profile_photo_failed',
+          feature: 'settings',
+          screenName: 'settings',
+        ),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    } finally {
+      if (mounted) setState(() => _changingPhoto = false);
+    }
+  }
+
+  Future<void> _save() async {
+    if (_saving) return;
+    final displayName = _nameController.text.trim();
+    final nameChanged =
+        displayName.isNotEmpty && displayName != _session.user.displayName;
+    final avatarChanged =
+        _pendingAvatarAsset != null &&
+        _pendingAvatarAsset != _session.user.avatarAsset;
+
+    if (!nameChanged && !avatarChanged) {
+      unawaited(
+        CrashlyticsService.log('settings_edit_profile_pop_no_change'),
+      );
+      if (!mounted) return;
+      await _popSheet(_EditProfileSheetResult(session: _session));
+      return;
+    }
+
+    unawaited(
+      CrashlyticsService.log(
+        'settings_edit_profile_save_start '
+        'name=$nameChanged avatar=$avatarChanged',
+      ),
+    );
+    setState(() => _saving = true);
+    try {
+      var session = _session;
+      if (nameChanged) {
+        session = await widget.identityRepository.updateDisplayName(
+          displayName,
+        );
+        unawaited(
+          CrashlyticsService.log('settings_edit_profile_name_network_ok'),
+        );
+      }
+      if (avatarChanged) {
+        session = await widget.identityRepository.updatePresetAvatar(
+          _pendingAvatarAsset!,
+        );
+        unawaited(
+          CrashlyticsService.log('settings_edit_profile_avatar_network_ok'),
+        );
+      }
+      if (!mounted) return;
+      unawaited(CrashlyticsService.log('settings_edit_profile_pop'));
+      // Capture results and close before any parent setState can race modal
+      // deactivation. Local state is enough for this frame; the parent applies
+      // the returned session after the route is fully gone.
+      await _popSheet(
+        _EditProfileSheetResult(
+          session: session,
+          message: 'Profile updated',
+        ),
+      );
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'settings_edit_profile_save_failed',
+          feature: 'settings',
+          screenName: 'settings',
+        ),
+      );
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = accentColorForKey(widget.accentColorKey);
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final draftAsset = _pendingAvatarAsset ?? _session.user.avatarAsset;
+    final nameTrimmed = _nameController.text.trim();
+    final nameChanged =
+        nameTrimmed.isNotEmpty && nameTrimmed != _session.user.displayName;
+    final avatarChanged =
+        _pendingAvatarAsset != null &&
+        _pendingAvatarAsset != _session.user.avatarAsset;
+    final hasChanges = nameChanged || avatarChanged;
+    final busy = _saving || _changingPhoto;
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: keyboardInset),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
+                children: [
+                  Text(
+                    'Edit profile',
+                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'This is how friends see you in your groups.',
+                    style: TextStyle(color: Colors.white60),
+                  ),
+                  const SizedBox(height: 22),
+                  TextField(
+                    controller: _nameController,
+                    autofocus: true,
+                    textCapitalization: TextCapitalization.words,
+                    textInputAction: TextInputAction.done,
+                    onChanged: (_) => setState(() {}),
+                    onSubmitted: busy ? null : (_) => _save(),
+                    style: const TextStyle(color: Colors.white),
+                    decoration: _darkInputDecoration('Display name'),
+                  ),
+                  const SizedBox(height: 28),
+                  const Text(
+                    'AVATAR',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  _AvatarSection(
+                    mode: _avatarSectionMode,
+                    onModeChanged: (mode) =>
+                        setState(() => _avatarSectionMode = mode),
+                    avatarsFuture: widget.avatarsFuture,
+                    selectedAsset: draftAsset,
+                    accent: accent,
+                    avatarSaving: _saving,
+                    onAvatarSelected: (asset) {
+                      setState(() {
+                        _pendingAvatarAsset = asset;
+                        _avatarSectionMode = _AvatarSectionMode.avatar;
+                      });
+                    },
+                    showSaveAvatar: false,
+                    onSaveAvatar: () {},
+                    profilePhotoUrl: _session.user.profilePhotoUrl,
+                    profilePhotoBase64: _session.user.profilePhotoBase64,
+                    photoSaving: _changingPhoto,
+                    onChangePhoto: _changePhoto,
+                    enabled: !busy,
+                  ),
+                ],
+              ),
+            ),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: const Color(0xff1b1b1b),
+                border: Border(
+                  top: BorderSide(
+                    color: Colors.white.withValues(alpha: 0.08),
+                  ),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    blurRadius: 18,
+                    offset: const Offset(0, -4),
+                  ),
+                ],
+              ),
+              child: SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 12, 24, 12),
+                  child: FilledButton.icon(
+                    onPressed: busy ? null : _save,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(52),
+                      backgroundColor: hasChanges
+                          ? accent
+                          : accent.withValues(alpha: 0.55),
+                      foregroundColor: Colors.black,
+                    ),
+                    icon: _saving
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.black,
+                            ),
+                          )
+                        : Icon(
+                            hasChanges
+                                ? Icons.check_rounded
+                                : Icons.save_outlined,
+                          ),
+                    label: Text(
+                      _saving
+                          ? 'Saving…'
+                          : hasChanges
+                          ? 'Save profile'
+                          : 'Done',
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

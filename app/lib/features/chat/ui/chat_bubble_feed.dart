@@ -7,8 +7,9 @@ import '../models/group_chat_message.dart';
 
 /// Renders sent chat bubbles in the group screen's cleared center area. Own
 /// messages align right, others' align left; every bubble shows the
-/// sender's name and self-removes 15 minutes after it was sent via its own
-/// independent timer (see [_ChatBubbleTile]).
+/// sender's name and self-removes once [expiresAt] elapses via its own
+/// independent timer (see [_ChatBubbleTile]). The host caps how many past
+/// bubbles stay in the list (rolling window).
 class ChatBubbleFeed extends StatelessWidget {
   const ChatBubbleFeed({
     super.key,
@@ -30,8 +31,11 @@ class ChatBubbleFeed extends StatelessWidget {
         .toList(growable: false);
     if (visible.isEmpty) return const SizedBox.shrink();
 
+    // Stretch so each row is full-width; without that, MainAxisAlignment
+    // start/end has no room to pin bubbles left (theirs) vs right (ours).
     return Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         for (final message in visible)
           _ChatBubbleTile(

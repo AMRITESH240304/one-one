@@ -21,8 +21,13 @@ class ChatMessageRepository {
   final ApiClient _apiClient;
   final FirebaseDatabase _database;
 
-  static const int maxWords = 12;
-  static const int visibleLimit = 6;
+  /// Short, chip-style bubbles — not a full chat thread.
+  static const int maxWords = 10;
+
+  /// Rolling window of past messages kept visible on every client.
+  static const int visibleLimit = 5;
+
+  /// Safety TTL so stale rows don't linger if a client never reloads.
   static const Duration lifetime = Duration(minutes: 15);
 
   DatabaseReference groupMessagesRef(String groupId) =>

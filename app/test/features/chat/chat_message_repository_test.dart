@@ -15,14 +15,14 @@ void main() {
       expect(ChatMessageRepository.sanitize('   '), isNull);
     });
 
-    test('allows exactly the 12-word cap', () {
-      final twelveWords = List.generate(12, (i) => 'word$i').join(' ');
-      expect(ChatMessageRepository.sanitize(twelveWords), twelveWords);
+    test('allows exactly the 10-word cap', () {
+      final tenWords = List.generate(10, (i) => 'word$i').join(' ');
+      expect(ChatMessageRepository.sanitize(tenWords), tenWords);
     });
 
-    test('rejects messages over the 12-word cap', () {
-      final thirteenWords = List.generate(13, (i) => 'word$i').join(' ');
-      expect(ChatMessageRepository.sanitize(thirteenWords), isNull);
+    test('rejects messages over the 10-word cap', () {
+      final elevenWords = List.generate(11, (i) => 'word$i').join(' ');
+      expect(ChatMessageRepository.sanitize(elevenWords), isNull);
     });
   });
 }

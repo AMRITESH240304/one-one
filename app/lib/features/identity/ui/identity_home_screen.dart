@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -345,14 +346,19 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final audioRouteChanged =
         next.settings.audioOutputPreference !=
         _session.settings.audioOutputPreference;
-    // Defer so Settings save setState and this notify don't collide mid-frame.
+    // Defer two frames so Settings / edit-profile modal pop + deactivate can
+    // settle first. Same-frame setState under a deactivating modal races the
+    // framework as `_dependents.isEmpty`.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final latest = widget.identityRepository.currentSession;
-      if (latest == null || latest.userId != _session.userId) return;
-      setState(() => _session = latest);
-      AccentThemeController.setAccentKey(latest.settings.accentColorKey);
-      if (audioRouteChanged) unawaited(_applyPreferredAudioRoute());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final latest = widget.identityRepository.currentSession;
+        if (latest == null || latest.userId != _session.userId) return;
+        setState(() => _session = latest);
+        AccentThemeController.setAccentKey(latest.settings.accentColorKey);
+        if (audioRouteChanged) unawaited(_applyPreferredAudioRoute());
+      });
     });
   }
 
@@ -856,32 +862,51 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   /// Live-syncs the last [ChatMessageRepository.visibleLimit] chat bubbles
-  /// for a group. Uses an RTDB `limitToLast` query rather than client-side
-  /// trimming, so "never more than 6 visible" holds even under a burst of
-  /// sends across multiple devices.
+  /// for a group. Uses push-key order (`limitToLast` without `orderByChild`)
+  /// so the query doesn't depend on a deployed secondary index, then sorts
+  /// by `createdAt` client-side. Caps client-side again so even a partial
+  /// snapshot never shows more than the rolling window.
   void _listenToChatMessages(String groupId) {
     unawaited(_chatMessagesSubscription?.cancel());
     _chatMessagesSubscription = _chatMessageRepository
         .groupMessagesRef(groupId)
-        .orderByChild('createdAt')
         .limitToLast(ChatMessageRepository.visibleLimit)
         .onValue
-        .listen((event) {
-          if (!mounted || _selectedGroup?.groupId != groupId) return;
-          final value = event.snapshot.value;
-          final messages = <GroupChatMessage>[];
-          if (value is Map<Object?, Object?>) {
-            for (final entry in value.entries) {
-              final parsed = GroupChatMessage.tryParse(
-                entry.key.toString(),
-                entry.value,
-              );
-              if (parsed != null) messages.add(parsed);
+        .listen(
+          (event) {
+            if (!mounted || _selectedGroup?.groupId != groupId) return;
+            final value = event.snapshot.value;
+            final messages = <GroupChatMessage>[];
+            // Accept any Map shape Firebase returns (String/Object keys).
+            if (value is Map) {
+              for (final entry in value.entries) {
+                final parsed = GroupChatMessage.tryParse(
+                  entry.key.toString(),
+                  entry.value,
+                );
+                if (parsed != null && !parsed.isExpired) {
+                  messages.add(parsed);
+                }
+              }
             }
-          }
-          messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-          setState(() => _chatMessages = messages);
-        });
+            messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+            final window = messages.length > ChatMessageRepository.visibleLimit
+                ? messages.sublist(
+                    messages.length - ChatMessageRepository.visibleLimit,
+                  )
+                : messages;
+            setState(() => _chatMessages = window);
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            // Don't leave the feed stuck empty after a transient deny/blip —
+            // log and keep the last good list; next group reselect resubscribes.
+            CrashlyticsService.recordError(
+              error,
+              stackTrace,
+              reason: 'chat_messages_listen_failed groupId=$groupId',
+            );
+          },
+        );
   }
 
   void _dismissExpiredChatMessage(String messageId) {
@@ -899,12 +924,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (_session.settings.hapticsEnabled) {
       unawaited(HapticFeedback.selectionClick());
     }
-    await _chatMessageRepository.sendMessage(
-      groupId: group.groupId,
-      senderUserId: _session.userId,
-      senderDisplayName: _session.user.displayName,
-      text: text,
-    );
+    try {
+      await _chatMessageRepository.sendMessage(
+        groupId: group.groupId,
+        senderUserId: _session.userId,
+        senderDisplayName: _session.user.displayName,
+        text: text,
+      );
+    } catch (error) {
+      if (!mounted) rethrow;
+      setState(
+        () => _message = 'Couldn’t send message. Try again.',
+      );
+      rethrow;
+    }
   }
 
   void _triggerEmojiBurst(String emoji) {
@@ -2596,81 +2629,73 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                             ),
                           ),
                         ],
-                        const Spacer(),
-                        if (_chatMessages.isNotEmpty) ...[
-                          Padding(
+                        // Middle band: ephemeral bubbles sit here (own=right,
+                        // others=left). Empty Expanded keeps layout stable so
+                        // the feed doesn't jump the carousel when it appears.
+                        Expanded(
+                          child: Padding(
                             padding: EdgeInsets.symmetric(horizontal: 16.w),
-                            child: ChatBubbleFeed(
-                              messages: _chatMessages,
-                              currentUserId: _session.userId,
-                              accent: accent,
-                              onExpire: _dismissExpiredChatMessage,
-                            ),
-                          ),
-                          SizedBox(height: 12.h),
-                        ],
-                        // Status hint + optional quick actions share one
-                        // horizontal band: the hint stays padded and
-                        // centered, while actions sit on the right without
-                        // creating extra vertical gaps above the main row.
-                        Padding(
-                          padding: EdgeInsets.fromLTRB(12.w, 0, 12.w, 8.h),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: [
-                              // Matching trailing spacer so the hint stays
-                              // optical-center when actions are present.
-                              SizedBox(
-                                width: (groupMixed || anyMemberOnline)
-                                    ? (groupMixed && anyMemberOnline
-                                          ? 96.w
-                                          : 44.w)
-                                    : 12.w,
-                              ),
-                              Expanded(
-                                child: Text(
-                                  viewingActiveGroup
-                                      ? (_isCallMode
-                                            ? 'In a call — mic always on'
-                                            : 'Tap to Talk')
-                                      : _isOnline
-                                      ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
-                                      : !_serviceReady
-                                      ? 'invite a friend to enable voice service'
-                                      : 'send a nudge to go online together',
-                                  textAlign: TextAlign.center,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: const Color.fromRGBO(
-                                      255,
-                                      255,
-                                      255,
-                                      0.55,
-                                    ),
-                                    fontSize: 13.sp,
-                                    fontWeight: FontWeight.w500,
-                                    height: 1.3,
-                                  ),
+                            child: Align(
+                              alignment: Alignment.center,
+                              child: SingleChildScrollView(
+                                reverse: true,
+                                physics: const ClampingScrollPhysics(),
+                                child: ChatBubbleFeed(
+                                  messages: _chatMessages,
+                                  currentUserId: _session.userId,
+                                  accent: accent,
+                                  onExpire: _dismissExpiredChatMessage,
                                 ),
                               ),
-                              if (groupMixed || anyMemberOnline)
-                                _QuickActionStack(
-                                  showNudge: groupMixed,
-                                  onNudge: _busy ? null : _openNudges,
-                                  showCallToggle: anyMemberOnline,
-                                  callToggleEnabled:
-                                      viewingActiveGroup &&
-                                      !_connectionModeBusy,
-                                  callModeActive: _isCallMode,
-                                  onToggleCallMode: _toggleConnectionMode,
-                                  accent: accent,
-                                )
-                              else
-                                SizedBox(width: 12.w),
-                            ],
+                            ),
                           ),
                         ),
+                        // Status hint stays full-width and optically centered;
+                        // edge actions sit above the create-group side of the
+                        // row (not over it).
+                        Padding(
+                          padding: EdgeInsets.fromLTRB(24.w, 0, 24.w, 6.h),
+                          child: Text(
+                            viewingActiveGroup
+                                ? (_isCallMode
+                                      ? 'In a call — mic always on'
+                                      : 'Tap to Talk')
+                                : _isOnline
+                                ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
+                                : !_serviceReady
+                                ? 'invite a friend to enable voice service'
+                                : 'send a nudge to go online together',
+                            textAlign: TextAlign.center,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: const Color.fromRGBO(255, 255, 255, 0.55),
+                              fontSize: 13.sp,
+                              fontWeight: FontWeight.w500,
+                              height: 1.3,
+                            ),
+                          ),
+                        ),
+                        // Vertical edge actions only while the local user is
+                        // live. Fully offline restores the original layout:
+                        // nudge lives inside the main button, no side stack.
+                        if (live && (groupMixed || anyMemberOnline))
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: Padding(
+                              // Flush to the right edge of the safe area.
+                              padding: EdgeInsets.only(right: 0, bottom: 6.h),
+                              child: _EdgeQuickActions(
+                                showNudge: groupMixed,
+                                onNudge: _busy ? null : _openNudges,
+                                showModeToggle: anyMemberOnline,
+                                modeToggleEnabled:
+                                    viewingActiveGroup && !_connectionModeBusy,
+                                callModeActive: _isCallMode,
+                                onToggleMode: _toggleConnectionMode,
+                              ),
+                            ),
+                          ),
                         SizedBox(
                           height: 160.h,
                           child: _ExperienceCarousel(
@@ -2684,6 +2709,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                                 (_isCallMode &&
                                     _speakingUserIds.contains(_session.userId)),
                             talkBusy: _talkBusy,
+                            callMode: _isCallMode,
                             accent: accent,
                             nudgeGroupId: groupAllOffline
                                 ? focusedGroup?.groupId
@@ -2698,29 +2724,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                             onCreateGroup: _openCreateGroup,
                             onJoinGroup: _openJoinGroup,
                           ),
-                        ),
-                        // Call-mode pill stays under the main button row so
-                        // the status band above stays a single clean line.
-                        AnimatedSize(
-                          duration: const Duration(milliseconds: 260),
-                          curve: Curves.easeOutCubic,
-                          alignment: Alignment.topCenter,
-                          child: anyMemberOnline
-                              ? Padding(
-                                  key: const ValueKey('call-mode-controls'),
-                                  padding: EdgeInsets.only(top: 4.h),
-                                  child: _CallModeControls(
-                                    active: _isCallMode,
-                                    enabled:
-                                        viewingActiveGroup &&
-                                        !_connectionModeBusy,
-                                    accent: accent,
-                                    onToggle: _toggleConnectionMode,
-                                  ),
-                                )
-                              : const SizedBox.shrink(
-                                  key: ValueKey('call-mode-controls-hidden'),
-                                ),
                         ),
                         if (focusedGroup != null) ...[
                           SizedBox(height: 8.h),
@@ -3612,190 +3615,238 @@ class _AddFriendChip extends StatelessWidget {
   }
 }
 
-/// Compact horizontal pair of small emoji/icon quick-action buttons that
-/// shares the status-hint band above the join/carousel/create row: a nudge
-/// (wave) trigger and the walkie-talkie/call-mode toggle. Each button shows
-/// independently based on its own trigger condition (same conditions the
-/// old nudge chip and the [_CallModeControls] pill already used), so the
-/// band can show just one button, both, or neither.
+/// Vertical edge actions on the right of the main button row: 👋 nudge on
+/// top (when the group is mixed), and the alternate connection-mode icon
+/// below (shown whenever someone is online). No circular chrome — just the
+/// glyph — with a subtle shake to telegraph "tap me".
 ///
-/// NOTE: there's no dedicated walkie-talkie image asset in the codebase
-/// (searched `assets/` — only avatar art, lottie files, and app icons
-/// exist), so this reuses the same walkie/call icon pair already used by
-/// [_CallModeControls] rather than inventing a new asset.
-class _QuickActionStack extends StatelessWidget {
-  const _QuickActionStack({
+/// Mode icon semantics: in walkie-talkie mode the edge shows a call icon
+/// (tap → call mode); in call mode it shows the walkie asset (tap → walkie).
+class _EdgeQuickActions extends StatelessWidget {
+  const _EdgeQuickActions({
     required this.showNudge,
     required this.onNudge,
-    required this.showCallToggle,
-    required this.callToggleEnabled,
+    required this.showModeToggle,
+    required this.modeToggleEnabled,
     required this.callModeActive,
-    required this.onToggleCallMode,
-    required this.accent,
+    required this.onToggleMode,
   });
 
   final bool showNudge;
   final VoidCallback? onNudge;
-  final bool showCallToggle;
-  final bool callToggleEnabled;
+  final bool showModeToggle;
+  final bool modeToggleEnabled;
   final bool callModeActive;
-  final VoidCallback onToggleCallMode;
-  final Color accent;
+  final VoidCallback onToggleMode;
+
+  /// Shared column width so 👋 and the mode glyph share one right-edge axis.
+  static double get _columnWidth => 48.w;
 
   @override
   Widget build(BuildContext context) {
-    if (!showNudge && !showCallToggle) return const SizedBox.shrink();
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (showNudge)
-          Semantics(
-            button: true,
-            label: 'Nudge the group',
-            child: _QuickActionButton(
-              onTap: onNudge,
-              background: const Color(0xffffb347).withValues(alpha: 0.18),
-              border: const Color(0xffffb347),
-              child: const Text('👋', style: TextStyle(fontSize: 20)),
+    if (!showNudge && !showModeToggle) return const SizedBox.shrink();
+    return SizedBox(
+      width: _columnWidth,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          if (showNudge)
+            Semantics(
+              button: true,
+              label: 'Nudge the group',
+              child: _EdgeActionHit(
+                onTap: onNudge,
+                enabled: onNudge != null,
+                shake: false,
+                hitSize: _columnWidth,
+                child: Text('👋', style: TextStyle(fontSize: 28.sp)),
+              ),
             ),
-          ),
-        if (showNudge && showCallToggle) SizedBox(width: 8.w),
-        if (showCallToggle)
-          Opacity(
-            opacity: callToggleEnabled ? 1 : 0.45,
-            child: Semantics(
+          if (showNudge && showModeToggle) SizedBox(height: 10.h),
+          if (showModeToggle)
+            Semantics(
               button: true,
               label: callModeActive
                   ? 'Switch to walkie-talkie mode'
                   : 'Switch to call mode',
-              child: _QuickActionButton(
-                onTap: callToggleEnabled ? onToggleCallMode : null,
-                background: (callModeActive ? accent : Colors.white)
-                    .withValues(alpha: 0.14),
-                border: callModeActive ? accent : Colors.white24,
-                // Brief scale+fade crossfade between the walkie-talkie and
-                // call icons so the mode switch reads as intentional rather
-                // than an abrupt icon swap.
+              child: _EdgeActionHit(
+                onTap: modeToggleEnabled ? onToggleMode : null,
+                enabled: modeToggleEnabled,
+                shake: modeToggleEnabled,
+                hitSize: _columnWidth,
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 240),
                   transitionBuilder: (child, animation) => ScaleTransition(
                     scale: animation,
                     child: FadeTransition(opacity: animation, child: child),
                   ),
-                  child: Icon(
-                    callModeActive
-                        ? Icons.settings_voice_rounded
-                        : Icons.record_voice_over_rounded,
-                    key: ValueKey(callModeActive),
-                    color: callModeActive ? accent : Colors.white70,
-                    size: 20.sp,
-                  ),
+                  // Edge shows the *target* mode: call when currently walkie,
+                  // walkie art when currently in call mode — always under the
+                  // 👋 and flush to the same right-edge column.
+                  child: callModeActive
+                      ? _WalkieEdgeIcon(
+                          key: const ValueKey('edge-walkie'),
+                          size: _columnWidth * 0.78,
+                        )
+                      : Icon(
+                          Icons.call_rounded,
+                          key: const ValueKey('edge-call'),
+                          color: Colors.white,
+                          size: 26.sp,
+                        ),
                 ),
               ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 }
 
-class _QuickActionButton extends StatelessWidget {
-  const _QuickActionButton({
+/// Walkie PNG has large transparent padding, so a plain `Image.asset` +
+/// `BoxFit.contain` leaves the device art looking tiny and inset from the
+/// edge. Zoom to the painted body and center it in [size] for the edge stack.
+class _WalkieEdgeIcon extends StatelessWidget {
+  const _WalkieEdgeIcon({super.key, required this.size});
+
+  final double size;
+
+  // Source is 2079×1135 with content roughly at x 743–1337 / y 88–1047.
+  // Scale is tuned so the body reads clearly without dominating the edge.
+  static const double _contentZoom = 2.35;
+
+  @override
+  Widget build(BuildContext context) {
+    // Inset from the hit slot so scale-up doesn't clip top/bottom.
+    final paintSize = size * 0.82;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Center(
+        child: SizedBox(
+          width: paintSize,
+          height: paintSize,
+          child: ClipRect(
+            child: Transform.scale(
+              scale: _contentZoom,
+              alignment: Alignment.center,
+              child: Image.asset(
+                'assets/walkie.png',
+                fit: BoxFit.contain,
+                filterQuality: FilterQuality.medium,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Comfortable hit target around a bare glyph. Optional soft shake while
+/// [enabled] so mode-toggle reads as tappable (nudge keeps still).
+class _EdgeActionHit extends StatelessWidget {
+  const _EdgeActionHit({
     required this.onTap,
-    required this.background,
-    required this.border,
+    required this.enabled,
     required this.child,
+    this.shake = false,
+    this.hitSize,
   });
 
   final VoidCallback? onTap;
-  final Color background;
-  final Color border;
+  final bool enabled;
+  final bool shake;
+  final double? hitSize;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: background,
-      shape: CircleBorder(side: BorderSide(color: border, width: 1.5)),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: onTap,
-        // 44dp minimum so the tap target stays comfortable even though the
-        // glyph inside is intentionally small.
-        child: SizedBox(
-          width: 44.w,
-          height: 44.w,
-          child: Center(child: child),
+    final size = hitSize ?? 48.w;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: Center(
+          child: Opacity(
+            opacity: enabled ? 1 : 0.4,
+            child: shake && enabled
+                ? _SoftShake(active: true, child: child)
+                : child,
+          ),
         ),
       ),
     );
   }
 }
 
-/// Call / walkie-talkie mode toggle. Only rendered by the parent once at
-/// least one member of the group is online — see the `AnimatedSize` wrapper
-/// in `_HomeScreenState.build`.
-class _CallModeControls extends StatelessWidget {
-  const _CallModeControls({
-    required this.active,
-    required this.enabled,
-    required this.accent,
-    required this.onToggle,
-  });
+/// Subtle left/right wobble that loops while [active] is true — used on the
+/// edge nudge and mode-toggle glyphs to signal they can be tapped.
+class _SoftShake extends StatefulWidget {
+  const _SoftShake({required this.active, required this.child});
 
-  // Conversation mode: whether the local user is currently in call mode
-  // (always-on mic) rather than the default walkie-talkie (push-to-talk).
-  // This reflects only the local user's own connection.
   final bool active;
-  final bool enabled;
-  final Color accent;
-  final VoidCallback onToggle;
+  final Widget child;
+
+  @override
+  State<_SoftShake> createState() => _SoftShakeState();
+}
+
+class _SoftShakeState extends State<_SoftShake>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) _controller.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SoftShake oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !_controller.isAnimating) {
+      _controller.repeat();
+    } else if (!widget.active && _controller.isAnimating) {
+      _controller
+        ..stop()
+        ..value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Opacity(
-      opacity: enabled ? 1 : 0.45,
-      child: GestureDetector(
-        onTap: enabled ? onToggle : null,
-        child: Container(
-          padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 10.h),
-          decoration: BoxDecoration(
-            color: const Color(0xd91a1a1a),
-            borderRadius: BorderRadius.circular(24.r),
-            border: Border.all(color: active ? accent : Colors.white12),
-            boxShadow: const [
-              BoxShadow(
-                color: Colors.black38,
-                blurRadius: 16,
-                offset: Offset(0, 6),
-              ),
-            ],
+    if (!widget.active) return widget.child;
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        // Two soft half-wobbles per loop, then a rest — feels playful without
+        // reading as an alert.
+        final t = _controller.value;
+        final wave = t < 0.45
+            ? math.sin(t / 0.45 * math.pi * 2) * (1 - t / 0.45)
+            : 0.0;
+        return Transform.rotate(
+          angle: wave * 0.12,
+          child: Transform.translate(
+            offset: Offset(wave * 2.2, 0),
+            child: child,
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                active
-                    ? Icons.settings_voice_rounded
-                    : Icons.record_voice_over_rounded,
-                size: 18.sp,
-                color: active ? accent : Colors.white70,
-              ),
-              SizedBox(width: 8.w),
-              Text(
-                active
-                    ? 'In a call — tap for walkie-talkie'
-                    : 'Tap for call mode',
-                style: TextStyle(
-                  color: active ? accent : Colors.white70,
-                  fontSize: 12.sp,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+        );
+      },
+      child: widget.child,
     );
   }
 }
@@ -3808,6 +3859,7 @@ class _ExperienceCarousel extends StatefulWidget {
     required this.talkEnabled,
     required this.talkActive,
     required this.talkBusy,
+    required this.callMode,
     required this.accent,
     required this.nudgeGroupId,
     required this.onNudge,
@@ -3825,6 +3877,10 @@ class _ExperienceCarousel extends StatefulWidget {
   final bool talkEnabled;
   final bool talkActive;
   final bool talkBusy;
+
+  /// Local conversation mode: true = always-on call, false = walkie-talkie
+  /// (push-to-talk). Drives which glyph the main connected circle shows.
+  final bool callMode;
   final Color accent;
 
   /// Group id of the focused card when the whole group (self included) is
@@ -3971,6 +4027,7 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
           item.group.groupId != widget.connectedGroupId,
       talkActive: widget.talkActive && actuallySelected,
       talkBusy: widget.talkBusy,
+      callMode: widget.callMode,
       accent: widget.accent,
       nudgeMode:
           actuallySelected &&
@@ -4161,6 +4218,7 @@ class _MainAvatarCircle extends StatelessWidget {
     required this.joinEnabled,
     required this.talkActive,
     required this.talkBusy,
+    required this.callMode,
     required this.accent,
     required this.nudgeMode,
     required this.onNudge,
@@ -4176,6 +4234,10 @@ class _MainAvatarCircle extends StatelessWidget {
   final bool joinEnabled;
   final bool talkActive;
   final bool talkBusy;
+
+  /// True when the local user is in always-on call mode; false = walkie
+  /// (push-to-talk). Controls which overlay glyph renders while connected.
+  final bool callMode;
   final Color accent;
 
   /// True when the whole group is offline and this is the focused card —
@@ -4220,12 +4282,23 @@ class _MainAvatarCircle extends StatelessWidget {
                 tileSize: size,
               ),
             ),
-            // Mic only appears when this card is the one actually connected
-            // to live voice communication — showing it on every card
-            // (including groups you're not in a call with) misleadingly
-            // implied a mic control that wasn't relevant there. The nudge
-            // state is just the bare wave emoji (same as the vertical
-            // quick-action control), with no badge/circle behind it.
+            // Bottom fade lifts live glyphs without fully masking profiles.
+            if (connected)
+              const DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Color(0x00000000),
+                      Color(0x66000000),
+                      Color(0x99000000),
+                    ],
+                    stops: [0.3, 0.68, 1],
+                  ),
+                ),
+              ),
+            // Nudge wave stays inside the clipped circle (offline state).
             if (nudgeMode)
               Align(
                 alignment: Alignment.bottomCenter,
@@ -4233,40 +4306,76 @@ class _MainAvatarCircle extends StatelessWidget {
                   padding: EdgeInsets.only(bottom: size * 0.1),
                   child: Text('👋', style: TextStyle(fontSize: size * 0.22)),
                 ),
-              )
-            else if (connected)
-              Align(
-                alignment: Alignment.bottomCenter,
-                child: Padding(
-                  padding: EdgeInsets.only(bottom: size * 0.06),
-                  child: Container(
-                    width: size * 0.42,
-                    height: size * 0.42,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Colors.black.withValues(alpha: 0.45),
-                      border: Border.all(
-                        color: talkActive
-                            ? const Color(0xffffd54f)
-                            : Colors.white70,
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Icon(
-                      Icons.mic_rounded,
-                      color: talkActive
-                          ? const Color(0xffffd54f)
-                          : Colors.white,
-                      size: size * 0.26,
-                    ),
-                  ),
-                ),
               ),
           ],
         ),
       ),
     );
+
+    // Live mode glyph sits *above* ClipOval so the walkie art can be large
+    // without being tight-cropped by the circle edge. Call and walkie share
+    // the same plate, size, and opacity — only the glyph swaps.
+    if (connected) {
+      final plateSize = size * 0.96;
+      final glyphSize = size * 0.88;
+      circle = SizedBox(
+        width: size,
+        height: size,
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
+          children: [
+            circle,
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: size * 0.02,
+              child: Center(
+                child: Container(
+                  width: plateSize,
+                  height: plateSize,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.black.withValues(alpha: 0.35),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.28),
+                        blurRadius: 10,
+                        spreadRadius: 0,
+                      ),
+                    ],
+                  ),
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 240),
+                    transitionBuilder: (child, animation) => ScaleTransition(
+                      scale: animation,
+                      child: FadeTransition(opacity: animation, child: child),
+                    ),
+                    child: callMode
+                        ? Icon(
+                            Icons.call_rounded,
+                            key: const ValueKey('main-call'),
+                            color: talkActive
+                                ? const Color(0xffffd54f)
+                                : Colors.white,
+                            size: glyphSize * 0.42,
+                          )
+                        : Image.asset(
+                            'assets/walkie.png',
+                            key: const ValueKey('main-walkie'),
+                            width: glyphSize,
+                            height: glyphSize,
+                            fit: BoxFit.contain,
+                          ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     if (talkEnabled || joinEnabled || nudgeMode) {
       circle = Semantics(
