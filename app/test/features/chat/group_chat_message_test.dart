@@ -65,7 +65,7 @@ void main() {
       expect(message.secondsUntilExpiry, 0);
     });
 
-    test('is false while still within its 15-minute window', () {
+    test('is false while still within its 10-minute window', () {
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       final message = GroupChatMessage(
         messageId: 'msg1',
@@ -74,7 +74,7 @@ void main() {
         senderDisplayName: 'Ada',
         text: 'hi',
         createdAt: now,
-        expiresAt: now + 900,
+        expiresAt: now + 600,
       );
 
       expect(message.isExpired, isFalse);

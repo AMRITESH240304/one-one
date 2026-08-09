@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
@@ -17,12 +18,16 @@ class ChatBubbleFeed extends StatelessWidget {
     required this.currentUserId,
     required this.accent,
     required this.onExpire,
+    this.opacity = 1,
   });
 
   final List<GroupChatMessage> messages;
   final String currentUserId;
   final Color accent;
   final ValueChanged<String> onExpire;
+
+  /// Host-driven fade (e.g. clearing offline history when anyone goes live).
+  final double opacity;
 
   @override
   Widget build(BuildContext context) {
@@ -33,19 +38,24 @@ class ChatBubbleFeed extends StatelessWidget {
 
     // Stretch so each row is full-width; without that, MainAxisAlignment
     // start/end has no room to pin bubbles left (theirs) vs right (ours).
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final message in visible)
-          _ChatBubbleTile(
-            key: ValueKey(message.messageId),
-            message: message,
-            isOwn: message.senderUserId == currentUserId,
-            accent: accent,
-            onExpire: () => onExpire(message.messageId),
-          ),
-      ],
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+      opacity: opacity.clamp(0.0, 1.0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final message in visible)
+            _ChatBubbleTile(
+              key: ValueKey(message.messageId),
+              message: message,
+              isOwn: message.senderUserId == currentUserId,
+              accent: accent,
+              onExpire: () => onExpire(message.messageId),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -74,15 +84,31 @@ class _ChatBubbleTileState extends State<_ChatBubbleTile> {
   @override
   void initState() {
     super.initState();
-    // Each bubble owns its own expiry timer rather than sharing one clock
-    // with the rest of the feed, so late-joining tiles (e.g. after a
-    // rebuild) still expire exactly 15 minutes after they were sent.
-    _expiryTimer = Timer(
-      Duration(seconds: widget.message.secondsUntilExpiry),
-      () {
+    _armExpiryTimer();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChatBubbleTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.message.expiresAt != widget.message.expiresAt) {
+      _armExpiryTimer();
+    }
+  }
+
+  void _armExpiryTimer() {
+    _expiryTimer?.cancel();
+    // Each bubble owns its own expiry timer so late-joining tiles still
+    // drop out exactly when their [expiresAt] hits (max 10 minutes).
+    final seconds = widget.message.secondsUntilExpiry;
+    if (seconds <= 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) widget.onExpire();
-      },
-    );
+      });
+      return;
+    }
+    _expiryTimer = Timer(Duration(seconds: seconds), () {
+      if (mounted) widget.onExpire();
+    });
   }
 
   @override
@@ -95,20 +121,24 @@ class _ChatBubbleTileState extends State<_ChatBubbleTile> {
   Widget build(BuildContext context) {
     final message = widget.message;
     final isOwn = widget.isOwn;
+    final radius = BorderRadius.only(
+      topLeft: Radius.circular(18.r),
+      topRight: Radius.circular(18.r),
+      bottomLeft: Radius.circular(isOwn ? 18.r : 5.r),
+      bottomRight: Radius.circular(isOwn ? 5.r : 18.r),
+    );
 
     return Padding(
-      padding: EdgeInsets.symmetric(vertical: 3.h),
+      padding: EdgeInsets.symmetric(vertical: 4.h),
       child: Row(
-        mainAxisAlignment: isOwn
-            ? MainAxisAlignment.end
-            : MainAxisAlignment.start,
+        mainAxisAlignment:
+            isOwn ? MainAxisAlignment.end : MainAxisAlignment.start,
         children: [
           ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: 230.w),
+            constraints: BoxConstraints(maxWidth: 240.w),
             child: Column(
-              crossAxisAlignment: isOwn
-                  ? CrossAxisAlignment.end
-                  : CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  isOwn ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
                 Padding(
                   padding: EdgeInsets.symmetric(horizontal: 12.w),
@@ -117,33 +147,73 @@ class _ChatBubbleTileState extends State<_ChatBubbleTile> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: Colors.white54,
+                      color: Colors.white.withValues(alpha: 0.45),
                       fontSize: 10.sp,
                       fontWeight: FontWeight.w600,
+                      letterSpacing: 0.2,
                     ),
                   ),
                 ),
-                SizedBox(height: 2.h),
-                Container(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: 14.w,
-                    vertical: 8.h,
-                  ),
-                  decoration: BoxDecoration(
-                    color: isOwn ? widget.accent : const Color(0xff2a2a2a),
-                    borderRadius: BorderRadius.only(
-                      topLeft: const Radius.circular(16),
-                      topRight: const Radius.circular(16),
-                      bottomLeft: Radius.circular(isOwn ? 16 : 4),
-                      bottomRight: Radius.circular(isOwn ? 4 : 16),
-                    ),
-                  ),
-                  child: Text(
-                    message.text,
-                    style: TextStyle(
-                      color: isOwn ? Colors.black : Colors.white,
-                      fontSize: 13.sp,
-                      fontWeight: FontWeight.w500,
+                SizedBox(height: 3.h),
+                // Frosted chip — soft gradient + blur instead of a flat fill.
+                ClipRRect(
+                  borderRadius: radius,
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: radius,
+                        border: Border.all(
+                          color: isOwn
+                              ? widget.accent.withValues(alpha: 0.45)
+                              : Colors.white.withValues(alpha: 0.14),
+                          width: 1,
+                        ),
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: isOwn
+                              ? [
+                                  widget.accent.withValues(alpha: 0.38),
+                                  widget.accent.withValues(alpha: 0.14),
+                                  Colors.white.withValues(alpha: 0.04),
+                                ]
+                              : [
+                                  Colors.white.withValues(alpha: 0.14),
+                                  Colors.white.withValues(alpha: 0.05),
+                                  Colors.black.withValues(alpha: 0.18),
+                                ],
+                          stops: const [0.0, 0.55, 1.0],
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.28),
+                            blurRadius: 16,
+                            offset: Offset(0, 6.h),
+                          ),
+                          if (isOwn)
+                            BoxShadow(
+                              color: widget.accent.withValues(alpha: 0.18),
+                              blurRadius: 20,
+                              offset: Offset(0, 2.h),
+                            ),
+                        ],
+                      ),
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 14.w,
+                          vertical: 9.h,
+                        ),
+                        child: Text(
+                          message.text,
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.94),
+                            fontSize: 13.sp,
+                            fontWeight: FontWeight.w500,
+                            height: 1.25,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),

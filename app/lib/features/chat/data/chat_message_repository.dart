@@ -27,8 +27,9 @@ class ChatMessageRepository {
   /// Rolling window of past messages kept visible on every client.
   static const int visibleLimit = 5;
 
-  /// Safety TTL so stale rows don't linger if a client never reloads.
-  static const Duration lifetime = Duration(minutes: 15);
+  /// Hard cap: a bubble never stays longer than this, even if still in the
+  /// rolling window of [visibleLimit] messages.
+  static const Duration lifetime = Duration(minutes: 10);
 
   DatabaseReference groupMessagesRef(String groupId) =>
       _database.ref('groupMessages/$groupId');

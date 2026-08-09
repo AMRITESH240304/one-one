@@ -121,10 +121,14 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
   void didUpdateWidget(covariant ChatBubbleBar oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.anyMemberOnline != widget.anyMemberOnline) {
+      // Online swaps presets → emoji row; leave the composer if it was open
+      // so the emoji / "more" controls aren't hidden behind the text field.
+      if (widget.anyMemberOnline && _composing) {
+        _closeComposer();
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_chipScrollController.hasClients) {
-          _chipScrollController.jumpTo(0);
-        }
+        if (!_chipScrollController.hasClients) return;
+        _chipScrollController.jumpTo(0);
         _updateChipScrollFade();
       });
     }
@@ -301,9 +305,11 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
   /// pinned at the trailing end outside the scroll view.
   Widget _buildActionRow({required Key key}) {
     final online = widget.anyMemberOnline;
+    // Online emoji chips are a touch taller than offline text presets —
+    // give the row enough height so glyphs / more-reactions aren't clipped.
     return SizedBox(
       key: key,
-      height: 40.h,
+      height: online ? 48.h : 40.h,
       child: Padding(
         padding: EdgeInsets.symmetric(horizontal: 16.w),
         child: Row(
@@ -312,6 +318,7 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
               child: online
                   ? ListView(
                       scrollDirection: Axis.horizontal,
+                      physics: const BouncingScrollPhysics(),
                       children: [
                         for (final emoji in ChatBubbleBar.quickEmojis) ...[
                           _EmojiChip(

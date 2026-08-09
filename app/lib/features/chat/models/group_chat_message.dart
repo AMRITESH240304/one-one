@@ -23,8 +23,9 @@ class GroupChatMessage {
   /// Unix seconds.
   final int createdAt;
 
-  /// Unix seconds. Bubbles are hidden client-side once `now >= expiresAt`,
-  /// independent of whether the RTDB row has actually been removed.
+  /// Unix seconds. Bubbles are hidden client-side once `now >= expiresAt`
+  /// (at most 10 minutes from send), independent of whether the RTDB row
+  /// has actually been removed.
   final int expiresAt;
 
   bool get isExpired =>
