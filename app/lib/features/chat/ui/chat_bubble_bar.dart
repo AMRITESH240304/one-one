@@ -500,12 +500,13 @@ class _FadedHorizontalChipList extends StatelessWidget {
             begin: Alignment.centerLeft,
             end: Alignment.centerRight,
             colors: [Colors.white, Colors.white, Colors.transparent],
-            stops: [0.0, 0.74, 1.0],
+            stops: [0.0, 0.62, 0.88],
           ).createShader(bounds);
         },
         child: ListView(
           controller: controller,
           scrollDirection: Axis.horizontal,
+          padding: EdgeInsets.only(right: 16.w),
           children: children,
         ),
       ),

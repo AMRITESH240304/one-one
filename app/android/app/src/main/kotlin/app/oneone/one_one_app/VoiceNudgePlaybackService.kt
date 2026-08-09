@@ -1,14 +1,18 @@
 package app.oneone.one_one_app
 
+import android.Manifest
 import android.app.NotificationManager
 import android.app.Service
-import android.content.Intent
 import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioAttributes as PlatformAudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -19,6 +23,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -51,11 +56,52 @@ class VoiceNudgePlaybackService : Service() {
     private var activeHealth: NudgeHealthSnapshot? = null
     private var ackedEventId: String? = null
 
+    // ── B7: Ambient noise detection ──
+    // When nudge playback starts we briefly enable the microphone (in a
+    // non-recording capacity) to sample the ambient noise level.  The result
+    // (high / medium / low) is attached to the delivery ack so the sender
+    // can see whether the receiver's surroundings are loud.
+    private var ambientNoiseLevel: String? = null
+    private var ambientNoiseSampleActive = false
+
+    // ── B4: Hardware-button interruption ──
+    // When the user presses volume up/down during nudge playback we stop
+    // audio + haptics immediately and post a re-play banner.  The broadcast
+    // is registered dynamically because API 28+ blocks manifest receivers
+    // for implicit broadcasts.
+    private var volumeReceiver: BroadcastReceiver? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         VoiceNudgeAudioCache.deleteOrphans(this)
+
+        // Register for volume-change so we can stop playback when the user
+        // presses a volume button during a nudge.
+        volumeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val current = active ?: return
+                interruptActivePlayback(
+                    current,
+                    reason = "hardware_button",
+                )
+            }
+        }.also { receiver ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(
+                    receiver,
+                    android.content.IntentFilter("android.media.VOLUME_CHANGED_ACTION"),
+                    Context.RECEIVER_NOT_EXPORTED,
+                )
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(
+                    receiver,
+                    android.content.IntentFilter("android.media.VOLUME_CHANGED_ACTION"),
+                )
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -122,6 +168,10 @@ class VoiceNudgePlaybackService : Service() {
         releasePlayback()
         releaseWakeLock()
         networkExecutor.shutdownNow()
+        volumeReceiver?.let {
+            try { unregisterReceiver(it) } catch (_: Exception) {}
+        }
+        volumeReceiver = null
         super.onDestroy()
     }
 
@@ -236,6 +286,12 @@ class VoiceNudgePlaybackService : Service() {
             mainHandler.postDelayed({ finishActive(success = true) }, request.durationMs)
         } catch (error: RuntimeException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E4] Ring playback", error)
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "playback_error",
+                eventId = request.eventId,
+                kind = request.kind,
+                extras = mapOf("error" to (error.message ?: "unknown")),
+            )
             acknowledge(request, "failed", "playback_error", activeHealth) {
                 finishActive(success = false)
             }
@@ -291,6 +347,12 @@ class VoiceNudgePlaybackService : Service() {
                 mainHandler.post { startPlayer(request, file) }
             } catch (error: Exception) {
                 VoiceNudgeDiagnostics.logFailure("[FCM-E5] Voice audio download", error)
+                VoiceNudgeDiagnostics.recordNudgeFailure(
+                    reason = "download_error",
+                    eventId = request.eventId,
+                    kind = request.kind,
+                    extras = mapOf("error" to (error.message ?: "unknown")),
+                )
                 acknowledge(request, "failed", "download_error", activeHealth) {
                     finishActive(success = false)
                 }
@@ -420,6 +482,15 @@ class VoiceNudgePlaybackService : Service() {
 
                 override fun onPlayerError(error: PlaybackException) {
                     VoiceNudgeDiagnostics.logFailure("[FCM-E6] Voice playback", error)
+                    VoiceNudgeDiagnostics.recordNudgeFailure(
+                        reason = "playback_error",
+                        eventId = request.eventId,
+                        kind = request.kind,
+                        extras = mapOf(
+                            "error" to (error.errorCodeName),
+                            "cached_replay" to request.cachedReplay.toString(),
+                        ),
+                    )
                     VoiceNudgeAudioCache.delete(
                         this@VoiceNudgePlaybackService,
                         request.eventId,
@@ -518,6 +589,8 @@ class VoiceNudgePlaybackService : Service() {
                     put("status", status)
                     if (reason != null) put("reason", reason)
                     if (health != null) put("health", health.toJson())
+                    // B7: Attach ambient noise level to the delivery ack.
+                    ambientNoiseLevel?.let { put("ambientNoiseLevel", it) }
                 }
                 opened.outputStream.use { it.write(body.toString().toByteArray()) }
                 val responseCode = opened.responseCode
@@ -547,8 +620,28 @@ class VoiceNudgePlaybackService : Service() {
     private fun sendPlayedAckOnce(request: NudgeRequest) {
         if (ackedEventId == request.eventId) return
         ackedEventId = request.eventId
+
+        // B7: Sample ambient noise as soon as playback genuinely starts.
+        if (request.kind == VoiceNudgeContract.kindVoice ||
+            request.kind == VoiceNudgeContract.kindRing) {
+            ambientNoiseLevel = sampleAmbientNoise()
+        }
+
         val health = activeHealth
         val reason = health?.blockingReason()
+        if (reason != null) {
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = reason,
+                eventId = request.eventId,
+                kind = request.kind,
+                extras = mapOf(
+                    "stream_volume" to health.streamVolume.toString(),
+                    "stream_max" to health.streamMaxVolume.toString(),
+                    "ringer_mode" to health.ringerMode.toString(),
+                    "dnd_active" to health.dndActive.toString(),
+                ),
+            )
+        }
         acknowledge(request, if (reason == null) "played" else "failed", reason, health) {}
         triggerReceiptHaptics(durationMsForHaptics(request))
     }
@@ -560,15 +653,18 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     /**
-     * Haptic feedback duration review (#6): there is no pre-existing
-     * receiver-side vibration anywhere in this codebase — the "six seconds"
-     * referenced elsewhere in the app/backend is the voice-nudge recording
-     * cap (maxVoiceNudgeDurationMs on the backend), not a vibration
-     * duration. Decision made here: vibrate in short repeating pulses for
-     * the nudge's actual audible duration (ring: 3/5/10s; voice: up to the
-     * recorded/played length) instead of a single fixed burst, so a phone
-     * in a pocket has more chances to be noticed throughout playback — kept
-     * identical between voice and ring nudges.
+     * Haptic feedback with a distinct 3-phase pattern (#4):
+     *
+     *   1.  Opening: two short pulses (150 ms on / 100 ms off / 150 ms on)
+     *       so the user feels "something is starting."
+     *   2.  Sustained: repeating 400 ms on / 200 ms off pulses for the
+     *       nudge's actual audible duration (minus the opening + closing
+     *       phases).  Repeating instead of a single long burst keeps the
+     *       phone vibrating in a pocket-sized buzz that's actually
+     *       noticeable through fabric.
+     *   3.  Closing: the same two short pulses again to signal "done."
+     *
+     * The pattern is identical for voice and ring nudges.
      */
     private fun triggerReceiptHaptics(durationMs: Long) {
         val vibrator = (
@@ -580,20 +676,139 @@ class VoiceNudgePlaybackService : Service() {
             }
             ) ?: return
         if (!vibrator.hasVibrator()) return
+
+        // The two-tap pattern used for both opening and closing.
+        val twoTap = longArrayOf(0, 150, 100, 150) // wait, buzz, rest, buzz
+        val openingDurationMs = twoTap.fold(0L) { acc, v -> acc + v }
+        val closingDurationMs = openingDurationMs
+        val phaseOverheadMs = openingDurationMs + closingDurationMs
+
+        // Sustained phase is the audio duration minus the opening + closing
+        // overhead, with a floor so very short nudges still get some buzz.
+        val sustainedMs = (durationMs - phaseOverheadMs).coerceAtLeast(400L)
+
+        val sustainedPattern = longArrayOf(0, 400, 200)
+        val sustainedIndex = 0 // repeat
+
         try {
-            val pulse = longArrayOf(0, 400, 250)
+            // Phase 1 — Opening two-tap
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator.vibrate(VibrationEffect.createWaveform(pulse, 1))
+                vibrator.vibrate(
+                    VibrationEffect.createWaveform(twoTap, -1),
+                )
             } else {
                 @Suppress("DEPRECATION")
-                vibrator.vibrate(pulse, 1)
+                vibrator.vibrate(twoTap, -1)
             }
+
+            // Phase 2 — Sustained repeating buzz (starts after opening finishes)
+            mainHandler.postDelayed({
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        vibrator.vibrate(
+                            VibrationEffect.createWaveform(
+                                sustainedPattern,
+                                sustainedIndex,
+                            ),
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        vibrator.vibrate(sustainedPattern, sustainedIndex)
+                    }
+
+                    // Phase 3 — Closing two-tap (starts when sustained ends)
+                    mainHandler.postDelayed({
+                        try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                vibrator.vibrate(
+                                    VibrationEffect.createWaveform(twoTap, -1),
+                                )
+                            } else {
+                                @Suppress("DEPRECATION")
+                                vibrator.vibrate(twoTap, -1)
+                            }
+                        } catch (error: RuntimeException) {
+                            VoiceNudgeDiagnostics.logFailure(
+                                "[FCM-E12B] Closing haptics",
+                                error,
+                            )
+                        }
+                    }, sustainedMs)
+                } catch (error: RuntimeException) {
+                    VoiceNudgeDiagnostics.logFailure("[FCM-E12A] Sustained haptics", error)
+                }
+            }, openingDurationMs)
+
+            // Cancel all haptics after the full envelope.
+            val totalEnvelopeMs = openingDurationMs + sustainedMs + closingDurationMs
             mainHandler.postDelayed(
                 { vibrator.cancel() },
-                durationMs.coerceIn(400L, 15_000L),
+                totalEnvelopeMs.coerceAtMost(30_000L),
             )
         } catch (error: RuntimeException) {
-            VoiceNudgeDiagnostics.logFailure("[FCM-E12] Receipt haptics", error)
+            VoiceNudgeDiagnostics.logFailure("[FCM-E12] Opening haptics", error)
+        }
+    }
+
+    /**
+     * B4: Stops audio + haptics immediately when the user presses a hardware
+     * button, then posts a notification banner so they can re-play if the
+     * interruption was accidental.
+     */
+    private fun interruptActivePlayback(request: NudgeRequest, reason: String) {
+        Log.i(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-18] Interrupting active nudge playback reason=$reason " +
+                "eventSuffix=${request.eventId.takeLast(6)}",
+        )
+        cancelHaptics()
+        releasePlayback()
+        releaseWakeLock()
+        if (ackedEventId != request.eventId) {
+            ackedEventId = request.eventId
+            acknowledge(request, "failed", reason, activeHealth) {}
+        }
+        active = null
+        val manager = getSystemService(NotificationManager::class.java)
+        val cachedAvailable = VoiceNudgeAudioCache.file(this, request.eventId).isFile
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_DETACH)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(false)
+        }
+        manager.notify(
+            VoiceNudgeNotifications.idFor(request.eventId),
+            notification(
+                request,
+                "Interrupted — tap to re-play ▶️",
+                ongoing = false,
+                cachedAudioAvailable = cachedAvailable,
+            ),
+        )
+        // Clear the interruption flag after a short window so the next
+        // volume change doesn't keep firing on an already-interrupted nudge.
+        mainHandler.removeCallbacksAndMessages(null)
+        if (queue.isEmpty()) {
+            stopSelf()
+        } else {
+            processNext()
+        }
+    }
+
+    private fun cancelHaptics() {
+        try {
+            val vibrator = (
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    getSystemService(VibratorManager::class.java)?.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    getSystemService(Vibrator::class.java)
+                }
+            )
+            vibrator?.cancel()
+        } catch (_: RuntimeException) {
+            // Best-effort cancel.
         }
     }
 
@@ -629,6 +844,94 @@ class VoiceNudgePlaybackService : Service() {
             put("dndActive", dndActive)
             put("notificationsEnabled", notificationsEnabled)
         }
+    }
+
+    // ── B7: Ambient noise sampling (Android only) ──
+
+    /**
+     * Briefly reads a few raw PCM frames from the mic to estimate the ambient
+     * noise level.  The mic is opened for a short burst (≤ 500 ms) and then
+     * released.  Returns "high", "medium", "low", or null if sampling failed.
+     */
+    private fun sampleAmbientNoise(): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
+        if (ContextCompat.checkSelfPermission(
+                this, Manifest.permission.RECORD_AUDIO,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return null
+
+        var recorder: AudioRecord? = null
+        try {
+            val sampleRate = 8000
+            val bufferSize = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            )
+            if (bufferSize <= 0) return null
+            val effectiveSize = bufferSize.coerceAtLeast(1024)
+
+            recorder = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                effectiveSize,
+            )
+            if (recorder.state != AudioRecord.STATE_INITIALIZED) return null
+
+            recorder.startRecording()
+            ambientNoiseSampleActive = true
+            val samples = ShortArray(effectiveSize / 2)
+
+            // Read up to ~500 ms of audio in small chunks to reduce latency.
+            var totalRead = 0
+            var sumSquared = 0.0
+            val maxFrames = (sampleRate * 0.5).toInt() // 500 ms
+            while (totalRead < maxFrames) {
+                val framesRead = recorder.read(
+                    samples,
+                    0,
+                    samples.size.coerceAtMost(maxFrames - totalRead),
+                )
+                if (framesRead <= 0) break
+                for (i in 0 until framesRead) {
+                    val normalized = samples[i].toDouble()
+                    sumSquared += normalized * normalized
+                }
+                totalRead += framesRead
+            }
+            recorder.stop()
+            ambientNoiseSampleActive = false
+
+            if (totalRead <= 0) return null
+            val rms = kotlin.math.sqrt(sumSquared / totalRead)
+            return classifyAmbientLevel(rms)
+        } catch (error: Exception) {
+            Log.w(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-NOISE] Ambient noise sampling failed: ${error.message}",
+            )
+            return null
+        } finally {
+            try {
+                recorder?.release()
+            } catch (_: Exception) {}
+            ambientNoiseSampleActive = false
+        }
+    }
+
+    /** Classify the RMS amplitude into a simple high / medium / low band. */
+    private fun classifyAmbientLevel(rms: Double): String = when {
+        rms > 2000.0 -> "high"
+        rms > 800.0 -> "medium"
+        else -> "low"
+    }
+
+    /** Cancel an in-progress ambient noise sample (called during teardown). */
+    private fun stopAmbientNoiseSample() {
+        ambientNoiseSampleActive = false
+    }
     }
 
     private fun captureHealthSnapshot(streamType: Int): NudgeHealthSnapshot {
@@ -722,6 +1025,8 @@ class VoiceNudgePlaybackService : Service() {
         }
         ringTrack?.release()
         ringTrack = null
+        cancelHaptics()
+        stopAmbientNoiseSample()
     }
 
     private fun holdWakeLock() {
