@@ -2415,6 +2415,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (_session.settings.hapticsEnabled) {
       unawaited(HapticFeedback.selectionClick());
     }
+    final onlineUserIds = <String>{
+      for (final entry in _availability.entries)
+        if (entry.value.isLive || entry.value.isInVoiceSession) entry.key,
+      if (_isOnline) _session.userId,
+    };
     unawaited(
       showNudgeBottomSheet(
         context,
@@ -2423,6 +2428,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         members: _displayMembers,
         accent: accentColorForKey(_session.settings.accentColorKey),
         hapticsEnabled: _session.settings.hapticsEnabled,
+        onlineUserIds: onlineUserIds,
       ),
     );
   }
@@ -3251,9 +3257,14 @@ class _StatusToggle extends StatelessWidget {
                         children: [
                           Expanded(
                             child: Center(
-                              child: Text(
-                                '🌙',
-                                style: TextStyle(fontSize: 11.sp),
+                              // Matches the profile-picture away moon badge
+                              // (Icons.dark_mode_rounded @ ~9.sp).
+                              child: Icon(
+                                Icons.dark_mode_rounded,
+                                color: online
+                                    ? Colors.white54
+                                    : const Color(0xff2a2a2a),
+                                size: 9.sp,
                               ),
                             ),
                           ),
@@ -4329,6 +4340,12 @@ class _MainAvatarCircle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final size = 110.w;
+    // Yellow ring only while the local user is actively transmitting.
+    final borderColor = connected
+        ? (talkActive ? const Color(0xffffd54f) : const Color(0xff28A745))
+        : nudgeMode
+        ? Colors.white38
+        : Colors.white;
 
     Widget circle = Container(
       width: size,
@@ -4336,11 +4353,7 @@ class _MainAvatarCircle extends StatelessWidget {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         border: Border.all(
-          color: connected
-              ? const Color(0xff28A745)
-              : nudgeMode
-              ? Colors.white38
-              : Colors.white,
+          color: borderColor,
           width: connected ? 4 : (selected ? 2.5 : 2),
         ),
       ),
@@ -4395,6 +4408,8 @@ class _MainAvatarCircle extends StatelessWidget {
     if (connected) {
       final plateSize = size * 0.96;
       final glyphSize = size * 0.88;
+      // ~2–3 logical px shrink while PTT is held for a pressed feel.
+      final transmitInset = talkActive && !callMode ? 2.5.w : 0.0;
       circle = SizedBox(
         width: size,
         height: size,
@@ -4402,6 +4417,17 @@ class _MainAvatarCircle extends StatelessWidget {
           clipBehavior: Clip.none,
           alignment: Alignment.center,
           children: [
+            // Compact radial ripples sit outside the solid border so
+            // transmitting reads clearly without enlarging the button hit area.
+            if (talkActive)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: _TransmitRadialVisualizer(
+                    color: const Color(0xffffd54f),
+                    diameter: size,
+                  ),
+                ),
+              ),
             circle,
             Positioned(
               left: 0,
@@ -4438,12 +4464,19 @@ class _MainAvatarCircle extends StatelessWidget {
                                 : Colors.white,
                             size: glyphSize * 0.42,
                           )
-                        : Image.asset(
-                            'assets/walkie.png',
+                        : AnimatedScale(
                             key: const ValueKey('main-walkie'),
-                            width: glyphSize,
-                            height: glyphSize,
-                            fit: BoxFit.contain,
+                            scale: talkActive
+                                ? (glyphSize - transmitInset * 2) / glyphSize
+                                : 1,
+                            duration: const Duration(milliseconds: 90),
+                            curve: Curves.easeOut,
+                            child: Image.asset(
+                              'assets/walkie.png',
+                              width: glyphSize,
+                              height: glyphSize,
+                              fit: BoxFit.contain,
+                            ),
                           ),
                   ),
                 ),
@@ -4513,6 +4546,81 @@ class _MainAvatarCircle extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Compact expanding rings around the talk button while transmitting.
+/// Timer-driven (no LiveKit visualizer dependency) for a light CPU cost.
+class _TransmitRadialVisualizer extends StatefulWidget {
+  const _TransmitRadialVisualizer({
+    required this.color,
+    required this.diameter,
+  });
+
+  final Color color;
+  final double diameter;
+
+  @override
+  State<_TransmitRadialVisualizer> createState() =>
+      _TransmitRadialVisualizerState();
+}
+
+class _TransmitRadialVisualizerState extends State<_TransmitRadialVisualizer>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        return CustomPaint(
+          painter: _TransmitRipplePainter(
+            progress: _controller.value,
+            color: widget.color,
+          ),
+          size: Size.square(widget.diameter),
+        );
+      },
+    );
+  }
+}
+
+class _TransmitRipplePainter extends CustomPainter {
+  _TransmitRipplePainter({required this.progress, required this.color});
+
+  final double progress;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final baseRadius = size.shortestSide / 2;
+    // Three staggered ripples, short travel beyond the solid outline.
+    for (var i = 0; i < 3; i++) {
+      final t = (progress + i / 3) % 1.0;
+      final radius = baseRadius + 2 + t * 10;
+      final opacity = (1 - t) * 0.45;
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.6 * (1 - t * 0.5)
+        ..color = color.withValues(alpha: opacity);
+      canvas.drawCircle(center, radius, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _TransmitRipplePainter oldDelegate) {
+    return oldDelegate.progress != progress || oldDelegate.color != color;
   }
 }
 

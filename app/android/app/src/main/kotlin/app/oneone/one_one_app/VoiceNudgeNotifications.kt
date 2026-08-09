@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.RemoteInput
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Build
 
@@ -43,6 +44,12 @@ object VoiceNudgeNotifications {
         }
     }
 
+    /** Mic glyph — used only for ring / voice nudge notifications. */
+    private val nudgeSmallIcon = R.drawable.ic_voice_nudge
+
+    /** One One mark — used for messages, friend-live, offline, responses, etc. */
+    private val appSmallIcon = R.drawable.ic_notification_app
+
     fun build(
         context: Context,
         eventId: String,
@@ -53,6 +60,7 @@ object VoiceNudgeNotifications {
         ongoing: Boolean,
         cachedAudioAvailable: Boolean = false,
         isPlaying: Boolean = false,
+        largeIcon: Bitmap? = null,
     ): Notification {
         ensureChannels(context)
         val openIntent = Intent(context, MainActivity::class.java).apply {
@@ -71,8 +79,8 @@ object VoiceNudgeNotifications {
             Notification.Builder(context)
         }
         val configured = builder
-            .setSmallIcon(R.drawable.ic_voice_nudge)
-            .setContentTitle("$senderName nudged you")
+            .setSmallIcon(nudgeSmallIcon)
+            .setContentTitle("🎙️ $senderName nudged you")
             .setContentText(status)
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_MESSAGE)
@@ -82,6 +90,9 @@ object VoiceNudgeNotifications {
             .setGroup(groupKey(groupId))
             .setOngoing(ongoing)
             .setAutoCancel(!ongoing)
+        if (largeIcon != null) {
+            configured.setLargeIcon(largeIcon)
+        }
         if (cachedAudioAvailable) {
             configured
                 .addAction(
@@ -123,6 +134,7 @@ object VoiceNudgeNotifications {
         senderName: String,
         title: String,
         body: String,
+        largeIcon: Bitmap? = null,
     ): Notification {
         ensureChannels(context)
         val notificationId = idFor(eventId)
@@ -141,8 +153,8 @@ object VoiceNudgeNotifications {
             @Suppress("DEPRECATION")
             Notification.Builder(context)
         }
-        return builder
-            .setSmallIcon(R.drawable.ic_voice_nudge)
+        val configured = builder
+            .setSmallIcon(nudgeSmallIcon)
             .setContentTitle(title)
             .setContentText(body)
             .setColor(Color.rgb(248, 190, 3))
@@ -152,6 +164,10 @@ object VoiceNudgeNotifications {
             .setContentIntent(contentIntent)
             .setGroup(groupKey(groupId))
             .setAutoCancel(true)
+        if (largeIcon != null) {
+            configured.setLargeIcon(largeIcon)
+        }
+        return configured
             .addNudgeActions(
                 context = context,
                 eventId = eventId,
@@ -173,9 +189,9 @@ object VoiceNudgeNotifications {
         ensureChannels(context)
         val accepted = responseAction == "accept"
         val body = when (responseAction) {
-            "accept" -> "Tap to join together"
-            "snooze" -> "They asked you to wait ${snoozeMinutes ?: 5} minutes"
-            else -> "They can’t join right now"
+            "accept" -> "Tap to join together 🤝"
+            "snooze" -> "They asked you to wait ${snoozeMinutes ?: 5} minutes ⏳"
+            else -> "They can’t join right now 💤"
         }
         val openIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -199,8 +215,8 @@ object VoiceNudgeNotifications {
             Notification.Builder(context)
         }
         return builder
-            .setSmallIcon(R.drawable.ic_voice_nudge)
-            .setContentTitle("$responderName answered your nudge")
+            .setSmallIcon(appSmallIcon)
+            .setContentTitle("💬 $responderName answered your nudge")
             .setContentText(body)
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_SOCIAL)
@@ -236,7 +252,7 @@ object VoiceNudgeNotifications {
         }
         if (groupId != null) builder.setGroup(groupKey(groupId))
         return builder
-            .setSmallIcon(R.drawable.ic_voice_nudge)
+            .setSmallIcon(appSmallIcon)
             .setContentTitle(title)
             .setContentText(body)
             .setColor(Color.rgb(248, 190, 3))

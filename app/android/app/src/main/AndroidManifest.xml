@@ -27,6 +27,9 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="walkie_alerts_v2" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification_app" />
         <!-- Debug-friendly Performance Monitoring logcat. Safe in release;
              collection still respects setPerformanceCollectionEnabled. -->
         <meta-data

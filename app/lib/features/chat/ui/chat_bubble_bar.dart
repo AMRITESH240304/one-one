@@ -106,15 +106,21 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   final ScrollController _chipScrollController = ScrollController();
+  final ScrollController _emojiScrollController = ScrollController();
   bool _composing = false;
   bool _sending = false;
   bool _showTrailingChipFade = false;
+  bool _showTrailingEmojiFade = false;
 
   @override
   void initState() {
     super.initState();
     _chipScrollController.addListener(_updateChipScrollFade);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _updateChipScrollFade());
+    _emojiScrollController.addListener(_updateEmojiScrollFade);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _updateChipScrollFade();
+      _updateEmojiScrollFade();
+    });
   }
 
   @override
@@ -127,9 +133,14 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
         _closeComposer();
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!_chipScrollController.hasClients) return;
-        _chipScrollController.jumpTo(0);
-        _updateChipScrollFade();
+        if (_chipScrollController.hasClients) {
+          _chipScrollController.jumpTo(0);
+          _updateChipScrollFade();
+        }
+        if (_emojiScrollController.hasClients) {
+          _emojiScrollController.jumpTo(0);
+          _updateEmojiScrollFade();
+        }
       });
     }
   }
@@ -145,10 +156,23 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
     }
   }
 
+  void _updateEmojiScrollFade() {
+    if (!_emojiScrollController.hasClients) return;
+    final position = _emojiScrollController.position;
+    final canScroll = position.maxScrollExtent > 0;
+    final atEnd = position.pixels >= position.maxScrollExtent - 2;
+    final show = canScroll && !atEnd;
+    if (show != _showTrailingEmojiFade && mounted) {
+      setState(() => _showTrailingEmojiFade = show);
+    }
+  }
+
   @override
   void dispose() {
     _chipScrollController.removeListener(_updateChipScrollFade);
+    _emojiScrollController.removeListener(_updateEmojiScrollFade);
     _chipScrollController.dispose();
+    _emojiScrollController.dispose();
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -316,9 +340,10 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
           children: [
             Expanded(
               child: online
-                  ? ListView(
-                      scrollDirection: Axis.horizontal,
-                      physics: const BouncingScrollPhysics(),
+                  ? _FadedHorizontalChipList(
+                      controller: _emojiScrollController,
+                      showTrailingFade: _showTrailingEmojiFade,
+                      onScroll: _updateEmojiScrollFade,
                       children: [
                         for (final emoji in ChatBubbleBar.quickEmojis) ...[
                           _EmojiChip(

@@ -144,6 +144,7 @@ class NudgeDeliveryResult {
     required this.status,
     this.reason,
     this.recipientName,
+    this.recipientUserId,
   });
 
   final String eventId;
@@ -154,6 +155,7 @@ class NudgeDeliveryResult {
   /// Machine-readable reason code (e.g. `receiver_volume_muted`) when known.
   final String? reason;
   final String? recipientName;
+  final String? recipientUserId;
 
   bool get played => status == 'played';
 
@@ -172,6 +174,10 @@ class NudgeDeliveryResult {
       recipientName: raw['recipientName']?.toString().trim().isEmpty ?? true
           ? null
           : raw['recipientName'].toString().trim(),
+      recipientUserId:
+          raw['recipientUserId']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['recipientUserId'].toString().trim(),
     );
   }
 }

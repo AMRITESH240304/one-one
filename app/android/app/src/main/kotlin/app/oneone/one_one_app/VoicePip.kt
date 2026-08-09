@@ -86,9 +86,9 @@ class VoiceSessionService : Service() {
             Notification.Builder(this)
         }
         return builder
-            .setSmallIcon(R.drawable.ic_voice_nudge)
-            .setContentTitle("One One voice session")
-            .setContentText("Live and listening")
+            .setSmallIcon(R.drawable.ic_notification_app)
+            .setContentTitle("🎙️ One One voice session")
+            .setContentText("Live and listening 🟢")
             .setContentIntent(openApp)
             .setCategory(Notification.CATEGORY_CALL)
             .setOngoing(true)

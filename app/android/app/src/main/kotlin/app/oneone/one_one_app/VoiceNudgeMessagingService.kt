@@ -82,6 +82,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             return
         }
         val senderName = data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
+        val senderPhotoUrl = data["senderPhotoUrl"]?.takeIf { it.isNotBlank() }
         val durationMs = data["durationMs"]?.toLongOrNull()?.coerceIn(250L, 10_000L)
         if (durationMs == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W4] Ignored $kind with invalid duration")
@@ -96,6 +97,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             putExtra(VoiceNudgeContract.extraKind, kind)
             putExtra(VoiceNudgeContract.extraEventId, eventId)
             putExtra(VoiceNudgeContract.extraSenderName, senderName)
+            putExtra(VoiceNudgeContract.extraSenderPhotoUrl, senderPhotoUrl)
             putExtra(VoiceNudgeContract.extraDurationMs, durationMs)
             putExtra(VoiceNudgeContract.extraAudioUrl, data["audioUrl"])
             putExtra(VoiceNudgeContract.extraAckUrl, data["ackUrl"])
@@ -117,6 +119,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         } catch (error: RuntimeException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E3] Native playback start", error)
             val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val largeIcon = NotificationAvatarHelper.largeIcon(this, data["senderPhotoUrl"], senderName)
             manager.notify(
                 VoiceNudgeNotifications.idFor(eventId),
                 VoiceNudgeNotifications.build(
@@ -125,8 +128,9 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                     groupId,
                     data["responseUrl"],
                     senderName,
-                    "Tap to open this nudge",
+                    "Tap to open this nudge 👋",
                     ongoing = false,
+                    largeIcon = largeIcon,
                 ),
             )
         }
@@ -164,7 +168,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 VoiceNudgeNotifications.idFor(message.messageId ?: "group_lifecycle"),
                 VoiceNudgeNotifications.buildGeneral(
                     this,
-                    message.data["title"] ?: "Group updated",
+                    message.data["title"] ?: "👥 Group updated",
                     message.data["body"] ?: "Your group membership changed.",
                     groupId,
                 ),
@@ -184,7 +188,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 ),
                 VoiceNudgeNotifications.buildGeneral(
                     this,
-                    message.data["title"] ?: "You're offline",
+                    message.data["title"] ?: "😴 You're offline",
                     message.data["body"] ?: "You are now offline.",
                     groupId,
                 ),
@@ -201,14 +205,14 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
     private fun showForegroundNotification(message: RemoteMessage, kind: String) {
         val senderName = message.data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
         val fallbackTitle = if (kind == VoiceNudgeContract.kindFriendLive) {
-            "$senderName is live"
+            "🟢 $senderName is live"
         } else {
-            "$senderName nudged you"
+            "👋 $senderName nudged you"
         }
         val fallbackBody = if (kind == VoiceNudgeContract.kindFriendLive) {
-            "Tap to open One One"
+            "Tap to open One One 🎙️"
         } else {
-            "Come online on One One"
+            "Come online on One One ✨"
         }
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         val notificationKey = message.messageId ?: "${kind}_${message.sentTime}"
@@ -271,6 +275,11 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 "importance=${channelImportance ?: "legacy"}",
         )
         try {
+            val largeIcon = NotificationAvatarHelper.largeIcon(
+                this,
+                data["senderPhotoUrl"],
+                senderName,
+            )
             manager.notify(
                 VoiceNudgeNotifications.idFor(eventId),
                 VoiceNudgeNotifications.buildActionable(
@@ -279,8 +288,9 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                     groupId,
                     data["responseUrl"],
                     senderName,
-                    "$senderName nudged you",
-                    "Accept, snooze, or decline",
+                    "👋 $senderName nudged you",
+                    "Accept, snooze, or decline ✨",
+                    largeIcon = largeIcon,
                 ),
             )
             Log.i(

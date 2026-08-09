@@ -101,8 +101,13 @@ class VoiceNudgePlaybackService : Service() {
                 request.groupId,
                 request.responseUrl,
                 request.senderName,
-                "Preparing nudge…",
+                "Preparing nudge… 🎙️",
                 true,
+                largeIcon = NotificationAvatarHelper.largeIcon(
+                    this,
+                    request.senderPhotoUrl,
+                    request.senderName,
+                ),
             ),
         )
         if (active?.eventId != request.eventId && queue.none { it.eventId == request.eventId }) {
@@ -163,9 +168,9 @@ class VoiceNudgePlaybackService : Service() {
         )
         holdWakeLock()
         val initialStatus = when {
-            request.kind == VoiceNudgeContract.kindRing -> "Ringing…"
-            request.cachedReplay -> "Preparing replay…"
-            else -> "Downloading voice nudge…"
+            request.kind == VoiceNudgeContract.kindRing -> "Ringing… 🔔"
+            request.cachedReplay -> "Preparing replay… ▶️"
+            else -> "Downloading voice nudge… 🎙️"
         }
         startForeground(
             VoiceNudgeNotifications.idFor(request.eventId),
@@ -473,7 +478,7 @@ class VoiceNudgePlaybackService : Service() {
             VoiceNudgeNotifications.idFor(request.eventId),
             notification(
                 request,
-                "Paused",
+                "Paused ⏸️",
                 ongoing = false,
                 cachedAudioAvailable = true,
             ),
@@ -670,10 +675,10 @@ class VoiceNudgePlaybackService : Service() {
             fileExists = VoiceNudgeAudioCache.file(this, request.eventId).isFile,
         )
         val finalStatus = when {
-            !success -> "Nudge could not be played"
+            !success -> "Nudge could not be played ⚠️"
             request.kind == VoiceNudgeContract.kindRing ->
-                "${request.durationMs / 1000}-second ring received"
-            else -> "Voice nudge received"
+                "${request.durationMs / 1000}-second ring received 🔔"
+            else -> "Voice nudge received 🎙️"
         }
         if (queue.isEmpty()) {
             releaseWakeLock()
@@ -685,30 +690,22 @@ class VoiceNudgePlaybackService : Service() {
             }
             manager.notify(
                 VoiceNudgeNotifications.idFor(request.eventId),
-                VoiceNudgeNotifications.build(
-                    this,
-                    request.eventId,
-                    request.groupId,
-                    request.responseUrl,
-                    request.senderName,
+                notification(
+                    request,
                     finalStatus,
-                    false,
-                    cachedAudioAvailable,
+                    ongoing = false,
+                    cachedAudioAvailable = cachedAudioAvailable,
                 ),
             )
             stopSelf()
         } else {
             manager.notify(
                 VoiceNudgeNotifications.idFor(request.eventId),
-                VoiceNudgeNotifications.build(
-                    this,
-                    request.eventId,
-                    request.groupId,
-                    request.responseUrl,
-                    request.senderName,
+                notification(
+                    request,
                     finalStatus,
-                    false,
-                    cachedAudioAvailable,
+                    ongoing = false,
+                    cachedAudioAvailable = cachedAudioAvailable,
                 ),
             )
             processNext()
@@ -790,6 +787,11 @@ class VoiceNudgePlaybackService : Service() {
         ongoing,
         cachedAudioAvailable,
         isPlaying,
+        largeIcon = NotificationAvatarHelper.largeIcon(
+            this,
+            request.senderPhotoUrl,
+            request.senderName,
+        ),
     )
 
     private fun Intent.toRequest(): NudgeRequest? {
@@ -807,6 +809,7 @@ class VoiceNudgePlaybackService : Service() {
             kind = kind,
             eventId = eventId,
             senderName = senderName,
+            senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
             durationMs = durationMs,
             audioUrl = getStringExtra(VoiceNudgeContract.extraAudioUrl),
             ackUrl = getStringExtra(VoiceNudgeContract.extraAckUrl),
@@ -824,6 +827,7 @@ class VoiceNudgePlaybackService : Service() {
             kind = VoiceNudgeContract.kindVoice,
             eventId = eventId,
             senderName = getStringExtra(VoiceNudgeContract.extraSenderName) ?: "Someone",
+            senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
             durationMs = 0,
             audioUrl = null,
             ackUrl = null,
@@ -838,6 +842,7 @@ class VoiceNudgePlaybackService : Service() {
         val kind: String,
         val eventId: String,
         val senderName: String,
+        val senderPhotoUrl: String?,
         val durationMs: Long,
         val audioUrl: String?,
         val ackUrl: String?,

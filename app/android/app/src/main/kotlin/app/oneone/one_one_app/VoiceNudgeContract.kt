@@ -13,6 +13,7 @@ object VoiceNudgeContract {
     const val extraKind = "kind"
     const val extraEventId = "eventId"
     const val extraSenderName = "senderName"
+    const val extraSenderPhotoUrl = "senderPhotoUrl"
     const val extraDurationMs = "durationMs"
     const val extraAudioUrl = "audioUrl"
     const val extraAckUrl = "ackUrl"

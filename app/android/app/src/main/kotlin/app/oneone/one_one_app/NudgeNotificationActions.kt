@@ -157,16 +157,16 @@ class NudgeNotificationActionReceiver : BroadcastReceiver() {
                     postResponse(responseUrl, idToken, responseAction, snoozeMinutes)
                     VoiceNudgeAudioCache.delete(appContext, eventId)
                     val text = if (responseAction == "snooze") {
-                        "You asked $senderName to wait $snoozeMinutes minutes"
+                        "You asked $senderName to wait $snoozeMinutes minutes ⏳"
                     } else {
-                        "You declined $senderName's nudge"
+                        "You declined $senderName's nudge 💤"
                     }
                     val manager = appContext.getSystemService(NotificationManager::class.java)
                     manager.notify(
                         notificationId,
                         VoiceNudgeNotifications.buildGeneral(
                             appContext,
-                            "Nudge answered",
+                            "Nudge answered ✅",
                             text,
                         ),
                     )

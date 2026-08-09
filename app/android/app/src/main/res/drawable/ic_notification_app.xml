@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome One One mark for general / message notification small icons. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Left "1" stem -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7.2,5.5h2.2v13H7.2z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M5.6,6.7l2.8,-1.8v2.1z" />
+    <!-- Right "1" stem -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M14.6,5.5h2.2v13h-2.2z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M13,6.7l2.8,-1.8v2.1z" />
+    <!-- Center dot separator -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11.2,11.2a0.9,0.9 0 1,0 1.8,0a0.9,0.9 0 1,0 -1.8,0" />
+</vector>
