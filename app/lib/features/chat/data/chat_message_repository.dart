@@ -100,9 +100,10 @@ class ChatMessageRepository {
           feature: 'chat',
         ),
       );
+      final denied = _isPermissionDenied(error);
       throw Exception(
         'Could not send message. '
-        '${error.code == 'PERMISSION_DENIED' ? 'You may need to re-authenticate.' : 'Please try again.'}',
+        '${denied ? 'You may need to re-authenticate.' : 'Please try again.'}',
       );
     }
 
@@ -133,6 +134,10 @@ class ChatMessageRepository {
   DatabaseReference emojiBurstsRef(String groupId) =>
       _database.ref('emojiBursts/$groupId');
 
+  /// Best-effort remote fan-out for a local emoji burst.
+  ///
+  /// Never throws: the local animation already played, so failures are logged
+  /// as non-fatal and ignored. Callers must not depend on a thrown error.
   Future<void> sendEmojiBurst({
     required String groupId,
     required String senderUserId,
@@ -140,20 +145,32 @@ class ChatMessageRepository {
     required String emoji,
   }) async {
     // Guard: the Firebase RTDB security rule requires auth.uid == senderUserId
-    // for writes to emojiBursts/{groupId}/{burstId}.  Fail early with a clear
-    // message instead of letting the SDK throw a raw permission-denied error.
+    // for writes to emojiBursts/{groupId}/{burstId}.
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) {
-      throw StateError(
-        'Cannot send emoji burst — no authenticated user. '
-        'Ensure FirebaseAuth is signed in before calling sendEmojiBurst.',
+      unawaited(
+        CrashlyticsService.recordError(
+          StateError('emoji burst skipped — no authenticated user'),
+          StackTrace.current,
+          reason: 'emoji_burst_unauthenticated groupId=$groupId',
+          feature: 'chat',
+        ),
       );
+      return;
     }
     if (currentUser.uid != senderUserId) {
-      throw StateError(
-        'Cannot send emoji burst — authenticated user (${currentUser.uid}) '
-        'does not match senderUserId ($senderUserId).',
+      unawaited(
+        CrashlyticsService.recordError(
+          StateError(
+            'emoji burst skipped — auth uid ${currentUser.uid} '
+            '!= senderUserId $senderUserId',
+          ),
+          StackTrace.current,
+          reason: 'emoji_burst_uid_mismatch groupId=$groupId',
+          feature: 'chat',
+        ),
       );
+      return;
     }
 
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -172,6 +189,20 @@ class ChatMessageRepository {
         'expiresAt': now + emojiBurstLifetime.inSeconds,
       });
     } on FirebaseException catch (error, stack) {
+      // SDK often reports permission-denied as code "unknown" with the message
+      // "Permission denied" — match either form.
+      final denied = _isPermissionDenied(error);
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason:
+              'emoji_burst_write_failed groupId=$groupId '
+              'code=${error.code} denied=$denied',
+          feature: 'chat',
+        ),
+      );
+    } catch (error, stack) {
       unawaited(
         CrashlyticsService.recordError(
           error,
@@ -180,26 +211,54 @@ class ChatMessageRepository {
           feature: 'chat',
         ),
       );
-      // Surface a user-friendly message; the caller can show it in the UI.
-      throw Exception(
-        'Could not send emoji burst. '
-        '${error.code == 'PERMISSION_DENIED' ? 'You may need to re-authenticate.' : 'Please try again.'}',
-      );
     }
   }
 
+  static bool _isPermissionDenied(FirebaseException error) {
+    final code = error.code.toLowerCase();
+    final message = (error.message ?? '').toLowerCase();
+    return code == 'permission-denied' ||
+        code == 'permission_denied' ||
+        message.contains('permission denied');
+  }
+
+  /// Live remote emoji stream for a group.
+  ///
+  /// Uses push-key `onChildAdded` (no secondary index). On attach Firebase
+  /// replays existing children — drop anything older than a couple of
+  /// seconds so stale history does not explode as a burst stack.
   Stream<Map<String, dynamic>> watchEmojiBursts(String groupId) {
-    return emojiBurstsRef(groupId)
-        .orderByChild('createdAt')
-        .limitToLast(3)
-        .onChildAdded
-        .map((event) {
-          final data = event.snapshot.value;
-          if (data is Map) {
-            return Map<String, dynamic>.from(data);
-          }
-          return <String, dynamic>{};
-        })
-        .where((data) => data['senderUserId'] != null);
+    final subscribedAtSec =
+        DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    return emojiBurstsRef(groupId).onChildAdded.map((event) {
+      final raw = event.snapshot.value;
+      if (raw is! Map) return <String, dynamic>{};
+      final data = <String, dynamic>{};
+      raw.forEach((key, value) {
+        data[key.toString()] = value;
+      });
+      // Prefer key from the path when the payload omitted burstId.
+      data['burstId'] ??= event.snapshot.key;
+      return data;
+    }).where((data) {
+      if (data['senderUserId'] == null) return false;
+      final createdAt = data['createdAt'];
+      final createdSec = createdAt is int
+          ? createdAt
+          : int.tryParse(createdAt?.toString() ?? '');
+      // Keep only near-live events (+ small clock skew window).
+      if (createdSec != null && createdSec < subscribedAtSec - 3) {
+        return false;
+      }
+      final expiresAt = data['expiresAt'];
+      final expiresSec = expiresAt is int
+          ? expiresAt
+          : int.tryParse(expiresAt?.toString() ?? '');
+      if (expiresSec != null &&
+          expiresSec < DateTime.now().millisecondsSinceEpoch ~/ 1000) {
+        return false;
+      }
+      return true;
+    });
   }
 }

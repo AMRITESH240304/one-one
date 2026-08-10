@@ -237,6 +237,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _listenToMembers(selected.groupId);
       _listenToAvailability(selected.groupId);
       _listenToChatMessages(selected.groupId);
+      _listenToEmojiBursts(selected.groupId);
       _listenToMemberProfiles(_members);
     }
   }
@@ -675,121 +676,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _listenToMemberProfiles(members);
   }
 
-  /// Fresh avatar/photo for friends: RTDB user profiles update independently
-  /// of membership, so re-read avatarAsset / photo fields without waiting
-  /// for a membership change (and without requiring a manual cache clear).
+  /// Friends' `/users/{id}` nodes are own-uid-only under RTDB rules; avatars
+  /// come from the group members API. This just clears any leftover subs.
   void _listenToMemberProfiles(List<GroupMemberSummary> members) {
     for (final sub in _memberProfileSubscriptions) {
       unawaited(sub.cancel());
     }
     _memberProfileSubscriptions.clear();
-
-    for (final member in members) {
-      if (member.userId == _session.userId) continue;
-      final userId = member.userId;
-      final sub = AppDatabase.instance().ref('users/$userId').onValue.listen((
-        event,
-      ) {
-        final value = event.snapshot.value;
-        if (value is! Map || !mounted) return;
-        final map = Map<Object?, Object?>.from(value);
-        final avatarRaw = map['avatarAsset']?.toString().trim();
-        final avatarAsset =
-            (avatarRaw != null && avatarRaw.isNotEmpty) ? avatarRaw : null;
-        final photoRaw = map['profilePhotoUrl']?.toString().trim();
-        final profilePhotoUrl =
-            (photoRaw != null && photoRaw.isNotEmpty) ? photoRaw : null;
-        final base64Raw = map['profilePhotoBase64']?.toString().trim();
-        final profilePhotoBase64 =
-            (base64Raw != null && base64Raw.isNotEmpty) ? base64Raw : null;
-        final displayName =
-            map['displayName']?.toString().trim().isNotEmpty == true
-            ? map['displayName'].toString().trim()
-            : null;
-
-        _patchMemberProfile(
-          userId: userId,
-          displayName: displayName,
-          avatarAsset: avatarAsset,
-          profilePhotoUrl: profilePhotoUrl,
-          profilePhotoBase64: profilePhotoBase64,
-          clearAvatar: avatarAsset == null,
-          clearPhotoUrl: profilePhotoUrl == null,
-          clearPhotoBase64: profilePhotoBase64 == null,
-        );
-      });
-      _memberProfileSubscriptions.add(sub);
-    }
-  }
-
-  void _patchMemberProfile({
-    required String userId,
-    String? displayName,
-    String? avatarAsset,
-    String? profilePhotoUrl,
-    String? profilePhotoBase64,
-    required bool clearAvatar,
-    required bool clearPhotoUrl,
-    required bool clearPhotoBase64,
-  }) {
-    GroupMemberSummary? patch(GroupMemberSummary member) {
-      if (member.userId != userId) return member;
-      final next = GroupMemberSummary(
-        userId: member.userId,
-        displayName: displayName ?? member.displayName,
-        role: member.role,
-        memberState: member.memberState,
-        profilePhotoUrl: clearPhotoUrl
-            ? null
-            : (profilePhotoUrl ?? member.profilePhotoUrl),
-        profilePhotoBase64: clearPhotoBase64
-            ? null
-            : (profilePhotoBase64 ?? member.profilePhotoBase64),
-        avatarAsset: clearAvatar ? null : (avatarAsset ?? member.avatarAsset),
-      );
-      final same =
-          next.displayName == member.displayName &&
-          next.avatarAsset == member.avatarAsset &&
-          next.profilePhotoUrl == member.profilePhotoUrl &&
-          next.profilePhotoBase64 == member.profilePhotoBase64;
-      return same ? null : next;
-    }
-
-    final nextMembers = <GroupMemberSummary>[];
-    var membersChanged = false;
-    for (final member in _members) {
-      final patched = patch(member);
-      if (patched == null) {
-        nextMembers.add(member);
-      } else {
-        nextMembers.add(patched);
-        membersChanged = true;
-      }
-    }
-
-    final nextByGroup = <String, List<GroupMemberSummary>>{};
-    var byGroupChanged = false;
-    for (final entry in _membersByGroupId.entries) {
-      final list = <GroupMemberSummary>[];
-      var changed = false;
-      for (final member in entry.value) {
-        final patched = patch(member);
-        if (patched == null) {
-          list.add(member);
-        } else {
-          list.add(patched);
-          changed = true;
-        }
-      }
-      nextByGroup[entry.key] = changed ? list : entry.value;
-      if (changed) byGroupChanged = true;
-    }
-
-    if (!membersChanged && !byGroupChanged) return;
-    setState(() {
-      if (membersChanged) _members = nextMembers;
-      if (byGroupChanged) _membersByGroupId = nextByGroup;
-    });
   }
 
   Future<void> _precacheGroupMemberPhotos(
@@ -927,48 +820,58 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   // ── B8: Emoji burst listener ──
   /// Listens for emoji bursts from remote participants and triggers the
-  /// local burst animation. Only active while the group has online members.
+  /// local burst animation.
   void _listenToEmojiBursts(String groupId) {
     unawaited(_emojiBurstSubscription?.cancel());
     _emojiBurstSubscription = _chatMessageRepository
         .watchEmojiBursts(groupId)
-        .listen((data) {
-          if (!mounted || _selectedGroup?.groupId != groupId) return;
-          final senderUserId = data['senderUserId']?.toString();
-          if (senderUserId == _session.userId) return;
-          final emoji = data['emoji']?.toString().trim() ?? '';
-          if (emoji.isEmpty) return;
-          final senderName = data['senderDisplayName']?.toString().trim() ?? 'friend';
-          final burstId = data['burstId']?.toString();
-          if (burstId == null) return;
-
-          final id = 'remote-${burstId}';
-          if (!mounted) return;
-          setState(() {
-            _emojiBursts = [
-              ..._emojiBursts.where((item) => item.id != id),
-              EmojiBurst(
-                id: id,
-                emoji: emoji,
-                senderName: senderName,
-              ),
-            ];
-            if (_emojiBursts.length > 2) {
-              _emojiBursts = _emojiBursts.sublist(_emojiBursts.length - 2);
+        .listen(
+          (data) {
+            if (!mounted || _selectedGroup?.groupId != groupId) return;
+            final senderUserId = data['senderUserId']?.toString();
+            if (senderUserId == null || senderUserId == _session.userId) {
+              return;
             }
-          });
-        },
-        onError: (Object error, StackTrace stackTrace) {
-          unawaited(
-            CrashlyticsService.recordError(
-              error,
-              stackTrace,
-              reason: 'emoji_burst_listener_failed',
-              feature: 'chat',
-            ),
-          );
-        },
-      );
+            final emoji = data['emoji']?.toString().trim() ?? '';
+            if (emoji.isEmpty) return;
+            final senderName =
+                data['senderDisplayName']?.toString().trim() ?? 'friend';
+            final burstId = data['burstId']?.toString();
+            if (burstId == null) return;
+
+            final id = 'remote-$burstId';
+            if (!mounted) return;
+            setState(() {
+              _emojiBursts = [
+                ..._emojiBursts.where((item) => item.id != id),
+                EmojiBurst(
+                  id: id,
+                  emoji: emoji,
+                  senderName: senderName,
+                ),
+              ];
+              if (_emojiBursts.length > 2) {
+                _emojiBursts = _emojiBursts.sublist(_emojiBursts.length - 2);
+              }
+            });
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            unawaited(
+              CrashlyticsService.recordError(
+                error,
+                stackTrace,
+                reason: 'emoji_burst_listener_failed groupId=$groupId',
+                feature: 'chat',
+              ),
+            );
+            // Stream dies after a deny/disconnect — resubscribe if still here.
+            if (!mounted || _selectedGroup?.groupId != groupId) return;
+            Future<void>.delayed(const Duration(seconds: 2), () {
+              if (!mounted || _selectedGroup?.groupId != groupId) return;
+              _listenToEmojiBursts(groupId);
+            });
+          },
+        );
   }
 
   /// When the group transitions offline → anyone live, fade and drop past
@@ -1704,6 +1607,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _state = 'live';
         _message = LiveKitStatus.live;
       });
+      // Ensure remote emoji bursts reattach after going live (bootstrap may
+      // have left a dead stream after a prior permission blip).
+      _listenToEmojiBursts(group.groupId);
       _syncPipSessionState();
       if (startInCallMode) {
         _scheduleCallModeTimeout();
@@ -2110,6 +2016,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Future<void> _connectLiveKit(OnlineSession session) async {
     await _disconnectLiveKit();
     final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    // B9: Attach Krisp noise filter via capture options so it applies when
+    // the local mic track is created (walkie-talkie and call mode).
     final noiseFilter = LiveKitNoiseFilter();
     final room = Room(
       roomOptions: RoomOptions(
