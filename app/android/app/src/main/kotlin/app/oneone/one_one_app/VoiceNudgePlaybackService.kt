@@ -167,7 +167,11 @@ class VoiceNudgePlaybackService : Service() {
         mainHandler.removeCallbacksAndMessages(null)
         releasePlayback()
         releaseWakeLock()
-        networkExecutor.shutdownNow()
+        // Use shutdown() (not shutdownNow()) so in-flight download and ack
+        // tasks can complete gracefully instead of being interrupted mid-IO.
+        // The executor guard in acknowledge() prevents new submissions from
+        // racing with teardown.
+        networkExecutor.shutdown()
         volumeReceiver?.let {
             try { unregisterReceiver(it) } catch (_: Exception) {}
         }
@@ -571,6 +575,18 @@ class VoiceNudgePlaybackService : Service() {
         val ackUrl = request.ackUrl
         val deliveryToken = request.deliveryToken
         if (ackUrl == null || deliveryToken == null) {
+            mainHandler.post(after)
+            return
+        }
+        // Guard: if the service is shutting down and the executor has already
+        // been terminated, log a warning and bail out rather than throwing a
+        // RejectedExecutionException.
+        if (networkExecutor.isShutdown || networkExecutor.isTerminated) {
+            Log.w(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-W9] Delivery ack skipped — executor is shut down " +
+                    "eventSuffix=${request.eventId.takeLast(6)}",
+            )
             mainHandler.post(after)
             return
         }

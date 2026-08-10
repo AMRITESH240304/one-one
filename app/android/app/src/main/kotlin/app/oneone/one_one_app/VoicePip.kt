@@ -10,6 +10,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -91,7 +92,16 @@ class VoiceSessionService : Service() {
                 return START_NOT_STICKY
             }
         }
-        startForeground(notificationId, notification())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                notificationId,
+                notification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            startForeground(notificationId, notification())
+        }
         return START_NOT_STICKY
     }
 
