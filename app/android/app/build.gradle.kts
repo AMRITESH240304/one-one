@@ -77,5 +77,6 @@ dependencies {
     implementation("com.google.firebase:firebase-messaging")
     implementation("com.google.firebase:firebase-crashlytics")
     implementation("com.google.firebase:firebase-perf")
+    implementation("com.android.billingclient:billing:7.1.1")
     implementation("androidx.media3:media3-exoplayer:1.10.1")
 }

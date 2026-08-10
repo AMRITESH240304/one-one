@@ -134,9 +134,9 @@ class NudgeNotificationActionReceiver : BroadcastReceiver() {
             VoiceNudgeNotifications.idFor(eventId),
         )
         // B5: Cancel the expiry alarm for any user action (decline/snooze).
+        val appContext = context.applicationContext
         NudgeExpiryTracker.cancelExpiry(appContext, eventId)
         val pendingResult = goAsync()
-        val appContext = context.applicationContext
         val user = FirebaseAuth.getInstance().currentUser
         if (user == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[NUDGE-ACTION-W1] No signed-in Firebase user")

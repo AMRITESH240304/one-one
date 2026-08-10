@@ -2091,11 +2091,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Future<void> _connectLiveKit(OnlineSession session) async {
     await _disconnectLiveKit();
     final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    final noiseFilter = LiveKitNoiseFilter();
     final room = Room(
       roomOptions: RoomOptions(
         adaptiveStream: false,
         dynacast: false,
         defaultAudioOutputOptions: AudioOutputOptions(speakerOn: speakerOn),
+        defaultAudioCaptureOptions: AudioCaptureOptions(processor: noiseFilter),
       ),
     );
 
@@ -2126,18 +2128,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       throw StateError('LiveKit connected without a local participant.');
     }
 
-    // B9: Apply noise filter to the local audio track for all voice sessions.
-    try {
-      final noiseFilter = LiveKitNoiseFilter();
-      // Attach the filter to the local participant's audio track so noise
-      // suppression is active during walkie-talkie and call mode.
-      await localParticipant.setAudioProcessor(noiseFilter);
-      debugPrint('[LiveKit] Noise filter applied to local audio track.');
-    } catch (error) {
-      // Non-fatal — noise filter is a quality-of-life improvement, not
-      // a requirement for the session.
-      debugPrint('[LiveKit] Noise filter setup failed (non-fatal): $error');
-    }
+    debugPrint('[LiveKit] Noise filter applied to local audio track.');
 
     await localParticipant
         .setMicrophoneEnabled(false)

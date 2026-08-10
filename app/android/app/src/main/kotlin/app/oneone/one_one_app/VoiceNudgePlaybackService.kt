@@ -932,7 +932,6 @@ class VoiceNudgePlaybackService : Service() {
     private fun stopAmbientNoiseSample() {
         ambientNoiseSampleActive = false
     }
-    }
 
     private fun captureHealthSnapshot(streamType: Int): NudgeHealthSnapshot {
         val audioManager = getSystemService(AudioManager::class.java)
