@@ -7,10 +7,12 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:livekit_noise_filter/livekit_noise_filter.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
@@ -649,6 +651,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       '[OneOneFCM][DART-07] Accepted nudge and entered group '
       'eventSuffix=${action.eventId.length <= 6 ? action.eventId : action.eventId.substring(action.eventId.length - 6)}',
     );
+    setState(() => _message = 'Nudge accepted — you’re now online together.');
   }
 
   Future<void> _replaceWithNoGroups() async {
@@ -2650,7 +2653,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 )
               else
                 for (final warning in warnings)
-                  _SetupLine(ok: false, text: warning),
+                  _TappableSetupLine(
+                    ok: false,
+                    text: warning.text,
+                    accent: warning.accent,
+                    onTap: warning.onTap,
+                  ),
             ],
           ),
         );
@@ -2658,28 +2666,75 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
   }
 
-  List<String> _setupWarnings() {
-    final warnings = <String>[];
+  List<_SetupWarning> _setupWarnings() {
+    final warnings = <_SetupWarning>[];
+    final accent = accentColorForKey(_session.settings.accentColorKey);
     if (_groups.isEmpty) {
-      warnings.add('Create or join a group.');
+      warnings.add(
+        _SetupWarning(text: 'Create or join a group.', accent: accent),
+      );
     }
     if (!_session.device.micPermissionGranted && _onlineSession == null) {
-      warnings.add('Microphone permission has not been confirmed.');
+      warnings.add(_SetupWarning(
+        text: 'Microphone permission has not been confirmed.',
+        accent: accent,
+        onTap: () => _requestMicPermissionFromSetup(),
+      ));
     }
     if (!_session.device.notificationPermissionGranted) {
-      warnings.add(
-        'Notification permission is required for closed-app nudges.',
-      );
+      warnings.add(_SetupWarning(
+        text: 'Notification permission is required for closed-app nudges.',
+        accent: accent,
+        onTap: () => _requestNotificationPermissionFromSetup(),
+      ));
     }
     if (_session.device.fcmToken == null) {
-      warnings.add(
-        'Push registration is not ready. Reopen the app while online.',
-      );
+      warnings.add(_SetupWarning(
+        text: 'Push registration is not ready. Reopen the app while online.',
+        accent: accent,
+        onTap: null, // Needs app restart — informational only.
+      ));
     }
     if (!_session.device.batteryOptimizationIgnored) {
-      warnings.add('Battery optimization may interrupt background mode.');
+      warnings.add(_SetupWarning(
+        text: 'Battery optimization may interrupt background mode.',
+        accent: accent,
+        onTap: () => _requestBatteryOptimizationFromSetup(),
+      ));
     }
     return warnings;
+  }
+
+  Future<void> _requestMicPermissionFromSetup() async {
+    final status = await Permission.microphone.request();
+    if (!mounted) return;
+    if (status.isGranted) {
+      setState(() => _message = 'Microphone permission granted.');
+    } else {
+      setState(() => _message = 'Microphone permission was denied.');
+    }
+  }
+
+  Future<void> _requestNotificationPermissionFromSetup() async {
+    final status = await Permission.notification.request();
+    if (!mounted) return;
+    if (status.isGranted) {
+      setState(() => _message = 'Notification permission granted.');
+    } else {
+      setState(() => _message = 'Notification permission was denied.');
+    }
+  }
+
+  Future<void> _requestBatteryOptimizationFromSetup() async {
+    try {
+      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+    } catch (_) {
+      // Best effort — the user can set this from Android Settings.
+    }
+    if (!mounted) return;
+    setState(
+      () => _message = 'Battery optimization request sent. Check your device settings.',
+    );
   }
 
   bool get _isOnline => _onlineSession != null;
@@ -3940,12 +3995,15 @@ class _EdgeQuickActions extends StatelessWidget {
             Semantics(
               button: true,
               label: 'Nudge the group',
-              child: _EdgeActionHit(
-                onTap: onNudge,
-                enabled: onNudge != null,
-                shake: false,
-                hitSize: _columnWidth,
-                child: Text('👋', style: TextStyle(fontSize: 28.sp)),
+              child: Tooltip(
+                message: 'Send a nudge',
+                child: _EdgeActionHit(
+                  onTap: onNudge,
+                  enabled: onNudge != null,
+                  shake: false,
+                  hitSize: _columnWidth,
+                  child: Text('👋', style: TextStyle(fontSize: 28.sp)),
+                ),
               ),
             ),
           if (showNudge && showModeToggle) SizedBox(height: 10.h),
@@ -3955,31 +4013,33 @@ class _EdgeQuickActions extends StatelessWidget {
               label: callModeActive
                   ? 'Switch to walkie-talkie mode'
                   : 'Switch to call mode',
-              child: _EdgeActionHit(
-                onTap: modeToggleEnabled ? onToggleMode : null,
-                enabled: modeToggleEnabled,
-                shake: modeToggleEnabled,
-                hitSize: _columnWidth,
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 240),
-                  transitionBuilder: (child, animation) => ScaleTransition(
-                    scale: animation,
-                    child: FadeTransition(opacity: animation, child: child),
+              child: Tooltip(
+                message: callModeActive
+                    ? 'Switch to walkie-talkie'
+                    : 'Switch to call mode',
+                child: _EdgeActionHit(
+                  onTap: modeToggleEnabled ? onToggleMode : null,
+                  enabled: modeToggleEnabled,
+                  shake: modeToggleEnabled,
+                  hitSize: _columnWidth,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 240),
+                    transitionBuilder: (child, animation) => ScaleTransition(
+                      scale: animation,
+                      child: FadeTransition(opacity: animation, child: child),
+                    ),
+                    child: callModeActive
+                        ? _WalkieEdgeIcon(
+                            key: const ValueKey('edge-walkie'),
+                            size: _columnWidth * 0.78,
+                          )
+                        : Icon(
+                            Icons.call_rounded,
+                            key: const ValueKey('edge-call'),
+                            color: Colors.white,
+                            size: 26.sp,
+                          ),
                   ),
-                  // Edge shows the *target* mode: call when currently walkie,
-                  // walkie art when currently in call mode — always under the
-                  // 👋 and flush to the same right-edge column.
-                  child: callModeActive
-                      ? _WalkieEdgeIcon(
-                          key: const ValueKey('edge-walkie'),
-                          size: _columnWidth * 0.78,
-                        )
-                      : Icon(
-                          Icons.call_rounded,
-                          key: const ValueKey('edge-call'),
-                          color: Colors.white,
-                          size: 26.sp,
-                        ),
                 ),
               ),
             ),
@@ -5226,6 +5286,73 @@ class _SetupLine extends StatelessWidget {
           const SizedBox(width: 10),
           Expanded(child: Text(text)),
         ],
+      ),
+    );
+  }
+}
+
+/// A setup warning with an optional tap action (e.g. request the missing
+/// permission directly from the setup modal).
+class _SetupWarning {
+  const _SetupWarning({
+    required this.text,
+    required this.accent,
+    this.onTap,
+  });
+
+  final String text;
+  final Color accent;
+  final VoidCallback? onTap;
+}
+
+/// Like [_SetupLine] but tappable — tapping an unresolved warning navigates
+/// to the specific permission request instead of just listing it.
+class _TappableSetupLine extends StatelessWidget {
+  const _TappableSetupLine({
+    required this.ok,
+    required this.text,
+    required this.onTap,
+    required this.accent,
+  });
+
+  final bool ok;
+  final String text;
+  final VoidCallback? onTap;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final tappable = onTap != null;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 4.h, horizontal: tappable ? 6.w : 0),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                ok ? Icons.check_circle : Icons.error_outline,
+                color: ok ? colors.primary : colors.error,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  text,
+                  style: TextStyle(
+                    color: tappable ? accent : null,
+                    decoration: tappable ? TextDecoration.underline : null,
+                  ),
+                ),
+              ),
+              if (tappable)
+                Icon(Icons.arrow_forward_rounded, size: 16, color: colors.onSurface.withValues(alpha: 0.3)),
+            ],
+          ),
+        ),
       ),
     );
   }
