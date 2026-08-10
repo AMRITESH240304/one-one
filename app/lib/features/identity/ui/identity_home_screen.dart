@@ -7,10 +7,12 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:livekit_noise_filter/livekit_noise_filter.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
@@ -649,6 +651,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       '[OneOneFCM][DART-07] Accepted nudge and entered group '
       'eventSuffix=${action.eventId.length <= 6 ? action.eventId : action.eventId.substring(action.eventId.length - 6)}',
     );
+    setState(() => _message = 'Nudge accepted — you’re now online together.');
   }
 
   Future<void> _replaceWithNoGroups() async {
@@ -701,7 +704,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             (base64Raw != null && base64Raw.isNotEmpty) ? base64Raw : null;
         final displayName =
             map['displayName']?.toString().trim().isNotEmpty == true
-            ? map['displayName']!.toString().trim()
+            ? map['displayName'].toString().trim()
             : null;
 
         _patchMemberProfile(
@@ -859,7 +862,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 )
                 .map((entry) => entry.key)
                 .toList(growable: false);
-            if (lostPeerIds.isNotEmpty) {
+            if (lostPeerIds.isNotEmpty && mounted) {
               _showPeerLostConnection(lostPeerIds.first);
             }
           }
@@ -1289,36 +1292,46 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// the default Material Snackbar look.
   void _showPresenceSnackbar(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..clearSnackBars()
-      ..showSnackBar(
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: const Color(0xff1e1e1e),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14.r),
-            side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
-          ),
-          margin: EdgeInsets.fromLTRB(16.w, 0, 16.w, 16.h),
-          duration: const Duration(seconds: 4),
-          content: Row(
-            children: [
-              Icon(
-                Icons.info_outline_rounded,
-                color: Colors.white70,
-                size: 18.sp,
-              ),
-              SizedBox(width: 10.w),
-              Expanded(
-                child: Text(
-                  message,
-                  style: TextStyle(color: Colors.white, fontSize: 13.sp),
+    try {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: const Color(0xff1e1e1e),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14.r),
+              side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+            ),
+            margin: EdgeInsets.fromLTRB(16.w, 0, 16.w, 16.h),
+            duration: const Duration(seconds: 4),
+            content: Row(
+              children: [
+                Icon(
+                  Icons.info_outline_rounded,
+                  color: Colors.white70,
+                  size: 18.sp,
                 ),
-              ),
-            ],
+                SizedBox(width: 10.w),
+                Expanded(
+                  child: Text(
+                    message,
+                    style: TextStyle(color: Colors.white, fontSize: 13.sp),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
+        );
+    } on FlutterError catch (error) {
+      // ScaffoldMessenger throws if no Scaffold ancestor exists — e.g. the
+      // widget tree is transitioning during dispose or navigation. Log and
+      // silently drop the snackbar rather than crashing.
+      debugPrint(
+        '[OneOneUI] Could not show presence snackbar: $error — '
+        'message=$message',
       );
+    }
   }
 
   void _scheduleAvailabilityExpiryRefresh() {
@@ -2048,54 +2061,62 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   void _showCallModeTimeoutSnackbar() {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..clearSnackBars()
-      ..showSnackBar(
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: const Color(0xff1e1e1e),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14.r),
-            side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
-          ),
-          margin: EdgeInsets.fromLTRB(16.w, 0, 16.w, 16.h),
-          duration: const Duration(seconds: 8),
-          content: Row(
-            children: [
-              Icon(
-                Icons.timer_off_outlined,
-                color: Colors.white70,
-                size: 18.sp,
-              ),
-              SizedBox(width: 10.w),
-              Expanded(
-                child: Text(
-                  'Switched back to walkie-talkie after '
-                  '${PresenceConfig.callModeTimeout.inMinutes} min in call mode.',
-                  style: TextStyle(color: Colors.white, fontSize: 13.sp),
+    try {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: const Color(0xff1e1e1e),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14.r),
+              side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+            ),
+            margin: EdgeInsets.fromLTRB(16.w, 0, 16.w, 16.h),
+            duration: const Duration(seconds: 8),
+            content: Row(
+              children: [
+                Icon(
+                  Icons.timer_off_outlined,
+                  color: Colors.white70,
+                  size: 18.sp,
                 ),
-              ),
-            ],
+                SizedBox(width: 10.w),
+                Expanded(
+                  child: Text(
+                    'Switched back to walkie-talkie after '
+                    '${PresenceConfig.callModeTimeout.inMinutes} min in call mode.',
+                    style: TextStyle(color: Colors.white, fontSize: 13.sp),
+                  ),
+                ),
+              ],
+            ),
+            action: SnackBarAction(
+              label: 'Call mode',
+              textColor: const Color(0xfffff1a8),
+              onPressed: () {
+                if (!_isCallMode) unawaited(_toggleConnectionMode());
+              },
+            ),
           ),
-          action: SnackBarAction(
-            label: 'Call mode',
-            textColor: const Color(0xfffff1a8),
-            onPressed: () {
-              if (!_isCallMode) unawaited(_toggleConnectionMode());
-            },
-          ),
-        ),
+        );
+    } on FlutterError catch (error) {
+      debugPrint(
+        '[OneOneUI] Could not show call-mode timeout snackbar: $error',
       );
+    }
   }
 
   Future<void> _connectLiveKit(OnlineSession session) async {
     await _disconnectLiveKit();
     final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    final noiseFilter = LiveKitNoiseFilter();
     final room = Room(
       roomOptions: RoomOptions(
         adaptiveStream: false,
         dynacast: false,
         defaultAudioOutputOptions: AudioOutputOptions(speakerOn: speakerOn),
+        defaultAudioCaptureOptions: AudioCaptureOptions(processor: noiseFilter),
       ),
     );
 
@@ -2126,18 +2147,21 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       throw StateError('LiveKit connected without a local participant.');
     }
 
-    // B9: Apply noise filter to the local audio track for all voice sessions.
-    try {
-      final noiseFilter = LiveKitNoiseFilter();
-      // Attach the filter to the local participant's audio track so noise
-      // suppression is active during walkie-talkie and call mode.
-      await localParticipant.setAudioProcessor(noiseFilter);
-      debugPrint('[LiveKit] Noise filter applied to local audio track.');
-    } catch (error) {
-      // Non-fatal — noise filter is a quality-of-life improvement, not
-      // a requirement for the session.
-      debugPrint('[LiveKit] Noise filter setup failed (non-fatal): $error');
+    debugPrint(
+      '[LiveKit] Connected — '
+      'identity=${localParticipant.identity} '
+      'canPublish=${localParticipant.permissions.canPublish} '
+      'canSubscribe=${localParticipant.permissions.canSubscribe}',
+    );
+
+    if (!localParticipant.permissions.canPublish) {
+      debugPrint(
+        '[LiveKit] WARNING: Local participant cannot publish after connect. '
+        'This user will only receive audio. Check token grants.',
+      );
     }
+
+    debugPrint('[LiveKit] Noise filter applied to local audio track.');
 
     await localParticipant
         .setMicrophoneEnabled(false)
@@ -2256,12 +2280,18 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       ..on<RoomConnectedEvent>((_) {
         _syncConnectionQualities(room);
         _setMessage(LiveKitStatus.connected);
+        _logLocalParticipantPermissions(room);
       })
       ..on<RoomReconnectingEvent>((_) {
         _setStateAndMessage('reconnecting', LiveKitStatus.reconnecting);
       })
       ..on<RoomReconnectedEvent>((_) {
         _syncConnectionQualities(room);
+        _logLocalParticipantPermissions(room);
+        // Reconnection can drop the local audio track — restore it based on
+        // the current talk/call state so the participant never silently
+        // becomes subscriber-only.
+        unawaited(_restoreMicrophoneAfterReconnect());
         _setStateAndMessage('live', LiveKitStatus.connected);
       })
       ..on<RoomDisconnectedEvent>((event) {
@@ -2327,10 +2357,83 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       });
   }
 
+  /// Logs the local participant's publishing/subscribing permissions and
+  /// track state so subscriber-only regressions are detectable in logs.
+  void _logLocalParticipantPermissions(Room room) {
+    final participant = room.localParticipant;
+    if (participant == null) {
+      debugPrint('[LiveKit] No local participant available for permission check.');
+      return;
+    }
+    debugPrint(
+      '[LiveKit] Local participant permissions — '
+      'identity=${participant.identity} '
+      'canPublish=${participant.permissions.canPublish} '
+      'canSubscribe=${participant.permissions.canSubscribe} '
+      'canPublishData=${participant.permissions.canPublishData} '
+      'isCameraEnabled=${participant.isCameraEnabled} '
+      'isMicrophoneEnabled=${participant.isMicrophoneEnabled} '
+      'isScreenShareEnabled=${participant.isScreenShareEnabled} '
+      'audioTrackPublished=${participant.audioTrackPublications.isNotEmpty} '
+      'connectionQuality=${participant.connectionQuality.name}',
+    );
+    if (!participant.permissions.canPublish) {
+      debugPrint(
+        '[LiveKit] WARNING: Local participant lacks publish permission — '
+        'will be subscriber-only. Check token grants.',
+      );
+    }
+  }
+
+  /// Restores the microphone/track state after a LiveKit SDK reconnection.
+  /// Without this, a transient network blip can leave the participant
+  /// silently downgraded to subscriber-only.
+  Future<void> _restoreMicrophoneAfterReconnect() async {
+    final participant = _room?.localParticipant;
+    if (participant == null) return;
+
+    // The participant must still have publish capability from the original
+    // token; if not, log a warning — they cannot send audio.
+    if (!participant.permissions.canPublish) {
+      debugPrint(
+        '[LiveKit] WARNING: After reconnection, local participant '
+        '(${participant.identity}) cannot publish. Token may need to be '
+        're-issued. Participant will remain subscriber-only.',
+      );
+      return;
+    }
+
+    // Restore the microphone to match the current session state.
+    // In call mode the mic should be on; in walkie-talkie, it stays off
+    // until the user presses talk.
+    final shouldBeEnabled = _isCallMode || _talkSession != null;
+    try {
+      await participant
+          .setMicrophoneEnabled(shouldBeEnabled)
+          .timeout(const Duration(seconds: 8));
+      debugPrint(
+        '[LiveKit] Post-reconnect microphone restored: '
+        'enabled=$shouldBeEnabled '
+        'mode=${_isCallMode ? "call" : "walkie"} '
+        'talking=${_talkSession != null}',
+      );
+    } catch (error) {
+      debugPrint(
+        '[LiveKit] WARNING: Failed to restore microphone after reconnection: '
+        '$error',
+      );
+    }
+  }
+
   Future<void> _handleConnectionLoss(String message) async {
     final session = _onlineSession;
     if (session == null || _connectionCleanupInFlight) return;
     _connectionCleanupInFlight = true;
+
+    debugPrint(
+      '[LiveKit] Connection loss — reason="$message" '
+      'groupId=${session.groupId}',
+    );
 
     final talkSession = _talkSession;
     _heartbeatTimer?.cancel();
@@ -2391,6 +2494,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _speakingUserIds = const {};
     _clearConnectionQualities();
 
+    if (room != null) {
+      debugPrint(
+        '[LiveKit] Disconnecting room — '
+        'localParticipant=${room.localParticipant?.identity ?? "none"} '
+        'remoteParticipants=${room.remoteParticipants.length}',
+      );
+    }
+
     try {
       final localParticipant = room?.localParticipant;
       if (localParticipant != null) {
@@ -2409,9 +2520,21 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       throw StateError('LiveKit is not connected yet.');
     }
 
+    if (!participant.permissions.canPublish) {
+      debugPrint(
+        '[LiveKit] WARNING: Attempted setMicrophoneEnabled($enabled) but '
+        'local participant cannot publish. Participant is subscriber-only.',
+      );
+      throw StateError(
+        'Cannot publish audio — local participant lacks publish permission.',
+      );
+    }
+
     await participant
         .setMicrophoneEnabled(enabled)
         .timeout(const Duration(seconds: 8));
+
+    debugPrint('[LiveKit] Microphone set: enabled=$enabled');
   }
 
   Future<void> _runBusy(Future<void> Function() action) async {
@@ -2530,7 +2653,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 )
               else
                 for (final warning in warnings)
-                  _SetupLine(ok: false, text: warning),
+                  _TappableSetupLine(
+                    ok: false,
+                    text: warning.text,
+                    accent: warning.accent,
+                    onTap: warning.onTap,
+                  ),
             ],
           ),
         );
@@ -2538,28 +2666,75 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
   }
 
-  List<String> _setupWarnings() {
-    final warnings = <String>[];
+  List<_SetupWarning> _setupWarnings() {
+    final warnings = <_SetupWarning>[];
+    final accent = accentColorForKey(_session.settings.accentColorKey);
     if (_groups.isEmpty) {
-      warnings.add('Create or join a group.');
+      warnings.add(
+        _SetupWarning(text: 'Create or join a group.', accent: accent),
+      );
     }
     if (!_session.device.micPermissionGranted && _onlineSession == null) {
-      warnings.add('Microphone permission has not been confirmed.');
+      warnings.add(_SetupWarning(
+        text: 'Microphone permission has not been confirmed.',
+        accent: accent,
+        onTap: () => _requestMicPermissionFromSetup(),
+      ));
     }
     if (!_session.device.notificationPermissionGranted) {
-      warnings.add(
-        'Notification permission is required for closed-app nudges.',
-      );
+      warnings.add(_SetupWarning(
+        text: 'Notification permission is required for closed-app nudges.',
+        accent: accent,
+        onTap: () => _requestNotificationPermissionFromSetup(),
+      ));
     }
     if (_session.device.fcmToken == null) {
-      warnings.add(
-        'Push registration is not ready. Reopen the app while online.',
-      );
+      warnings.add(_SetupWarning(
+        text: 'Push registration is not ready. Reopen the app while online.',
+        accent: accent,
+        onTap: null, // Needs app restart — informational only.
+      ));
     }
     if (!_session.device.batteryOptimizationIgnored) {
-      warnings.add('Battery optimization may interrupt background mode.');
+      warnings.add(_SetupWarning(
+        text: 'Battery optimization may interrupt background mode.',
+        accent: accent,
+        onTap: () => _requestBatteryOptimizationFromSetup(),
+      ));
     }
     return warnings;
+  }
+
+  Future<void> _requestMicPermissionFromSetup() async {
+    final status = await Permission.microphone.request();
+    if (!mounted) return;
+    if (status.isGranted) {
+      setState(() => _message = 'Microphone permission granted.');
+    } else {
+      setState(() => _message = 'Microphone permission was denied.');
+    }
+  }
+
+  Future<void> _requestNotificationPermissionFromSetup() async {
+    final status = await Permission.notification.request();
+    if (!mounted) return;
+    if (status.isGranted) {
+      setState(() => _message = 'Notification permission granted.');
+    } else {
+      setState(() => _message = 'Notification permission was denied.');
+    }
+  }
+
+  Future<void> _requestBatteryOptimizationFromSetup() async {
+    try {
+      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+    } catch (_) {
+      // Best effort — the user can set this from Android Settings.
+    }
+    if (!mounted) return;
+    setState(
+      () => _message = 'Battery optimization request sent. Check your device settings.',
+    );
   }
 
   bool get _isOnline => _onlineSession != null;
@@ -3820,12 +3995,15 @@ class _EdgeQuickActions extends StatelessWidget {
             Semantics(
               button: true,
               label: 'Nudge the group',
-              child: _EdgeActionHit(
-                onTap: onNudge,
-                enabled: onNudge != null,
-                shake: false,
-                hitSize: _columnWidth,
-                child: Text('👋', style: TextStyle(fontSize: 28.sp)),
+              child: Tooltip(
+                message: 'Send a nudge',
+                child: _EdgeActionHit(
+                  onTap: onNudge,
+                  enabled: onNudge != null,
+                  shake: false,
+                  hitSize: _columnWidth,
+                  child: Text('👋', style: TextStyle(fontSize: 28.sp)),
+                ),
               ),
             ),
           if (showNudge && showModeToggle) SizedBox(height: 10.h),
@@ -3835,31 +4013,33 @@ class _EdgeQuickActions extends StatelessWidget {
               label: callModeActive
                   ? 'Switch to walkie-talkie mode'
                   : 'Switch to call mode',
-              child: _EdgeActionHit(
-                onTap: modeToggleEnabled ? onToggleMode : null,
-                enabled: modeToggleEnabled,
-                shake: modeToggleEnabled,
-                hitSize: _columnWidth,
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 240),
-                  transitionBuilder: (child, animation) => ScaleTransition(
-                    scale: animation,
-                    child: FadeTransition(opacity: animation, child: child),
+              child: Tooltip(
+                message: callModeActive
+                    ? 'Switch to walkie-talkie'
+                    : 'Switch to call mode',
+                child: _EdgeActionHit(
+                  onTap: modeToggleEnabled ? onToggleMode : null,
+                  enabled: modeToggleEnabled,
+                  shake: modeToggleEnabled,
+                  hitSize: _columnWidth,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 240),
+                    transitionBuilder: (child, animation) => ScaleTransition(
+                      scale: animation,
+                      child: FadeTransition(opacity: animation, child: child),
+                    ),
+                    child: callModeActive
+                        ? _WalkieEdgeIcon(
+                            key: const ValueKey('edge-walkie'),
+                            size: _columnWidth * 0.78,
+                          )
+                        : Icon(
+                            Icons.call_rounded,
+                            key: const ValueKey('edge-call'),
+                            color: Colors.white,
+                            size: 26.sp,
+                          ),
                   ),
-                  // Edge shows the *target* mode: call when currently walkie,
-                  // walkie art when currently in call mode — always under the
-                  // 👋 and flush to the same right-edge column.
-                  child: callModeActive
-                      ? _WalkieEdgeIcon(
-                          key: const ValueKey('edge-walkie'),
-                          size: _columnWidth * 0.78,
-                        )
-                      : Icon(
-                          Icons.call_rounded,
-                          key: const ValueKey('edge-call'),
-                          color: Colors.white,
-                          size: 26.sp,
-                        ),
                 ),
               ),
             ),
@@ -5106,6 +5286,73 @@ class _SetupLine extends StatelessWidget {
           const SizedBox(width: 10),
           Expanded(child: Text(text)),
         ],
+      ),
+    );
+  }
+}
+
+/// A setup warning with an optional tap action (e.g. request the missing
+/// permission directly from the setup modal).
+class _SetupWarning {
+  const _SetupWarning({
+    required this.text,
+    required this.accent,
+    this.onTap,
+  });
+
+  final String text;
+  final Color accent;
+  final VoidCallback? onTap;
+}
+
+/// Like [_SetupLine] but tappable — tapping an unresolved warning navigates
+/// to the specific permission request instead of just listing it.
+class _TappableSetupLine extends StatelessWidget {
+  const _TappableSetupLine({
+    required this.ok,
+    required this.text,
+    required this.onTap,
+    required this.accent,
+  });
+
+  final bool ok;
+  final String text;
+  final VoidCallback? onTap;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final tappable = onTap != null;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 4.h, horizontal: tappable ? 6.w : 0),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                ok ? Icons.check_circle : Icons.error_outline,
+                color: ok ? colors.primary : colors.error,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  text,
+                  style: TextStyle(
+                    color: tappable ? accent : null,
+                    decoration: tappable ? TextDecoration.underline : null,
+                  ),
+                ),
+              ),
+              if (tappable)
+                Icon(Icons.arrow_forward_rounded, size: 16, color: colors.onSurface.withValues(alpha: 0.3)),
+            ],
+          ),
+        ),
       ),
     );
   }

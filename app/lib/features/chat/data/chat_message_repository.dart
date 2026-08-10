@@ -1,8 +1,10 @@
 import 'dart:async';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 
 import '../../../core/firebase/app_database.dart';
+import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/network/api_client.dart';
 
 /// Reads/writes ephemeral group chat bubbles (Prompt 5).
@@ -58,6 +60,20 @@ class ChatMessageRepository {
       );
     }
 
+    // Guard against unauthenticated writes that would fail at the RTDB layer.
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      throw StateError(
+        'Cannot send chat message — no authenticated user.',
+      );
+    }
+    if (currentUser.uid != senderUserId) {
+      throw StateError(
+        'Cannot send chat message — authenticated user (${currentUser.uid}) '
+        'does not match senderUserId ($senderUserId).',
+      );
+    }
+
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final ref = groupMessagesRef(groupId).push();
     final messageId = ref.key;
@@ -65,15 +81,30 @@ class ChatMessageRepository {
       throw StateError('Failed to allocate a chat message id.');
     }
 
-    await ref.set({
-      'messageId': messageId,
-      'groupId': groupId,
-      'senderUserId': senderUserId,
-      'senderDisplayName': senderDisplayName,
-      'text': sanitized,
-      'createdAt': now,
-      'expiresAt': now + lifetime.inSeconds,
-    });
+    try {
+      await ref.set({
+        'messageId': messageId,
+        'groupId': groupId,
+        'senderUserId': senderUserId,
+        'senderDisplayName': senderDisplayName,
+        'text': sanitized,
+        'createdAt': now,
+        'expiresAt': now + lifetime.inSeconds,
+      });
+    } on FirebaseException catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'chat_message_write_failed groupId=$groupId',
+          feature: 'chat',
+        ),
+      );
+      throw Exception(
+        'Could not send message. '
+        '${error.code == 'PERMISSION_DENIED' ? 'You may need to re-authenticate.' : 'Please try again.'}',
+      );
+    }
 
     unawaited(_notifyGroup(groupId));
   }
@@ -108,20 +139,53 @@ class ChatMessageRepository {
     required String senderDisplayName,
     required String emoji,
   }) async {
+    // Guard: the Firebase RTDB security rule requires auth.uid == senderUserId
+    // for writes to emojiBursts/{groupId}/{burstId}.  Fail early with a clear
+    // message instead of letting the SDK throw a raw permission-denied error.
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      throw StateError(
+        'Cannot send emoji burst — no authenticated user. '
+        'Ensure FirebaseAuth is signed in before calling sendEmojiBurst.',
+      );
+    }
+    if (currentUser.uid != senderUserId) {
+      throw StateError(
+        'Cannot send emoji burst — authenticated user (${currentUser.uid}) '
+        'does not match senderUserId ($senderUserId).',
+      );
+    }
+
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final ref = emojiBurstsRef(groupId).push();
     final burstId = ref.key;
     if (burstId == null) return;
 
-    await ref.set({
-      'burstId': burstId,
-      'groupId': groupId,
-      'senderUserId': senderUserId,
-      'senderDisplayName': senderDisplayName,
-      'emoji': emoji,
-      'createdAt': now,
-      'expiresAt': now + emojiBurstLifetime.inSeconds,
-    });
+    try {
+      await ref.set({
+        'burstId': burstId,
+        'groupId': groupId,
+        'senderUserId': senderUserId,
+        'senderDisplayName': senderDisplayName,
+        'emoji': emoji,
+        'createdAt': now,
+        'expiresAt': now + emojiBurstLifetime.inSeconds,
+      });
+    } on FirebaseException catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'emoji_burst_write_failed groupId=$groupId',
+          feature: 'chat',
+        ),
+      );
+      // Surface a user-friendly message; the caller can show it in the UI.
+      throw Exception(
+        'Could not send emoji burst. '
+        '${error.code == 'PERMISSION_DENIED' ? 'You may need to re-authenticate.' : 'Please try again.'}',
+      );
+    }
   }
 
   Stream<Map<String, dynamic>> watchEmojiBursts(String groupId) {

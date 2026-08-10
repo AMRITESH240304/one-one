@@ -167,7 +167,11 @@ class VoiceNudgePlaybackService : Service() {
         mainHandler.removeCallbacksAndMessages(null)
         releasePlayback()
         releaseWakeLock()
-        networkExecutor.shutdownNow()
+        // Use shutdown() (not shutdownNow()) so in-flight download and ack
+        // tasks can complete gracefully instead of being interrupted mid-IO.
+        // The executor guard in acknowledge() prevents new submissions from
+        // racing with teardown.
+        networkExecutor.shutdown()
         volumeReceiver?.let {
             try { unregisterReceiver(it) } catch (_: Exception) {}
         }
@@ -574,6 +578,18 @@ class VoiceNudgePlaybackService : Service() {
             mainHandler.post(after)
             return
         }
+        // Guard: if the service is shutting down and the executor has already
+        // been terminated, log a warning and bail out rather than throwing a
+        // RejectedExecutionException.
+        if (networkExecutor.isShutdown || networkExecutor.isTerminated) {
+            Log.w(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-W9] Delivery ack skipped — executor is shut down " +
+                    "eventSuffix=${request.eventId.takeLast(6)}",
+            )
+            mainHandler.post(after)
+            return
+        }
         networkExecutor.execute {
             var connection: HttpURLConnection? = null
             try {
@@ -653,18 +669,14 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     /**
-     * Haptic feedback with a distinct 3-phase pattern (#4):
+     * Haptic feedback: one long vibration when the nudge starts playing,
+     * and one long vibration when it finishes.  No vibration in between
+     * so the buzz does not interfere with listening to the voice message.
      *
-     *   1.  Opening: two short pulses (150 ms on / 100 ms off / 150 ms on)
-     *       so the user feels "something is starting."
-     *   2.  Sustained: repeating 400 ms on / 200 ms off pulses for the
-     *       nudge's actual audible duration (minus the opening + closing
-     *       phases).  Repeating instead of a single long burst keeps the
-     *       phone vibrating in a pocket-sized buzz that's actually
-     *       noticeable through fabric.
-     *   3.  Closing: the same two short pulses again to signal "done."
-     *
-     * The pattern is identical for voice and ring nudges.
+     * Timing:
+     *   - opening burst: ~600 ms (two taps: 150 ms on / 100 ms off / 150 ms on,
+     *     repeated twice for a longer-feeling single pulse)
+     *   - closing burst: same pattern, scheduled after the audio duration
      */
     private fun triggerReceiptHaptics(durationMs: Long) {
         val vibrator = (
@@ -677,70 +689,52 @@ class VoiceNudgePlaybackService : Service() {
             ) ?: return
         if (!vibrator.hasVibrator()) return
 
-        // The two-tap pattern used for both opening and closing.
-        val twoTap = longArrayOf(0, 150, 100, 150) // wait, buzz, rest, buzz
-        val openingDurationMs = twoTap.fold(0L) { acc, v -> acc + v }
-        val closingDurationMs = openingDurationMs
-        val phaseOverheadMs = openingDurationMs + closingDurationMs
+        // A longer-feeling opening burst: two quick taps repeated so the
+        // user unmistakably feels "something started playing".  Total ~600 ms.
+        val openBurst = longArrayOf(0, 150, 100, 150, 100, 150) // wait, buzz, pause, buzz, pause, buzz
 
-        // Sustained phase is the audio duration minus the opening + closing
-        // overhead, with a floor so very short nudges still get some buzz.
-        val sustainedMs = (durationMs - phaseOverheadMs).coerceAtLeast(400L)
+        // Closing burst: identical pattern so the user feels "playback is done".
+        val closeBurst = longArrayOf(0, 150, 100, 150, 100, 150)
 
-        val sustainedPattern = longArrayOf(0, 400, 200)
-        val sustainedIndex = 0 // repeat
+        // With no sustained middle phase, the closing burst delay is simply
+        // the audio duration (minus the tiny opening overhead so timing feels
+        // exact).  Floor of 500 ms so very short nudges still get a distinct
+        // closing pulse.
+        val openDurationMs = openBurst.fold(0L) { acc, v -> acc + v }
+        val closeDelayMs = (durationMs - openDurationMs).coerceAtLeast(500L)
 
         try {
-            // Phase 1 — Opening two-tap
+            // Phase 1 — Opening long burst
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 vibrator.vibrate(
-                    VibrationEffect.createWaveform(twoTap, -1),
+                    VibrationEffect.createWaveform(openBurst, -1),
                 )
             } else {
                 @Suppress("DEPRECATION")
-                vibrator.vibrate(twoTap, -1)
+                vibrator.vibrate(openBurst, -1)
             }
 
-            // Phase 2 — Sustained repeating buzz (starts after opening finishes)
+            // Phase 2 — Closing long burst (fires after audio finishes)
             mainHandler.postDelayed({
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         vibrator.vibrate(
-                            VibrationEffect.createWaveform(
-                                sustainedPattern,
-                                sustainedIndex,
-                            ),
+                            VibrationEffect.createWaveform(closeBurst, -1),
                         )
                     } else {
                         @Suppress("DEPRECATION")
-                        vibrator.vibrate(sustainedPattern, sustainedIndex)
+                        vibrator.vibrate(closeBurst, -1)
                     }
-
-                    // Phase 3 — Closing two-tap (starts when sustained ends)
-                    mainHandler.postDelayed({
-                        try {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                vibrator.vibrate(
-                                    VibrationEffect.createWaveform(twoTap, -1),
-                                )
-                            } else {
-                                @Suppress("DEPRECATION")
-                                vibrator.vibrate(twoTap, -1)
-                            }
-                        } catch (error: RuntimeException) {
-                            VoiceNudgeDiagnostics.logFailure(
-                                "[FCM-E12B] Closing haptics",
-                                error,
-                            )
-                        }
-                    }, sustainedMs)
                 } catch (error: RuntimeException) {
-                    VoiceNudgeDiagnostics.logFailure("[FCM-E12A] Sustained haptics", error)
+                    VoiceNudgeDiagnostics.logFailure(
+                        "[FCM-E12B] Closing haptics",
+                        error,
+                    )
                 }
-            }, openingDurationMs)
+            }, closeDelayMs)
 
-            // Cancel all haptics after the full envelope.
-            val totalEnvelopeMs = openingDurationMs + sustainedMs + closingDurationMs
+            // Cancel any leftover haptics after the full envelope.
+            val totalEnvelopeMs = openDurationMs + closeDelayMs + closeBurst.fold(0L) { acc, v -> acc + v }
             mainHandler.postDelayed(
                 { vibrator.cancel() },
                 totalEnvelopeMs.coerceAtMost(30_000L),
@@ -931,7 +925,6 @@ class VoiceNudgePlaybackService : Service() {
     /** Cancel an in-progress ambient noise sample (called during teardown). */
     private fun stopAmbientNoiseSample() {
         ambientNoiseSampleActive = false
-    }
     }
 
     private fun captureHealthSnapshot(streamType: Int): NudgeHealthSnapshot {
