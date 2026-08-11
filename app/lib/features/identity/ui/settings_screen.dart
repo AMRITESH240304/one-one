@@ -3,11 +3,11 @@ import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:purchases_ui_flutter/purchases_ui_flutter.dart';
-
 import '../../../app/accent_theme.dart';
-import '../../../app/app_config.dart';
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../groups/models/group_summary.dart';
+import '../../subscriptions/eleven_pro_paywall_screen.dart';
+import '../../subscriptions/subscription_management_sheet.dart';
 import '../data/avatar_assets.dart';
 import '../data/identity_repository.dart';
 import '../models/identity_session.dart';
@@ -21,22 +21,27 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.session,
     required this.identityRepository,
-    this.groupName,
+    this.manageableGroups = const [],
     this.onManageGroup,
   });
 
   final IdentitySession session;
   final IdentityRepository identityRepository;
-  final String? groupName;
-  final Future<bool> Function()? onManageGroup;
+
+  /// Groups this user created (owner). Empty when none are manageable.
+  final List<GroupSummary> manageableGroups;
+
+  /// Opens management for the chosen group. Returns true when the group
+  /// membership ended (left/deleted) so Settings can close if needed.
+  final Future<bool> Function(GroupSummary group)? onManageGroup;
 
   /// Opens settings drifting in from the left (settings control side).
   static Future<void> open(
     BuildContext context, {
     required IdentitySession session,
     required IdentityRepository identityRepository,
-    String? groupName,
-    Future<bool> Function()? onManageGroup,
+    List<GroupSummary> manageableGroups = const [],
+    Future<bool> Function(GroupSummary group)? onManageGroup,
   }) {
     return Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
@@ -52,7 +57,7 @@ class SettingsScreen extends StatefulWidget {
               child: SettingsScreen(
                 session: session,
                 identityRepository: identityRepository,
-                groupName: groupName,
+                manageableGroups: manageableGroups,
                 onManageGroup: onManageGroup,
               ),
             ),
@@ -489,22 +494,102 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _openGroupManagement() async {
-    final groupEnded = await widget.onManageGroup?.call() ?? false;
+    final groups = widget.manageableGroups;
+    final onManage = widget.onManageGroup;
+    if (groups.isEmpty || onManage == null) return;
+
+    final selected = await showModalBottomSheet<GroupSummary>(
+      context: context,
+      backgroundColor: const Color(0xff1b1b1b),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 12, 8, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 14),
+                  child: Text(
+                    'Manage Group',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 14),
+                  child: Text(
+                    'Groups you created',
+                    style: TextStyle(color: Colors.white54, fontSize: 12.5),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: groups.length,
+                  separatorBuilder: (_, _) => Divider(
+                    height: 1,
+                    indent: 56,
+                    color: Colors.white.withValues(alpha: 0.09),
+                  ),
+                  itemBuilder: (context, index) {
+                    final group = groups[index];
+                    return ListTile(
+                      onTap: () => Navigator.of(sheetContext).pop(group),
+                      leading: const Icon(
+                        Icons.group_outlined,
+                        color: Colors.white70,
+                      ),
+                      title: Text(
+                        group.name,
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                      trailing: const Icon(
+                        Icons.chevron_right_rounded,
+                        color: Colors.white38,
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (selected == null || !mounted) return;
+
+    final groupEnded = await onManage(selected);
     if (groupEnded && mounted) Navigator.of(context).pop();
   }
 
-  /// Opens the RevenueCat Paywall UI. Used at gated entry points (e.g.
-  /// tapping a Pro-only feature). Uses `presentPaywallIfNeeded` so users
-  /// who already have the "Eleven Pro" entitlement never see the paywall.
-  Future<void> _showPaywallIfNeeded() async {
+  /// Opens the in-app Eleven Pro paywall (branded UI + RevenueCat packages).
+  Future<void> _showPaywall() async {
     try {
-      final result = await RevenueCatUI.presentPaywallIfNeeded(
-        AppConfig.proEntitlementId,
-      );
+      final purchased = await ElevenProPaywallScreen.open(context);
       if (!mounted) return;
-      if (result == PaywallResult.purchased ||
-          result == PaywallResult.restored) {
-        setState(() => _message = 'Welcome to Eleven Pro! 🎉');
+      if (purchased) {
+        setState(() => _message = 'Welcome to Eleven Pro!');
       }
     } catch (error) {
       if (!mounted) return;
@@ -513,17 +598,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  /// Opens RevenueCat's Customer Center where users can manage their
-  /// subscription (upgrade, downgrade, cancel, restore). Replaces any
-  /// custom "manage subscription" screen.
-  Future<void> _showCustomerCenter() async {
-    try {
-      await RevenueCatUI.presentCustomerCenter();
-    } catch (error) {
-      if (!mounted) return;
-      setState(() => _message = 'Could not open subscription management.');
-      debugPrint('Customer Center error: $error');
-    }
+  /// Manage Subscription sheet: store Customer Center + Contact Team Eleven.
+  Future<void> _showManageSubscription() {
+    return SubscriptionManagementSheet.show(context);
   }
 
   @override
@@ -604,7 +681,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onEditProfile: _openProfileEditor,
               ),
               const SizedBox(height: 28),
-              if (widget.groupName != null && widget.onManageGroup != null) ...[
+              if (widget.manageableGroups.isNotEmpty &&
+                  widget.onManageGroup != null) ...[
                 const _SectionTitle('Group'),
                 const SizedBox(height: 12),
                 _SettingsSurface(
@@ -612,7 +690,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   children: [
                     _NavigationRow(
                       icon: Icons.group_outlined,
-                      label: 'Manage ${widget.groupName}',
+                      label: 'Manage Group',
                       onTap: _openGroupManagement,
                     ),
                   ],
@@ -767,21 +845,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ],
               ),
               const SizedBox(height: 28),
-              const _SectionTitle('Subscription'),
+              const _SectionTitle('Subscription', showBeta: true),
               const SizedBox(height: 12),
               _SettingsSurface(
                 padding: EdgeInsets.zero,
                 children: [
-                  _NavigationRow(
-                    icon: Icons.workspace_premium_outlined,
-                    label: 'Eleven Pro',
-                    onTap: _showPaywallIfNeeded,
-                  ),
+                  _ElevenProSettingsCard(onTap: _showPaywall),
                   const _SurfaceDivider(indent: 52),
                   _NavigationRow(
                     icon: Icons.manage_accounts_outlined,
                     label: 'Manage Subscription',
-                    onTap: _showCustomerCenter,
+                    onTap: _showManageSubscription,
                   ),
                 ],
               ),
@@ -1537,18 +1611,102 @@ class _PhotoTabContent extends StatelessWidget {
 }
 
 class _SectionTitle extends StatelessWidget {
-  const _SectionTitle(this.label);
+  const _SectionTitle(this.label, {this.showBeta = false});
+
   final String label;
+  final bool showBeta;
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      label.toUpperCase(),
-      style: const TextStyle(
-        color: Colors.white54,
-        fontSize: 12,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 0,
+    return Row(
+      children: [
+        Text(
+          label.toUpperCase(),
+          style: const TextStyle(
+            color: Colors.white54,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0,
+          ),
+        ),
+        if (showBeta) ...[
+          const SizedBox(width: 8),
+          const _SettingsBetaBadge(),
+        ],
+      ],
+    );
+  }
+}
+
+class _ElevenProSettingsCard extends StatelessWidget {
+  const _ElevenProSettingsCard({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+      child: const Padding(
+        padding: EdgeInsets.fromLTRB(18, 14, 14, 14),
+        child: Row(
+          children: [
+            Icon(Icons.workspace_premium_outlined, color: Colors.white70),
+            SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Eleven Pro',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  SizedBox(height: 2),
+                  Text(
+                    'View plans',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right_rounded, color: Colors.white38),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsBetaBadge extends StatelessWidget {
+  const _SettingsBetaBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: const Color(0xffffb020).withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: const Color(0xffffb020).withValues(alpha: 0.55),
+        ),
+      ),
+      child: const Text(
+        'BETA',
+        style: TextStyle(
+          color: Color(0xffffb020),
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.6,
+        ),
       ),
     );
   }

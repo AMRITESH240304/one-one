@@ -39,4 +39,7 @@ class AppConfig {
   /// The RevenueCat entitlement all "isPro" checks key off — never a specific
   /// product ID, so products can be swapped/added without code changes.
   static const String proEntitlementId = 'Eleven Pro';
+
+  /// Support inbox for Eleven Pro beta feedback and billing questions.
+  static const String teamElevenContactEmail = 'hello@oneone.app';
 }

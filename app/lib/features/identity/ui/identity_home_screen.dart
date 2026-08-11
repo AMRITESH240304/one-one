@@ -2476,15 +2476,25 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     });
   }
 
-  Future<bool> _openGroupManagement() async {
-    final group = _selectedGroup;
-    if (group == null) return false;
+  List<GroupSummary> get _ownedGroups => _groups
+      .where((group) => group.ownerUserId == _session.userId)
+      .toList(growable: false);
+
+  Future<bool> _openGroupManagement(GroupSummary group) async {
+    // Only group creators can manage; ignore anything that slipped past UI.
+    if (group.ownerUserId != _session.userId) return false;
+
+    final initialMembers = group.groupId == _selectedGroup?.groupId
+        ? _members
+        : await _groupRepository.loadGroupMembers(group.groupId);
+    if (!mounted) return false;
+
     final outcome = await Navigator.of(context).push<GroupManagementOutcome>(
       MaterialPageRoute<GroupManagementOutcome>(
         builder: (_) => GroupManagementScreen(
           group: group,
           currentUserId: _session.userId,
-          initialMembers: _members,
+          initialMembers: initialMembers,
           onInvite: () => _createInviteForGroup(group),
         ),
       ),
@@ -2494,7 +2504,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     await _endRevokedVoiceSession(group.groupId);
     if (!mounted) return true;
     await _loadGroups();
-    if (mounted && _groups.isNotEmpty) {
+    if (mounted) {
       setState(() {
         _message = outcome == GroupManagementOutcome.groupDeleted
             ? '${group.name} was deleted.'
@@ -2505,14 +2515,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   void _openSettings() {
-    final group = _selectedGroup;
+    final ownedGroups = _ownedGroups;
     unawaited(
       SettingsScreen.open(
         context,
         session: _session,
         identityRepository: widget.identityRepository,
-        groupName: group?.name,
-        onManageGroup: group == null ? null : _openGroupManagement,
+        manageableGroups: ownedGroups,
+        onManageGroup:
+            ownedGroups.isEmpty ? null : _openGroupManagement,
       ),
     );
   }

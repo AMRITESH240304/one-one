@@ -12,9 +12,11 @@ import '../../identity/models/identity_session.dart';
 import '../../identity/ui/group_action_screen.dart';
 import '../../identity/ui/identity_home_screen.dart';
 import '../../identity/ui/settings_screen.dart';
+import '../data/group_repository.dart';
+import '../data/invite_link_bridge.dart';
 import '../models/group_invite_result.dart';
 import '../models/group_summary.dart';
-import '../data/invite_link_bridge.dart';
+import 'group_management_screen.dart';
 
 class WaitingForGroupMembersScreen extends StatefulWidget {
   const WaitingForGroupMembersScreen({
@@ -141,13 +143,36 @@ class _WaitingForGroupMembersScreenState
   }
 
   void _openSettings() {
+    final ownsGroup = widget.group.ownerUserId == widget.session.userId;
     unawaited(
       SettingsScreen.open(
         context,
         session: widget.session,
         identityRepository: widget.identityRepository,
+        manageableGroups: ownsGroup ? [widget.group] : const [],
+        onManageGroup: ownsGroup ? _openGroupManagement : null,
       ),
     );
+  }
+
+  Future<bool> _openGroupManagement(GroupSummary group) async {
+    if (group.ownerUserId != widget.session.userId) return false;
+    final members = await GroupRepository().loadGroupMembers(group.groupId);
+    if (!mounted) return false;
+    final outcome = await Navigator.of(context).push<GroupManagementOutcome>(
+      MaterialPageRoute<GroupManagementOutcome>(
+        builder: (_) => GroupManagementScreen(
+          group: group,
+          currentUserId: widget.session.userId,
+          initialMembers: members,
+          onInvite: _shareInvite,
+        ),
+      ),
+    );
+    if (outcome == null || !mounted) return false;
+    // Group no longer available — leave the waiting route.
+    unawaited(_goHome());
+    return true;
   }
 
   @override
