@@ -64,19 +64,19 @@ const goneOfflineCopy: Record<
   { title: string; body: string }
 > = {
   peer_left: {
-    title: "You're offline",
+    title: "😴 You're offline",
     body: "The other participant has gone offline. You are now offline."
   },
   inactivity: {
-    title: "You're offline",
-    body: "Room closed due to inactivity. Send a nudge to go online again."
+    title: "😴 You're offline",
+    body: "Room closed due to inactivity. Send a nudge to go online again 👋"
   },
   daily_usage_cap: {
-    title: "You're offline",
-    body: "Daily usage limit reached. You can go online again tomorrow."
+    title: "😴 You're offline",
+    body: "Daily usage limit reached. You can go online again tomorrow 🌙"
   },
   network_loss: {
-    title: "You're offline",
+    title: "😴 You're offline",
     body: "Connection lost. You are now offline."
   }
 };
@@ -147,8 +147,8 @@ export async function sendFriendLiveNotification(input: FriendLiveInput) {
 
   const pushResult = await sendPushToTokens({
     tokens: recipientDevices.map((device) => device.fcmToken),
-    title: `${senderName} is live`,
-    body: "Tap to open One One",
+    title: `🟢 ${senderName} is live`,
+    body: "Tap to open One One 🎙️",
     data: {
       type: "friend_live",
       groupId: input.groupId,
@@ -276,6 +276,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
     targetUserIds: recipientUserIds
   });
   const senderName = await readDisplayName(input.senderUserId);
+  const senderPhotoUrl = await readProfilePhotoUrl(input.senderUserId);
   const recipientDevices = await collectRecipientDevices(recipientUserIds);
   const notificationEventId = await createNotificationEvent({
     groupId: input.groupId,
@@ -297,6 +298,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
         groupId: input.groupId,
         senderUserId: input.senderUserId,
         senderName,
+        ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         responseUrl: `${baseUrl}/v1/groups/${input.groupId}/nudges/${notificationEventId}/respond`,
         deepLink: `walkie://group/${input.groupId}`
       }
@@ -356,8 +358,8 @@ export async function sendChatMessageNotification(input: ChatMessageInput) {
 
   const pushResult = await sendPushToTokens({
     tokens: recipientDevices.map((device) => device.fcmToken),
-    title: `New message in ${group.name}`,
-    body: `${senderName} sent a message`,
+    title: `💬 New message in ${group.name}`,
+    body: `${senderName} sent a message ✨`,
     data: {
       type: "chat_message",
       groupId: input.groupId,
@@ -503,6 +505,14 @@ async function writeStatusEvent(
 async function readDisplayName(userId: string) {
   const snapshot = await getRealtimeDatabase().ref(`users/${userId}/displayName`).get();
   return snapshot.val()?.toString() || "Someone";
+}
+
+async function readProfilePhotoUrl(userId: string): Promise<string | undefined> {
+  const snapshot = await getRealtimeDatabase()
+    .ref(`users/${userId}/profilePhotoUrl`)
+    .get();
+  const url = snapshot.val()?.toString()?.trim();
+  return url || undefined;
 }
 
 async function findRecentNotificationEvent(input: {

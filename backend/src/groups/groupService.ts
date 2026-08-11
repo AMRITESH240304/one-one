@@ -399,7 +399,7 @@ export async function removeGroupMember(input: RemoveGroupMemberInput) {
   await cleanupMemberState(input.groupId, input.memberUserId, "removed_by_owner");
   await notifyUsers(
     [input.memberUserId],
-    "Removed from group",
+    "👋 Removed from group",
     `You were removed from ${group.name}.`,
     { type: "group_removed", groupId: input.groupId }
   );
@@ -533,7 +533,7 @@ export async function deleteGroup(input: GroupMemberActionInput) {
     await db.ref().update(updates);
     await notifyUsers(
       memberUserIds,
-      "Group deleted",
+      "🗑️ Group deleted",
       `${group.name} was permanently deleted.`,
       { type: "group_deleted", groupId: input.groupId }
     );

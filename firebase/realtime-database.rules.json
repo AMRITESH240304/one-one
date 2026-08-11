@@ -101,7 +101,7 @@
         ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
         ".indexOn": ["createdAt"],
         "$burstId": {
-          ".write": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active' && newData.child('senderUserId').val() == auth.uid"
+          ".write": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active' && ((!data.exists() && newData.child('senderUserId').val() == auth.uid) || (data.exists() && data.child('senderUserId').val() == auth.uid))"
         }
       }
     },

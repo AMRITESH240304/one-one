@@ -258,6 +258,7 @@ async function dispatchVoiceNudgeFromContext(ctx: {
   });
 
   const ackUrl = `${baseUrl}/v1/nudges/${ctx.eventId}/ack`;
+  const senderPhotoUrl = await readProfilePhotoUrl(ctx.senderUserId);
   const pushResult = await sendAndroidDataPushes(
     ctx.recipientDevices.map((device) => ({
       token: device.fcmToken,
@@ -267,6 +268,7 @@ async function dispatchVoiceNudgeFromContext(ctx: {
         groupId: ctx.groupId,
         senderUserId: ctx.senderUserId,
         senderName: ctx.senderName,
+        ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         durationMs: String(ctx.durationMs),
         expiresAt: String(ctx.expiresAt),
         audioUrl: signedAudioUrl,
@@ -394,6 +396,7 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
   });
 
   const ackUrl = `${baseUrl}/v1/nudges/${eventId}/ack`;
+  const senderPhotoUrl = await readProfilePhotoUrl(input.senderUserId);
   const pushResult = await sendAndroidDataPushes(
     input.recipientDevices.map((device) => ({
       token: device.fcmToken,
@@ -403,6 +406,7 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
         groupId: input.groupId,
         senderUserId: input.senderUserId,
         senderName: input.senderName,
+        ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         durationMs: String(input.durationSeconds * 1000),
         responseUrl,
         ackUrl,
@@ -565,6 +569,18 @@ async function writeNudgeNotificationEvent(input: {
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
+}
+
+async function readProfilePhotoUrl(userId: string): Promise<string | undefined> {
+  try {
+    const snapshot = await getRealtimeDatabase()
+      .ref(`users/${userId}/profilePhotoUrl`)
+      .get();
+    const url = snapshot.val()?.toString()?.trim();
+    return url || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function describeError(error: unknown) {
