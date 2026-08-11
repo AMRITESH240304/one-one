@@ -18,13 +18,75 @@ import java.util.concurrent.Executors
 
 /**
  * Builds the large notification icon for nudge notifications: circular
- * sender profile photo when [photoUrl] is reachable, otherwise a monogram
- * circle from the sender's display name.
+ * sender profile photo when [photoUrl] is reachable, otherwise the app's
+ * [new_logo] bitmap. Never falls back to a letter monogram for the large
+ * icon — the sender's name is already in the notification title.
  */
 object NotificationAvatarHelper {
     private val cache = ConcurrentHashMap<String, Bitmap>()
     private val executor = Executors.newSingleThreadExecutor()
 
+    /** Cached decode of the app logo for the large-icon fallback. */
+    @Volatile
+    private var cachedLogoBitmap: Bitmap? = null
+
+    /** Returns the app logo as a (square) bitmap suitable for a large icon. */
+    fun appLogoBitmap(context: Context): Bitmap {
+        cachedLogoBitmap?.let { return it }
+        val resources = context.applicationContext.resources
+        val options = BitmapFactory.Options().apply {
+            // Decode at ~96dp for the large icon (target 96px at mdpi,
+            // scaled by density on higher-density screens).
+            val densityDpi = resources.displayMetrics.densityDpi
+            inDensity = densityDpi
+            inTargetDensity = densityDpi
+            inScaled = true
+        }
+        val decoded = BitmapFactory.decodeResource(resources, R.drawable.new_logo, options)
+            ?: return Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888)
+        val size = (64 * resources.displayMetrics.density).toInt().coerceAtLeast(96)
+        val scaled = Bitmap.createScaledBitmap(decoded, size, size, true)
+        if (scaled != decoded) decoded.recycle()
+        cachedLogoBitmap = scaled
+        return scaled
+    }
+
+    fun largeIcon(
+        context: Context,
+        photoUrl: String?,
+        senderName: String,
+    ): Bitmap {
+        val url = photoUrl?.trim().orEmpty()
+        if (url.isNotEmpty()) {
+            cache[url]?.let { return it }
+            val downloaded = downloadCircular(url, context)
+            if (downloaded != null) {
+                cache[url] = downloaded
+                return downloaded
+            }
+        }
+        // Fall back to the app logo — never the letter monogram for the
+        // large icon. The sender name is already in the title/body text.
+        return appLogoBitmap(context)
+    }
+
+    /**
+     * Loads [photoUrl] off the main thread and delivers a circular bitmap.
+     * Falls back to the app logo if download fails.
+     */
+    fun loadAsync(
+        context: Context,
+        photoUrl: String?,
+        senderName: String,
+        onReady: (Bitmap) -> Unit,
+    ) {
+        executor.execute {
+            val bitmap = largeIcon(context.applicationContext, photoUrl, senderName)
+            onReady(bitmap)
+        }
+    }
+
+    /** Retained for use in non-notification contexts (e.g. inline avatars). */
     fun monogram(context: Context, senderName: String): Bitmap {
         val size = (64 * context.resources.displayMetrics.density).toInt().coerceAtLeast(96)
         val key = "mono:${senderName.trim().lowercase()}:$size"
@@ -45,39 +107,6 @@ object NotificationAvatarHelper {
         canvas.drawText(letter, size / 2f, textY, paint)
         cache[key] = bitmap
         return bitmap
-    }
-
-    fun largeIcon(
-        context: Context,
-        photoUrl: String?,
-        senderName: String,
-    ): Bitmap {
-        val url = photoUrl?.trim().orEmpty()
-        if (url.isNotEmpty()) {
-            cache[url]?.let { return it }
-            val downloaded = downloadCircular(url, context)
-            if (downloaded != null) {
-                cache[url] = downloaded
-                return downloaded
-            }
-        }
-        return monogram(context, senderName)
-    }
-
-    /**
-     * Loads [photoUrl] off the main thread and delivers a circular bitmap.
-     * Falls back to a monogram if download fails.
-     */
-    fun loadAsync(
-        context: Context,
-        photoUrl: String?,
-        senderName: String,
-        onReady: (Bitmap) -> Unit,
-    ) {
-        executor.execute {
-            val bitmap = largeIcon(context.applicationContext, photoUrl, senderName)
-            onReady(bitmap)
-        }
     }
 
     private fun downloadCircular(url: String, context: Context): Bitmap? {

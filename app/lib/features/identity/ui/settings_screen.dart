@@ -3,8 +3,10 @@ import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:purchases_ui_flutter/purchases_ui_flutter.dart';
 
 import '../../../app/accent_theme.dart';
+import '../../../app/app_config.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../data/avatar_assets.dart';
 import '../data/identity_repository.dart';
@@ -491,6 +493,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (groupEnded && mounted) Navigator.of(context).pop();
   }
 
+  /// Opens the RevenueCat Paywall UI. Used at gated entry points (e.g.
+  /// tapping a Pro-only feature). Uses `presentPaywallIfNeeded` so users
+  /// who already have the "Eleven Pro" entitlement never see the paywall.
+  Future<void> _showPaywallIfNeeded() async {
+    try {
+      final result = await RevenueCatUI.presentPaywallIfNeeded(
+        AppConfig.proEntitlementId,
+      );
+      if (!mounted) return;
+      if (result == PaywallResult.purchased ||
+          result == PaywallResult.restored) {
+        setState(() => _message = 'Welcome to Eleven Pro! 🎉');
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _message = 'Could not open subscription options.');
+      debugPrint('Paywall error: $error');
+    }
+  }
+
+  /// Opens RevenueCat's Customer Center where users can manage their
+  /// subscription (upgrade, downgrade, cancel, restore). Replaces any
+  /// custom "manage subscription" screen.
+  Future<void> _showCustomerCenter() async {
+    try {
+      await RevenueCatUI.presentCustomerCenter();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _message = 'Could not open subscription management.');
+      debugPrint('Customer Center error: $error');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final accent = accentColorForKey(_accentColorKey);
@@ -728,6 +763,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     icon: Icons.privacy_tip_outlined,
                     label: 'Privacy Policy',
                     onTap: () => _openLegalDocument(LegalDocument.privacy),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 28),
+              const _SectionTitle('Subscription'),
+              const SizedBox(height: 12),
+              _SettingsSurface(
+                padding: EdgeInsets.zero,
+                children: [
+                  _NavigationRow(
+                    icon: Icons.workspace_premium_outlined,
+                    label: 'Eleven Pro',
+                    onTap: _showPaywallIfNeeded,
+                  ),
+                  const _SurfaceDivider(indent: 52),
+                  _NavigationRow(
+                    icon: Icons.manage_accounts_outlined,
+                    label: 'Manage Subscription',
+                    onTap: _showCustomerCenter,
                   ),
                 ],
               ),
