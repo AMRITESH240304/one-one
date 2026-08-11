@@ -1,13 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Yellow background with centered logo matching the Flutter startup screen.
-     The logo is shown by the native layer so there is zero visual shift when
-     Flutter takes over and renders its own identical splash. -->
+<!-- No native splash art — Flutter draws StartupGate immediately. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="@color/splash_background" />
-    <item>
-        <bitmap
-            android:gravity="center"
-            android:src="@drawable/new_logo"
-            android:mipMap="true" />
-    </item>
+    <item android:drawable="@android:color/transparent" />
 </layer-list>
