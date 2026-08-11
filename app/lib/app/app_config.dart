@@ -21,4 +21,22 @@ class AppConfig {
   );
 
   static const String cloudinaryProfileFolder = 'one_one/profile_photos';
+
+  // RevenueCat — test/sandbox key for closed testing.
+  // Swap to the production public API key before release to Google Play.
+  // The entitlement ID ('Eleven Pro') and package identifiers remain
+  // identical across sandbox and production.
+  static const String revenueCatAppleApiKey = String.fromEnvironment(
+    'REVENUECAT_APPLE_API_KEY',
+    defaultValue: 'test_xyMARSpeunlaQbPftjTriypqInZ',
+  );
+
+  static const String revenueCatGoogleApiKey = String.fromEnvironment(
+    'REVENUECAT_GOOGLE_API_KEY',
+    defaultValue: 'test_xyMARSpeunlaQbPftjTriypqInZ',
+  );
+
+  /// The RevenueCat entitlement all "isPro" checks key off — never a specific
+  /// product ID, so products can be swapped/added without code changes.
+  static const String proEntitlementId = 'Eleven Pro';
 }

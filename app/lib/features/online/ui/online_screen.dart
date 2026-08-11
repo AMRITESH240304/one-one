@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -52,6 +53,12 @@ class _OnlineScreenState extends State<OnlineScreen> {
   bool _busy = false;
   bool _talkBusy = false;
 
+  // Reconnect state — exponential backoff up to 2 retries.
+  int _reconnectAttempts = 0;
+  static const int _maxReconnectAttempts = 2;
+  static const Duration _reconnectBaseDelay = Duration(seconds: 1);
+  Timer? _reconnectTimer;
+
   String get _todayDateKey {
     final now = DateTime.now().toUtc();
     return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
@@ -62,6 +69,7 @@ class _OnlineScreenState extends State<OnlineScreen> {
     _heartbeatTimer?.cancel();
     _inactivityTimer?.cancel();
     _usagePersistTimer?.cancel();
+    _reconnectTimer?.cancel();
     if (_todayOnlineSeconds > 0 && _session != null) {
       unawaited(_persistDailyUsage());
     }
@@ -300,12 +308,18 @@ class _OnlineScreenState extends State<OnlineScreen> {
   void _attachRoomListener(Room room) {
     _roomListener = room.createListener()
       ..on<RoomConnectedEvent>((_) {
+        _reconnectAttempts = 0;
+        _reconnectTimer?.cancel();
+        _reconnectTimer = null;
         _setMessage(LiveKitStatus.connected);
       })
       ..on<RoomReconnectingEvent>((_) {
         _setStateAndMessage('reconnecting', LiveKitStatus.reconnecting);
       })
       ..on<RoomReconnectedEvent>((_) {
+        _reconnectAttempts = 0;
+        _reconnectTimer?.cancel();
+        _reconnectTimer = null;
         _setStateAndMessage('live', LiveKitStatus.connected);
       })
       ..on<RoomDisconnectedEvent>((event) {
@@ -313,6 +327,12 @@ class _OnlineScreenState extends State<OnlineScreen> {
           'disconnected',
           LiveKitStatus.fromDisconnectReason(event.reason),
         );
+        // Attempt automatic reconnect with exponential backoff.
+        // Only reconnect if the user is still in a live session (not
+        // deliberately going away) and we haven't exhausted retries.
+        if (_session != null && _state != 'away') {
+          _scheduleReconnect();
+        }
       })
       ..on<ParticipantConnectedEvent>((_) {})
       ..on<TrackSubscribedEvent>((_) {})
@@ -329,7 +349,53 @@ class _OnlineScreenState extends State<OnlineScreen> {
       });
   }
 
+  /// Exponential backoff reconnect: 1s → 2s delay, max 2 retries.
+  /// After exhausting retries the error is surfaced to the user.
+  void _scheduleReconnect() {
+    if (_reconnectAttempts >= _maxReconnectAttempts) {
+      _setStateAndMessage('away', LiveKitStatus.connectionError);
+      unawaited(_goAway());
+      return;
+    }
+
+    _reconnectTimer?.cancel();
+    final delay = _reconnectBaseDelay * math.pow(2, _reconnectAttempts);
+    _reconnectTimer = Timer(delay, () {
+      if (!mounted || _session == null || _state == 'away') return;
+      _attemptReconnect();
+    });
+  }
+
+  Future<void> _attemptReconnect() async {
+    final session = _session;
+    if (session == null || !mounted) return;
+
+    _reconnectAttempts++;
+    setState(() {
+      _state = 'reconnecting';
+      _message = LiveKitStatus.reconnecting;
+    });
+
+    try {
+      await _connectLiveKit(session);
+      await _onlineRepository.markLive(session);
+      if (!mounted) return;
+      setState(() {
+        _state = 'live';
+        _message = LiveKitStatus.live;
+      });
+      _reconnectAttempts = 0;
+    } catch (error) {
+      if (!mounted) return;
+      _scheduleReconnect();
+    }
+  }
+
   Future<void> _disconnectLiveKit() async {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempts = 0;
+
     final room = _room;
     _room = null;
     _roomListener?.dispose();

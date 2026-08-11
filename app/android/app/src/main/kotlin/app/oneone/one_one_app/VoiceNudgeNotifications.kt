@@ -47,8 +47,8 @@ object VoiceNudgeNotifications {
     /** Mic glyph — used only for ring / voice nudge notifications. */
     private val nudgeSmallIcon = R.drawable.ic_voice_nudge
 
-    /** One One mark — used for messages, friend-live, offline, responses, etc. */
-    private val appSmallIcon = R.drawable.ic_notification_app
+    /** One One logo — used for all notification small icons (status bar). */
+    private val appSmallIcon = R.drawable.new_logo
 
     fun build(
         context: Context,
@@ -216,6 +216,7 @@ object VoiceNudgeNotifications {
         }
         return builder
             .setSmallIcon(appSmallIcon)
+            .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
             .setContentTitle("💬 $responderName answered your nudge")
             .setContentText(body)
             .setColor(Color.rgb(248, 190, 3))
@@ -253,6 +254,7 @@ object VoiceNudgeNotifications {
         if (groupId != null) builder.setGroup(groupKey(groupId))
         return builder
             .setSmallIcon(appSmallIcon)
+            .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
             .setContentTitle(title)
             .setContentText(body)
             .setColor(Color.rgb(248, 190, 3))

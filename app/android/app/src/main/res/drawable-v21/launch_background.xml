@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Plain yellow background matching the Flutter welcome screen.
-     Flutter renders directly on top — logo and text appear on first frame. -->
+<!-- Yellow background with centered logo matching the Flutter startup screen. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/splash_background" />
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/new_logo"
+            android:mipMap="true" />
+    </item>
 </layer-list>

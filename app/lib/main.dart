@@ -11,6 +11,7 @@ import 'app/startup_performance.dart';
 import 'core/firebase/crashlytics_service.dart';
 import 'core/firebase/firebase_analytics_service.dart';
 import 'core/firebase/firebase_performance_service.dart';
+import 'features/subscriptions/revenue_cat_service.dart';
 
 Future<void> main() async {
   await runZonedGuarded(() async {
@@ -47,6 +48,9 @@ Future<void> main() async {
     unawaited(CrashlyticsService.initialize());
     unawaited(AnalyticsService.initialize());
     unawaited(PerformanceService.initialize());
+    // RevenueCat initializes in the background so subscription state is
+    // available by the time the user reaches any gated feature.
+    unawaited(RevenueCatService.initialize());
   }, (error, stack) {
     debugPrint('[Crashlytics] zone error: $error');
     unawaited(
