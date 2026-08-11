@@ -6,6 +6,7 @@ class GroupMemberSummary {
     required this.memberState,
     this.profilePhotoUrl,
     this.profilePhotoBase64,
+    this.avatarAsset,
   });
 
   final String userId;
@@ -14,4 +15,5 @@ class GroupMemberSummary {
   final String memberState;
   final String? profilePhotoUrl;
   final String? profilePhotoBase64;
+  final String? avatarAsset;
 }

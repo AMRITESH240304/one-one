@@ -4,15 +4,43 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+import 'package:lottie/lottie.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 enum _SetupStep { mic, notification, background }
 
-class SetupPermissionScreen extends StatefulWidget {
-  const SetupPermissionScreen({
-    super.key,
-    required this.onComplete,
+class _StepVisual {
+  const _StepVisual({
+    required this.iconColor,
+    required this.icon,
+    required this.lottieAsset,
   });
+
+  final Color iconColor;
+  final IconData icon;
+  final String lottieAsset;
+}
+
+const Map<_SetupStep, _StepVisual> _stepVisuals = {
+  _SetupStep.mic: _StepVisual(
+    iconColor: Color(0xffffb020),
+    icon: Icons.mic_rounded,
+    lottieAsset: 'assets/lottie/mic_pulse.json',
+  ),
+  _SetupStep.notification: _StepVisual(
+    iconColor: Color(0xffff5a5f),
+    icon: Icons.notifications_rounded,
+    lottieAsset: 'assets/lottie/notification_wave.json',
+  ),
+  _SetupStep.background: _StepVisual(
+    iconColor: Color(0xff4c8dff),
+    icon: Icons.battery_saver_rounded,
+    lottieAsset: 'assets/lottie/radio_connect.json',
+  ),
+};
+
+class SetupPermissionScreen extends StatefulWidget {
+  const SetupPermissionScreen({super.key, required this.onComplete});
 
   final Future<void> Function() onComplete;
 
@@ -84,8 +112,13 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
     if (!mounted) return;
 
     if (!status.isGranted) {
-      setState(() => _busy = false);
-      _showDeniedSnackBar('Notification permission is required.');
+      setState(() {
+        _busy = false;
+        _step = _SetupStep.background;
+      });
+      _showDeniedSnackBar(
+        'Notifications can be enabled later in Android Settings.',
+      );
       return;
     }
 
@@ -123,10 +156,8 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
     final granted = await _isBackgroundActivityAllowed();
     if (!mounted || _completed) return;
     if (!granted) {
-      setState(() => _busy = false);
-      _showDeniedSnackBar(
-        'Choose unrestricted background activity, then return to One One.',
-      );
+      _completed = true;
+      await widget.onComplete();
       return;
     }
 
@@ -154,13 +185,15 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
   }
 
   void _showDeniedSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
   Widget build(BuildContext context) {
+    final visual = _stepVisuals[_step]!;
+
     return Scaffold(
       backgroundColor: const Color(0xff000000),
       body: SafeArea(
@@ -168,7 +201,7 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
           padding: EdgeInsets.symmetric(horizontal: 24.w),
           child: Column(
             children: [
-              SizedBox(height: 100.h),
+              SizedBox(height: 64.h),
               Text(
                 'let\'s get those\nover with:',
                 textAlign: TextAlign.center,
@@ -180,7 +213,31 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
                   letterSpacing: -0.6,
                 ),
               ),
-              const Spacer(),
+              Expanded(
+                child: Center(
+                  child: AnimatedSwitcher(
+                    duration: _stageTransitionDuration,
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    transitionBuilder: (child, animation) {
+                      return FadeTransition(
+                        opacity: animation,
+                        child: ScaleTransition(
+                          scale: Tween<double>(
+                            begin: 0.92,
+                            end: 1,
+                          ).animate(animation),
+                          child: child,
+                        ),
+                      );
+                    },
+                    child: _StepHero(
+                      key: ValueKey(_step),
+                      visual: visual,
+                    ),
+                  ),
+                ),
+              ),
               AnimatedSwitcher(
                 duration: _stageTransitionDuration,
                 switchInCurve: Curves.easeOutCubic,
@@ -200,32 +257,32 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
                 },
                 child: switch (_step) {
                   _SetupStep.mic => _PermissionCard(
-                      key: const ValueKey('mic-card'),
-                      iconColor: const Color(0xffffb020),
-                      icon: Icons.mic_rounded,
-                      title: 'mic',
-                      subtitle: 'so your friends can hear you\nwhen you talk...',
-                      checked: _micGranted,
-                      onTap: _requestMicPermission,
-                    ),
+                    key: const ValueKey('mic-card'),
+                    iconColor: visual.iconColor,
+                    icon: visual.icon,
+                    title: 'mic',
+                    subtitle: 'so your friends can hear you\nwhen you talk...',
+                    checked: _micGranted,
+                    onTap: _requestMicPermission,
+                  ),
                   _SetupStep.notification => _PermissionCard(
-                      key: const ValueKey('notification-card'),
-                      iconColor: const Color(0xffff5a5f),
-                      icon: Icons.notifications_rounded,
-                      title: 'notifications',
-                      subtitle: 'know when your friends are\ntalking to you',
-                      checked: _notificationGranted,
-                      onTap: _requestNotificationPermission,
-                    ),
+                    key: const ValueKey('notification-card'),
+                    iconColor: visual.iconColor,
+                    icon: visual.icon,
+                    title: 'notifications',
+                    subtitle: 'know when your friends are\ntalking to you',
+                    checked: _notificationGranted,
+                    onTap: _requestNotificationPermission,
+                  ),
                   _SetupStep.background => _PermissionCard(
-                      key: const ValueKey('background-card'),
-                      iconColor: const Color(0xff4c8dff),
-                      icon: Icons.battery_saver_rounded,
-                      title: 'background activity',
-                      subtitle: 'receive nudges when one one\nisn\'t open',
-                      checked: _backgroundGranted,
-                      onTap: _requestBackgroundPermission,
-                    ),
+                    key: const ValueKey('background-card'),
+                    iconColor: visual.iconColor,
+                    icon: visual.icon,
+                    title: 'background activity',
+                    subtitle: 'receive nudges when one one\nisn\'t open',
+                    checked: _backgroundGranted,
+                    onTap: _requestBackgroundPermission,
+                  ),
                 },
               ),
               SizedBox(height: 28.h),
@@ -242,6 +299,52 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// The big animated centerpiece for the current onboarding step: a looping,
+/// playful Lottie animation (voice waves / signal bursts / radio pulses)
+/// with a colored icon badge grounding it in the permission being requested.
+class _StepHero extends StatelessWidget {
+  const _StepHero({super.key, required this.visual});
+
+  final _StepVisual visual;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = 250.w;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Lottie.asset(
+            visual.lottieAsset,
+            width: size,
+            height: size,
+            fit: BoxFit.contain,
+            repeat: true,
+          ),
+          Container(
+            width: 86.w,
+            height: 86.w,
+            decoration: BoxDecoration(
+              color: visual.iconColor,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: visual.iconColor.withValues(alpha: 0.45),
+                  blurRadius: 28,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Icon(visual.icon, color: Colors.white, size: 38.sp),
+          ),
+        ],
       ),
     );
   }

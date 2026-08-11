@@ -67,11 +67,12 @@
         }
       }
     },
-    "handRaises": {
+    "groupMessages": {
       "$groupId": {
         ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
-        "$userId": {
-          ".write": "auth != null && auth.uid == $userId && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'"
+        ".indexOn": ["createdAt"],
+        "$messageId": {
+          ".write": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active' && ((!data.exists() && newData.child('senderUserId').val() == auth.uid) || (data.exists() && data.child('senderUserId').val() == auth.uid))"
         }
       }
     },
@@ -95,10 +96,19 @@
         ".write": false
       }
     },
+    "emojiBursts": {
+      "$groupId": {
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
+        ".indexOn": ["createdAt"],
+        "$burstId": {
+          ".write": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active' && ((!data.exists() && newData.child('senderUserId').val() == auth.uid) || (data.exists() && data.child('senderUserId').val() == auth.uid))"
+        }
+      }
+    },
     "notificationDeliveries": {
       "$notificationEventId": {
-        ".read": false,
-        ".write": false
+        ".read": "auth != null && (data.child('senderUserId').val() == auth.uid || data.child('recipientUserId').val() == auth.uid)",
+        ".write": "auth != null && newData.child('recipientUserId').val() == auth.uid"
       }
     },
     "voiceNudges": {

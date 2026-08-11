@@ -12,6 +12,8 @@ class AndroidVoiceNudgeBridge {
       StreamController<void>.broadcast();
   static final StreamController<void> _registrationSignals =
       StreamController<void>.broadcast();
+  static final StreamController<NudgeDeliveryResult> _deliveryResults =
+      StreamController<NudgeDeliveryResult>.broadcast();
   static bool _handlerInstalled = false;
 
   static Stream<void> get actionSignals {
@@ -24,6 +26,14 @@ class AndroidVoiceNudgeBridge {
     return _registrationSignals.stream;
   }
 
+  /// Real-time played/failed outcomes for ring + voice nudges this device
+  /// sent, pushed the instant the receiver's device genuinely starts (or
+  /// fails to start) playback. Only fires while the app is foregrounded.
+  static Stream<NudgeDeliveryResult> get deliveryResults {
+    _installHandler();
+    return _deliveryResults.stream;
+  }
+
   static void _installHandler() {
     if (_handlerInstalled || !Platform.isAndroid) return;
     _handlerInstalled = true;
@@ -33,6 +43,14 @@ class AndroidVoiceNudgeBridge {
       } else if (call.method == 'onFcmRegistrationRenewed') {
         debugPrint('[OneOneFCM][DART-06] Native registration renewed');
         _registrationSignals.add(null);
+      } else if (call.method == 'onNudgeDeliveryResult') {
+        final raw = call.arguments;
+        if (raw is Map) {
+          final result = NudgeDeliveryResult.tryParse(
+            raw.map((key, value) => MapEntry(key.toString(), value)),
+          );
+          if (result != null) _deliveryResults.add(result);
+        }
       }
     });
   }
@@ -88,6 +106,40 @@ class AndroidVoiceNudgeBridge {
     if (raw == null) return null;
     return NudgeNotificationAction.tryParse(raw);
   }
+
+  /// B5: Schedule a 10-minute expiry alarm on the sender's device after a
+  /// nudge is successfully dispatched.  The native MessagingService
+  /// automatically cancels it when a delivery result or accept response
+  /// arrives; this just starts the countdown.
+  Future<void> scheduleSenderNudgeExpiry({
+    required String eventId,
+    required String recipientName,
+    required String recipientUserId,
+  }) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<void>('scheduleSenderNudgeExpiry', {
+        'eventId': eventId,
+        'recipientName': recipientName,
+        'recipientUserId': recipientUserId,
+      });
+    } catch (_) {
+      // Non-fatal — expiry is best-effort.
+    }
+  }
+
+  Future<void> cancelSenderNudgeExpiry(String eventId) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<void>('cancelSenderNudgeExpiry', eventId);
+    } catch (_) {
+      // Non-fatal.
+    }
+  }
+
+  /// Shared instance so multiple widgets can call platform methods without
+  /// re-creating the channel handler.
+  static final AndroidVoiceNudgeBridge shared = AndroidVoiceNudgeBridge();
 }
 
 class NudgeNotificationAction {
@@ -114,6 +166,70 @@ class NudgeNotificationAction {
       action: action,
       eventId: eventId,
       groupId: groupId,
+    );
+  }
+}
+
+/// Outcome of a ring/voice nudge this device sent, reported once the
+/// receiver's device genuinely started (or failed to start) playback.
+class NudgeDeliveryResult {
+  const NudgeDeliveryResult({
+    required this.eventId,
+    required this.status,
+    this.reason,
+    this.recipientName,
+    this.recipientUserId,
+    this.ambientNoiseLevel,
+  });
+
+  final String eventId;
+
+  /// `played` or `failed`.
+  final String status;
+
+  /// Machine-readable reason code (e.g. `receiver_volume_muted`) when known.
+  final String? reason;
+  final String? recipientName;
+  final String? recipientUserId;
+
+  /// B7: `high`, `medium`, `low`, or null if not sampled.
+  final String? ambientNoiseLevel;
+
+  bool get played => status == 'played';
+
+  /// Human-readable description of the ambient noise level for UI display.
+  String? get ambientNoiseLabel {
+    return switch (ambientNoiseLevel) {
+      'high' => '🔊 surroundings are loud',
+      'medium' => '🔉 moderate noise',
+      'low' => '🔈 quiet surroundings',
+      _ => null,
+    };
+  }
+
+  static NudgeDeliveryResult? tryParse(Map<String, dynamic> raw) {
+    final eventId = raw['eventId']?.toString().trim() ?? '';
+    final status = raw['status']?.toString().trim() ?? '';
+    if (eventId.isEmpty || !const {'played', 'failed'}.contains(status)) {
+      return null;
+    }
+    return NudgeDeliveryResult(
+      eventId: eventId,
+      status: status,
+      reason: raw['reason']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['reason'].toString().trim(),
+      recipientName: raw['recipientName']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['recipientName'].toString().trim(),
+      recipientUserId:
+          raw['recipientUserId']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['recipientUserId'].toString().trim(),
+      ambientNoiseLevel:
+          raw['ambientNoiseLevel']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['ambientNoiseLevel'].toString().trim(),
     );
   }
 }

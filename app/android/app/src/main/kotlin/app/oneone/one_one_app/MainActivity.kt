@@ -28,12 +28,13 @@ class MainActivity : FlutterFragmentActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         VoiceNudgeNotifications.ensureChannels(this)
-        logFirebaseRuntimeConfiguration()
+        if (BuildConfig.DEBUG) logFirebaseRuntimeConfiguration()
         voiceNudgeChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             VoiceNudgeContract.flutterChannel,
         )
         NudgeActionDispatcher.attach(voiceNudgeChannel)
+        NudgeDeliveryResultDispatcher.attach(voiceNudgeChannel)
         captureNudgeAction(intent)
         inviteLinkChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -128,6 +129,41 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(NudgeActionStore.take(this)?.toMap())
                 }
 
+                // B5: Sender schedules a 10-min expiry alarm for a nudge they
+                // just sent. Called from Flutter after the backend accepts the
+                // send. Cancelled automatically when a delivery result or
+                // response arrives.
+                "scheduleSenderNudgeExpiry" -> {
+                    val args = call.arguments as? Map<*, *> ?: return@setMethodCallHandler
+                    val eventId = args["eventId"]?.toString() ?: return@setMethodCallHandler
+                    val recipientName = args["recipientName"]?.toString() ?: "Your friend"
+                    val recipientUserId = args["recipientUserId"]?.toString() ?: return@setMethodCallHandler
+                    NudgeExpiryTracker.scheduleExpiry(
+                        context = this,
+                        eventId = eventId,
+                        senderName = recipientName,
+                        recipientUserId = recipientUserId,
+                        groupId = null,
+                        recipientName = "You (sender)",
+                        isSenderSide = true,
+                    )
+                    Log.i(
+                        VoiceNudgeDiagnostics.tag,
+                        "[NUDGE-EXPIRY-02] Sender scheduled expiry eventSuffix=${eventId.takeLast(6)}",
+                    )
+                    result.success(null)
+                }
+
+                // Cancel a sender-side expiry alarm — the nudge was played or
+                // accepted so the countdown is no longer needed.
+                "cancelSenderNudgeExpiry" -> {
+                    val eventId = call.arguments?.toString()
+                    if (eventId != null) {
+                        NudgeExpiryTracker.cancelExpiry(this, eventId)
+                    }
+                    result.success(null)
+                }
+
                 else -> result.notImplemented()
             }
         }
@@ -206,6 +242,7 @@ class MainActivity : FlutterFragmentActivity() {
         }
         if (::voiceNudgeChannel.isInitialized) {
             NudgeActionDispatcher.detach(voiceNudgeChannel)
+            NudgeDeliveryResultDispatcher.detach(voiceNudgeChannel)
         }
         if (::voicePipChannel.isInitialized) {
             VoicePipActionDispatcher.detach(voicePipChannel)
@@ -268,6 +305,8 @@ class MainActivity : FlutterFragmentActivity() {
         (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
             .cancel(notificationId)
         VoiceNudgeAudioCache.delete(this, eventId)
+        // B5: Cancel the 10-minute expiry alarm since the user took action.
+        NudgeExpiryTracker.cancelExpiry(this, eventId)
         NudgeActionStore.save(this, PendingNudgeAction(action, eventId, groupId))
         NudgeActionDispatcher.signal()
         Log.i(

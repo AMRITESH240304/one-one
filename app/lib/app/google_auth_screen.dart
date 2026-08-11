@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
@@ -5,7 +7,14 @@ import '../core/firebase/crashlytics_service.dart';
 import '../features/identity/data/identity_repository.dart';
 
 class GoogleAuthScreen extends StatefulWidget {
-  const GoogleAuthScreen({super.key});
+  const GoogleAuthScreen({super.key, this.initializing = false});
+
+  /// When true, renders the exact same layout as the interactive welcome
+  /// screen but with the button in a disabled "loading" state and taps
+  /// ignored. Used while Firebase is still initializing so the very first
+  /// frame is pixel-identical to the real welcome screen — nothing shifts
+  /// or jitters once initialization completes and the real screen swaps in.
+  final bool initializing;
 
   @override
   State<GoogleAuthScreen> createState() => _GoogleAuthScreenState();
@@ -24,6 +33,10 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
 
   Future<void> _continueWithGoogle() async {
     if (_isSigningIn) return;
+    // IMMEDIATELY replace the welcome UI with the splash screen so the user
+    // sees an instant transition rather than waiting on a button spinner.
+    // The Firebase auth stream will swap this screen out for StartupGateScreen
+    // once sign-in completes.
     setState(() {
       _isSigningIn = true;
       _errorMessage = null;
@@ -31,7 +44,9 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
 
     try {
       await _identityRepository.signInWithGoogle();
-      // The root Firebase auth stream advances to onboarding.
+      // On success the root Firebase auth stream advances to onboarding.
+      // Don't touch _isSigningIn – leave this screen in its splash state
+      // until the StreamBuilder replaces it.
     } catch (error, stack) {
       final message = error.toString();
       final cancelled =
@@ -61,6 +76,13 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Once sign-in is in flight, show the splash / loading screen immediately.
+    // This matches the StartupGateScreen loading state so the transition is
+    // seamless when the StreamBuilder swaps widgets.
+    if (_isSigningIn) {
+      return const _SplashGate();
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xffF8BE03),
       body: SafeArea(
@@ -69,7 +91,13 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
           child: Column(
             children: [
               const Spacer(flex: 2),
-              Image.asset('assets/logo.png', width: 172.w, fit: BoxFit.contain),
+              // Logo — static, no animation. Rendered in its final position
+              // from the very first frame.
+              Image.asset(
+                'assets/logo.png',
+                width: 172.w,
+                fit: BoxFit.contain,
+              ),
               SizedBox(height: 36.h),
               Text(
                 'Welcome to One One',
@@ -103,43 +131,10 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
                 ),
                 SizedBox(height: 14.h),
               ],
-              SizedBox(
-                width: double.infinity,
-                height: 54.h,
-                child: ElevatedButton.icon(
-                  onPressed: _isSigningIn ? null : _continueWithGoogle,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: const Color(0xff384047),
-                    disabledBackgroundColor: Colors.white70,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(27.r),
-                    ),
-                  ),
-                  icon: _isSigningIn
-                      ? SizedBox.square(
-                          dimension: 19.w,
-                          child: const CircularProgressIndicator(
-                            strokeWidth: 2.3,
-                            color: Color(0xff384047),
-                          ),
-                        )
-                      : Text(
-                          'G',
-                          style: TextStyle(
-                            fontSize: 19.sp,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                  label: Text(
-                    _isSigningIn ? 'Signing in…' : 'Continue with Google',
-                    style: TextStyle(
-                      fontSize: 15.sp,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
+              _GoogleSignInButton(
+                busy: widget.initializing,
+                busyLabel: widget.initializing ? 'Loading…' : 'Signing in…',
+                onTap: widget.initializing ? () {} : _continueWithGoogle,
               ),
               SizedBox(height: 22.h),
               Text(
@@ -156,4 +151,159 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
       ),
     );
   }
+}
+
+/// Shown immediately when the user taps "Continue with Google", before the
+/// Firebase auth stream has had time to fire. Visually identical to the
+/// [StartupGateScreen] loading state so the transition is seamless.
+class _SplashGate extends StatelessWidget {
+  const _SplashGate();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xffF8BE03),
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: 28.w),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Image.asset(
+                  'assets/logo.png',
+                  width: 190.w,
+                  fit: BoxFit.contain,
+                ),
+                SizedBox(height: 28.h),
+                const _SplashPulseDots(color: Color(0xff384047)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Three softly breathing dots — same design used by StartupGateScreen so the
+/// splash-to-splash transition is invisible to the user.
+class _SplashPulseDots extends StatefulWidget {
+  const _SplashPulseDots({required this.color});
+
+  final Color color;
+
+  @override
+  State<_SplashPulseDots> createState() => _SplashPulseDotsState();
+}
+
+class _SplashPulseDotsState extends State<_SplashPulseDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: List.generate(3, (index) {
+            final phase = (_controller.value - index * 0.2) % 1.0;
+            final scale =
+                0.55 + 0.45 * (0.5 - 0.5 * math.cos(phase * 2 * math.pi));
+            return Padding(
+              padding: EdgeInsets.symmetric(horizontal: 4.w),
+              child: Transform.scale(
+                scale: scale,
+                child: Container(
+                  width: 8.w,
+                  height: 8.w,
+                  decoration: BoxDecoration(
+                    color: widget.color,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+            );
+          }),
+        );
+      },
+    );
+  }
+}
+
+class _GoogleSignInButton extends StatefulWidget {
+  const _GoogleSignInButton({
+    required this.busy,
+    required this.onTap,
+    this.busyLabel = 'Signing in…',
+  });
+  final bool busy;
+  final VoidCallback onTap;
+  final String busyLabel;
+  @override
+  State<_GoogleSignInButton> createState() => _GoogleSignInButtonState();
+}
+
+class _GoogleSignInButtonState extends State<_GoogleSignInButton> {
+  bool _pressed = false;
+  @override
+  Widget build(BuildContext context) => AnimatedScale(
+    scale: _pressed ? .96 : 1,
+    duration: const Duration(milliseconds: 100),
+    child: Material(
+      color: widget.busy ? Colors.white70 : Colors.white,
+      borderRadius: BorderRadius.circular(27.r),
+      child: InkWell(
+        onTap: widget.busy ? null : widget.onTap,
+        onTapDown: widget.busy ? null : (_) => setState(() => _pressed = true),
+        onTapUp: widget.busy ? null : (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        borderRadius: BorderRadius.circular(27.r),
+        child: SizedBox(
+          width: double.infinity,
+          height: 54.h,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              widget.busy
+                  ? SizedBox.square(
+                      dimension: 19.w,
+                      child: const CircularProgressIndicator(
+                        strokeWidth: 2.3,
+                        color: Color(0xff384047),
+                      ),
+                    )
+                  : Text(
+                      'G',
+                      style: TextStyle(
+                        fontSize: 19.sp,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+              SizedBox(width: 10.w),
+              Text(
+                widget.busy ? widget.busyLabel : 'Continue with Google',
+                style: TextStyle(
+                  color: const Color(0xff384047),
+                  fontSize: 15.sp,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }

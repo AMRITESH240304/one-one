@@ -43,6 +43,11 @@ export type GoneOfflineInput = {
   reason: GoneOfflineReason;
 };
 
+export type ChatMessageInput = {
+  groupId: string;
+  senderUserId: string;
+};
+
 type RecipientDevice = {
   userId: string;
   deviceId: string;
@@ -59,19 +64,19 @@ const goneOfflineCopy: Record<
   { title: string; body: string }
 > = {
   peer_left: {
-    title: "You're offline",
+    title: "😴 You're offline",
     body: "The other participant has gone offline. You are now offline."
   },
   inactivity: {
-    title: "You're offline",
-    body: "Room closed due to inactivity. Send a nudge to go online again."
+    title: "😴 You're offline",
+    body: "Room closed due to inactivity. Send a nudge to go online again 👋"
   },
   daily_usage_cap: {
-    title: "You're offline",
-    body: "Daily usage limit reached. You can go online again tomorrow."
+    title: "😴 You're offline",
+    body: "Daily usage limit reached. You can go online again tomorrow 🌙"
   },
   network_loss: {
-    title: "You're offline",
+    title: "😴 You're offline",
     body: "Connection lost. You are now offline."
   }
 };
@@ -142,8 +147,8 @@ export async function sendFriendLiveNotification(input: FriendLiveInput) {
 
   const pushResult = await sendPushToTokens({
     tokens: recipientDevices.map((device) => device.fcmToken),
-    title: `${senderName} is live`,
-    body: "Tap to open One One",
+    title: `🟢 ${senderName} is live`,
+    body: "Tap to open One One 🎙️",
     data: {
       type: "friend_live",
       groupId: input.groupId,
@@ -271,6 +276,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
     targetUserIds: recipientUserIds
   });
   const senderName = await readDisplayName(input.senderUserId);
+  const senderPhotoUrl = await readProfilePhotoUrl(input.senderUserId);
   const recipientDevices = await collectRecipientDevices(recipientUserIds);
   const notificationEventId = await createNotificationEvent({
     groupId: input.groupId,
@@ -292,6 +298,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
         groupId: input.groupId,
         senderUserId: input.senderUserId,
         senderName,
+        ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         responseUrl: `${baseUrl}/v1/groups/${input.groupId}/nudges/${notificationEventId}/respond`,
         deepLink: `walkie://group/${input.groupId}`
       }
@@ -316,6 +323,56 @@ export async function sendNudgeNotification(input: NudgeInput) {
     notificationEventId,
     eventType: "nudge",
     rateLimited: false,
+    recipientUsers: recipientUserIds.length,
+    targetDevices: recipientDevices.length,
+    sent: pushResult.successCount,
+    failed: pushResult.failureCount,
+    skipped: recipientUserIds.length === 0 ? 1 : 0
+  };
+}
+
+/** Fans out a lightweight "New message in [group]" push after a chat bubble
+ * (predefined or custom) has already been written to
+ * `groupMessages/{groupId}/{messageId}` by the client. Deliberately doesn't
+ * preview the message text in the push payload — the RTDB write is the
+ * source of truth for in-app rendering, this is just a nudge to reopen the
+ * app. Not rate-limited/deduped like nudges: every send is a distinct,
+ * user-initiated message. */
+export async function sendChatMessageNotification(input: ChatMessageInput) {
+  await requireActiveUser(input.senderUserId);
+  const group = await requireActiveGroup(input.groupId);
+  await requireActiveGroupMember(input.groupId, input.senderUserId);
+
+  const senderName = await readDisplayName(input.senderUserId);
+  const recipientUserIds = await activeRecipientUserIds(input.groupId, input.senderUserId);
+  const recipientDevices = await collectRecipientDevices(recipientUserIds);
+  const notificationEventId = await createNotificationEvent({
+    groupId: input.groupId,
+    senderUserId: input.senderUserId,
+    eventType: "chat_message",
+    targetScope: "all_friends",
+    targetUserIds: recipientUserIds,
+    createdAt: nowSeconds(),
+    metadata: {}
+  });
+
+  const pushResult = await sendPushToTokens({
+    tokens: recipientDevices.map((device) => device.fcmToken),
+    title: `💬 New message in ${group.name}`,
+    body: `${senderName} sent a message ✨`,
+    data: {
+      type: "chat_message",
+      groupId: input.groupId,
+      senderUserId: input.senderUserId,
+      deepLink: `walkie://group/${input.groupId}`
+    }
+  });
+
+  await writeDeliveries(notificationEventId, recipientDevices, pushResult);
+
+  return {
+    notificationEventId,
+    eventType: "chat_message" as const,
     recipientUsers: recipientUserIds.length,
     targetDevices: recipientDevices.length,
     sent: pushResult.successCount,
@@ -448,6 +505,14 @@ async function writeStatusEvent(
 async function readDisplayName(userId: string) {
   const snapshot = await getRealtimeDatabase().ref(`users/${userId}/displayName`).get();
   return snapshot.val()?.toString() || "Someone";
+}
+
+async function readProfilePhotoUrl(userId: string): Promise<string | undefined> {
+  const snapshot = await getRealtimeDatabase()
+    .ref(`users/${userId}/profilePhotoUrl`)
+    .get();
+  const url = snapshot.val()?.toString()?.trim();
+  return url || undefined;
 }
 
 async function findRecentNotificationEvent(input: {

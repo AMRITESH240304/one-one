@@ -19,47 +19,61 @@ import '../features/service_status/service_status_gate.dart';
 class OneOneApp extends StatelessWidget {
   const OneOneApp({super.key});
 
+  ThemeData _themeFor(Color seedColor) {
+    return ThemeData(
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: seedColor,
+        brightness: Brightness.dark,
+      ),
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: const Color(0xff101010),
+      canvasColor: const Color(0xff101010),
+      fontFamily: GoogleFonts.poppins().fontFamily,
+      textTheme: GoogleFonts.poppinsTextTheme(
+        ThemeData(brightness: Brightness.dark).textTheme,
+      ),
+      primaryTextTheme: GoogleFonts.poppinsTextTheme(
+        ThemeData(brightness: Brightness.dark).textTheme,
+      ),
+      useMaterial3: true,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<String>(
-      valueListenable: AccentThemeController.accentKey,
-      builder: (context, accentKey, _) {
-        final seedColor = accentColorForKey(accentKey);
-
-        return MaterialApp(
-          title: 'One One',
-          debugShowCheckedModeBanner: false,
-          navigatorObservers: [AnalyticsService.observer],
-          builder: (context, child) {
-            return ScreenUtilInit(
-              designSize: const Size(393, 873),
-              minTextAdapt: true,
-              splitScreenMode: true,
-              child: child,
+    // MaterialApp must NOT live inside a ValueListenableBuilder that rebuilds
+    // on accent changes — recreating MaterialApp tears down the navigator
+    // element tree while screens are still mid setState/pop after save and
+    // trips '_dependents.isEmpty'. Accent is applied via Theme in `builder`.
+    return MaterialApp(
+      title: 'One One',
+      debugShowCheckedModeBanner: false,
+      navigatorObservers: [AnalyticsService.observer],
+      routes: {
+        '/auth': (_) => const WithForegroundTask(
+          child: _AuthSessionLifecycle(child: _FirebaseGate()),
+        ),
+      },
+      theme: _themeFor(accentColorForKey(AccentThemeController.accentKey.value)),
+      builder: (context, child) {
+        return ValueListenableBuilder<String>(
+          valueListenable: AccentThemeController.accentKey,
+          builder: (context, accentKey, _) {
+            return Theme(
+              data: _themeFor(accentColorForKey(accentKey)),
+              child: ScreenUtilInit(
+                designSize: const Size(393, 873),
+                minTextAdapt: true,
+                splitScreenMode: true,
+                child: child,
+              ),
             );
           },
-          theme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: seedColor,
-              brightness: Brightness.dark,
-            ),
-            brightness: Brightness.dark,
-            scaffoldBackgroundColor: const Color(0xff101010),
-            canvasColor: const Color(0xff101010),
-            fontFamily: GoogleFonts.poppins().fontFamily,
-            textTheme: GoogleFonts.poppinsTextTheme(
-              ThemeData(brightness: Brightness.dark).textTheme,
-            ),
-            primaryTextTheme: GoogleFonts.poppinsTextTheme(
-              ThemeData(brightness: Brightness.dark).textTheme,
-            ),
-            useMaterial3: true,
-          ),
-          home: const WithForegroundTask(
-            child: _AuthSessionLifecycle(child: _FirebaseGate()),
-          ),
         );
       },
+      home: const WithForegroundTask(
+        child: _AuthSessionLifecycle(child: _FirebaseGate()),
+      ),
     );
   }
 }
@@ -135,18 +149,11 @@ class _FirebaseGateState extends State<_FirebaseGate> {
       future: _firebaseInit,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          return Scaffold(
-            backgroundColor: const Color(0xffF8BE03),
-            body: SafeArea(
-              child: Center(
-                child: Image.asset(
-                  'assets/logo.png',
-                  width: 190.w,
-                  fit: BoxFit.contain,
-                ),
-              ),
-            ),
-          );
+          // Pixel-identical to GoogleAuthScreen's real layout (just with the
+          // button disabled) so there is zero visual shift — no jitter —
+          // once Firebase finishes initializing and the real screen swaps
+          // in underneath the StreamBuilder.
+          return const GoogleAuthScreen(initializing: true);
         }
 
         if (snapshot.hasError) {

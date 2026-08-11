@@ -337,7 +337,8 @@ export async function listGroupMembers(input: GroupMemberActionInput) {
             profilePhotoUrl:
               user.child("profilePhotoUrl").val()?.toString() ?? null,
             profilePhotoBase64:
-              user.child("profilePhotoBase64").val()?.toString() ?? null
+              user.child("profilePhotoBase64").val()?.toString() ?? null,
+            avatarAsset: user.child("avatarAsset").val()?.toString() ?? null
           };
         }
       )
@@ -398,7 +399,7 @@ export async function removeGroupMember(input: RemoveGroupMemberInput) {
   await cleanupMemberState(input.groupId, input.memberUserId, "removed_by_owner");
   await notifyUsers(
     [input.memberUserId],
-    "Removed from group",
+    "👋 Removed from group",
     `You were removed from ${group.name}.`,
     { type: "group_removed", groupId: input.groupId }
   );
@@ -517,7 +518,7 @@ export async function deleteGroup(input: GroupMemberActionInput) {
       [`groupMembers/${input.groupId}`]: null,
       [`livekitRooms/${input.groupId}`]: null,
       [`memberAvailability/${input.groupId}`]: null,
-      [`handRaises/${input.groupId}`]: null,
+      [`groupMessages/${input.groupId}`]: null,
       [`talkLocks/${input.groupId}`]: null,
       [`talkSessions/${input.groupId}`]: null,
       [`statusEvents/${input.groupId}`]: null,
@@ -532,7 +533,7 @@ export async function deleteGroup(input: GroupMemberActionInput) {
     await db.ref().update(updates);
     await notifyUsers(
       memberUserIds,
-      "Group deleted",
+      "🗑️ Group deleted",
       `${group.name} was permanently deleted.`,
       { type: "group_deleted", groupId: input.groupId }
     );
@@ -792,7 +793,6 @@ async function cleanupMemberState(groupId: string, userId: string, reason: strin
   const updates: Record<string, unknown> = {
     [`userGroups/${userId}/${groupId}`]: null,
     [`memberAvailability/${groupId}/${userId}`]: null,
-    [`handRaises/${groupId}/${userId}`]: null,
     [`dailyUsage/${groupId}/${userId}`]: null
   };
 

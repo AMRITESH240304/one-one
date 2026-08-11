@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -87,28 +85,24 @@ class _StartupGateScreenState extends State<StartupGateScreen>
       if (!mounted) return;
       _readySession = session;
 
-      final locallyCompleted = await _hasCompletedSetup(session.userId);
-      Future<List<GroupSummary>>? groupsPrefetch;
-      if (locallyCompleted) {
-        groupsPrefetch = _groupRepository.loadGroupsForUser(session.userId);
-      }
-      final setupCompleted =
-          locallyCompleted || await _identityRepository.hasCompletedSetup();
+      final isReturningUser = await _identityRepository.hasCompletedSetup();
       logStartupMilestone('setup state resolved', stopwatch);
       if (!mounted) return;
 
-      if (setupCompleted) {
-        if (!locallyCompleted) {
-          groupsPrefetch = _groupRepository.loadGroupsForUser(session.userId);
-          if (!await _requiredPermissionsGranted()) {
-            if (!mounted) return;
-            setState(() {
-              _nextScreen = SetupPermissionScreen(
-                onComplete: () => _finishReturningSetup(session),
-              );
-            });
-            return;
-          }
+      // Always pre-fetch groups in parallel regardless of setup state.
+      final groupsPrefetch = _groupRepository.loadGroupsForUser(session.userId);
+
+      if (isReturningUser) {
+        // On every launch, verify critical permissions are still granted.
+        // Users can revoke them between sessions via system settings.
+        if (!await _requiredPermissionsGranted()) {
+          if (!mounted) return;
+          setState(() {
+            _nextScreen = SetupPermissionScreen(
+              onComplete: () => _finishReturningSetup(session),
+            );
+          });
+          return;
         }
         await _markSetupComplete(session.userId);
         await _presentHomeScreen(
@@ -167,16 +161,13 @@ class _StartupGateScreenState extends State<StartupGateScreen>
     }
   }
 
+  /// Returns true when all permissions that the app needs to function are
+  /// granted.  Microphone is mandatory; notification and battery-optimisation
+  /// are strongly recommended but won't block launch — the red dot on the
+  /// home screen will still flag them.
   Future<bool> _requiredPermissionsGranted() async {
-    final mic = await Permission.microphone.isGranted;
-    final notifications = await Permission.notification.isGranted;
-    if (!mic || !notifications) return false;
-    if (!Platform.isAndroid) return true;
-    try {
-      return await FlutterForegroundTask.isIgnoringBatteryOptimizations;
-    } catch (_) {
-      return false;
-    }
+    // Microphone is non-negotiable for voice sessions.
+    return await Permission.microphone.isGranted;
   }
 
   Future<void> _finishReturningSetup(IdentitySession session) async {
@@ -225,11 +216,6 @@ class _StartupGateScreenState extends State<StartupGateScreen>
 
     logStartupMilestone('home prefetch complete', phase);
     if (!mounted) return;
-
-    if (bootstrap.hasGroups) {
-      await bootstrap.precacheMemberPhotos(context);
-      if (!mounted) return;
-    }
 
     if (!bootstrap.hasGroups && bootstrap.loadError == null) {
       setState(() {

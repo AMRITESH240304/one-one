@@ -58,17 +58,12 @@ class NudgeRepository {
     required NudgeTarget target,
     required int durationSeconds,
   }) async {
-    if (durationSeconds != 3 &&
-        durationSeconds != 5 &&
-        durationSeconds != 10) {
+    if (durationSeconds != 3 && durationSeconds != 5 && durationSeconds != 10) {
       throw ArgumentError.value(durationSeconds, 'durationSeconds');
     }
     final response = await _apiClient.postJson(
       '/v1/groups/$groupId/ring-nudges',
-      {
-        ...target.json,
-        'durationSeconds': durationSeconds,
-      },
+      {...target.json, 'durationSeconds': durationSeconds},
     );
     final result = _requireAcceptedDelivery(response);
     await AnalyticsService.logNudgeSent(
@@ -96,10 +91,7 @@ class NudgeRepository {
     try {
       final upload = await _apiClient.postJson(
         '/v1/groups/$groupId/voice-nudges/uploads',
-        {
-          ...target.json,
-          'durationMs': durationMs,
-        },
+        {...target.json, 'durationMs': durationMs},
       );
       final eventId = upload['notificationEventId']?.toString();
       final uploadUrl = upload['uploadUrl']?.toString();
@@ -188,9 +180,7 @@ class NudgeRepository {
     if (!const {'accept', 'decline', 'snooze'}.contains(action)) {
       throw ArgumentError.value(action, 'action');
     }
-    if (action == 'snooze' &&
-        snoozeMinutes != 5 &&
-        snoozeMinutes != 15) {
+    if (action == 'snooze' && snoozeMinutes != 5 && snoozeMinutes != 15) {
       throw ArgumentError.value(snoozeMinutes, 'snoozeMinutes');
     }
     final response = await _apiClient.postJson(
@@ -208,9 +198,7 @@ class NudgeRepository {
     return response;
   }
 
-  Map<String, dynamic> _requireAcceptedDelivery(
-    Map<String, dynamic> response,
-  ) {
+  Map<String, dynamic> _requireAcceptedDelivery(Map<String, dynamic> response) {
     final recipientUsers = _readCount(response['recipientUsers']);
     final targetDevices = _readCount(response['targetDevices']);
     final sent = _readCount(response['sent']);

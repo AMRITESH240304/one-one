@@ -22,6 +22,7 @@ import '../models/app_user_profile.dart';
 import '../models/identity_session.dart';
 import '../models/user_device_record.dart';
 import '../models/user_settings_record.dart';
+import 'avatar_assets.dart';
 import 'device_identity_store.dart';
 
 class IdentityRepository {
@@ -91,6 +92,7 @@ class IdentityRepository {
         lastSeenAt: now,
         profilePhotoUrl: _cachedSession?.user.profilePhotoUrl,
         profilePhotoBase64: _cachedSession?.user.profilePhotoBase64,
+        avatarAsset: _cachedSession?.user.avatarAsset,
       ),
       device: UserDeviceRecord(
         deviceId: localDevice.deviceId,
@@ -318,6 +320,11 @@ class IdentityRepository {
       throw StateError('Cannot update profile photo before sign-in.');
     }
 
+    unawaited(
+      CrashlyticsService.log(
+        'identity_update_profile_photo_start uid=${user.uid}',
+      ),
+    );
     final previousPhotoUrl = _cachedSession?.user.profilePhotoUrl;
     final uploadedPhotoUrl = await _profilePhotoStorage.uploadProfilePhoto(
       userId: user.uid,
@@ -328,9 +335,15 @@ class IdentityRepository {
     await _database.ref('users/${user.uid}').update({
       'profilePhotoUrl': photoUrl,
       'profilePhotoBase64': null,
+      'avatarAsset': null,
       'updatedAt': now,
       'lastSeenAt': now,
     });
+    unawaited(
+      CrashlyticsService.log(
+        'identity_update_profile_photo_rtdb_ok photoUrl=$photoUrl',
+      ),
+    );
 
     final session = _cachedSession;
     if (session != null) {
@@ -338,6 +351,7 @@ class IdentityRepository {
         user: session.user.copyWith(
           profilePhotoUrl: photoUrl,
           clearProfilePhotoBase64: true,
+          clearAvatarAsset: true,
           updatedAt: now,
           lastSeenAt: now,
         ),
@@ -347,11 +361,69 @@ class IdentityRepository {
       await _evictProfilePhoto(previousPhotoUrl);
       await _evictProfilePhoto(uploadedPhotoUrl);
       _publishSession(updatedSession);
+      unawaited(
+        CrashlyticsService.log(
+          'identity_update_profile_photo_session_published '
+          'avatarAsset=${updatedSession.user.avatarAsset} '
+          'photoUrl=${updatedSession.user.profilePhotoUrl}',
+        ),
+      );
       unawaited(AnalyticsService.logProfileUpdated(field: 'profile_photo'));
       return updatedSession;
     }
 
     return ensureIdentity();
+  }
+
+  Future<IdentitySession> updatePresetAvatar(String assetPath) async {
+    if (!AvatarAssets.isPresetAvatarPath(assetPath)) {
+      throw ArgumentError.value(assetPath, 'assetPath', 'Unsupported avatar.');
+    }
+    final user = _auth.currentUser;
+    if (user == null) {
+      throw StateError('Cannot update profile photo before sign-in.');
+    }
+    unawaited(
+      CrashlyticsService.log(
+        'identity_update_preset_avatar_start uid=${user.uid} '
+        'assetPath=$assetPath',
+      ),
+    );
+    final now = _nowSeconds();
+    await _database.ref('users/${user.uid}').update({
+      'avatarAsset': assetPath,
+      'profilePhotoUrl': null,
+      'profilePhotoBase64': null,
+      'updatedAt': now,
+      'lastSeenAt': now,
+    });
+    unawaited(
+      CrashlyticsService.log(
+        'identity_update_preset_avatar_rtdb_ok assetPath=$assetPath',
+      ),
+    );
+    final session = _cachedSession;
+    if (session == null) return ensureIdentity();
+    final updatedSession = IdentitySession(
+      user: session.user.copyWith(
+        avatarAsset: assetPath,
+        clearProfilePhotoUrl: true,
+        clearProfilePhotoBase64: true,
+        updatedAt: now,
+        lastSeenAt: now,
+      ),
+      device: session.device,
+      settings: session.settings,
+    );
+    _publishSession(updatedSession);
+    unawaited(
+      CrashlyticsService.log(
+        'identity_update_preset_avatar_session_published '
+        'avatarAsset=${updatedSession.user.avatarAsset}',
+      ),
+    );
+    unawaited(AnalyticsService.logProfileUpdated(field: 'preset_avatar'));
+    return updatedSession;
   }
 
   Future<User> signInWithGoogle() async {

@@ -74,7 +74,9 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
         .where((member) => activeIds.contains(member.userId))
         .toList(growable: false);
     if (next.length == _members.length &&
-        next.every((member) => _members.any((m) => m.userId == member.userId))) {
+        next.every(
+          (member) => _members.any((m) => m.userId == member.userId),
+        )) {
       return;
     }
     setState(() => _members = next);
@@ -163,9 +165,9 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
       });
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(error.toString())),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
       }
     } finally {
       if (mounted) {
@@ -219,9 +221,9 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
       return true;
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(error.toString())),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
       }
       return false;
     } finally {
@@ -285,16 +287,20 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
                         )
                       : Column(
                           children: [
-                            for (var index = 0;
-                                index < _members.length;
-                                index++) ...[
+                            for (
+                              var index = 0;
+                              index < _members.length;
+                              index++
+                            ) ...[
                               _MemberRow(
                                 member: _members[index],
-                                isCurrentUser: _members[index].userId ==
+                                isCurrentUser:
+                                    _members[index].userId ==
                                     widget.currentUserId,
-                                removing: _removingUserId ==
-                                    _members[index].userId,
-                                onRemove: _isOwner &&
+                                removing:
+                                    _removingUserId == _members[index].userId,
+                                onRemove:
+                                    _isOwner &&
                                         _members[index].role != 'owner' &&
                                         !_busy
                                     ? () => _remove(_members[index])
@@ -354,10 +360,7 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
         ),
         if (removing)
           const Positioned.fill(
-            child: ModalBarrier(
-              dismissible: false,
-              color: Color(0x88000000),
-            ),
+            child: ModalBarrier(dismissible: false, color: Color(0x88000000)),
           ),
         if (removing)
           const Center(
@@ -394,6 +397,7 @@ class _MemberRow extends StatelessWidget {
       leading: ProfileAvatar(
         profilePhotoUrl: member.profilePhotoUrl,
         profilePhotoBase64: member.profilePhotoBase64,
+        avatarAsset: member.avatarAsset,
         radius: 22,
         backgroundColor: const Color(0xff2b2b2b),
       ),
@@ -412,13 +416,13 @@ class _MemberRow extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2),
             )
           : onRemove == null
-              ? null
-              : IconButton(
-                  tooltip: 'Remove ${member.displayName}',
-                  onPressed: onRemove,
-                  icon: const Icon(Icons.person_remove_outlined),
-                  color: const Color(0xffff8a80),
-                ),
+          ? null
+          : IconButton(
+              tooltip: 'Remove ${member.displayName}',
+              onPressed: onRemove,
+              icon: const Icon(Icons.person_remove_outlined),
+              color: const Color(0xffff8a80),
+            ),
     );
   }
 }

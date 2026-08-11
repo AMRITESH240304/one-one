@@ -1,7 +1,9 @@
 package app.oneone.one_one_app
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 
 object VoiceNudgeContract {
     const val flutterChannel = "app.oneone/voice_nudge"
@@ -13,6 +15,7 @@ object VoiceNudgeContract {
     const val extraKind = "kind"
     const val extraEventId = "eventId"
     const val extraSenderName = "senderName"
+    const val extraSenderPhotoUrl = "senderPhotoUrl"
     const val extraDurationMs = "durationMs"
     const val extraAudioUrl = "audioUrl"
     const val extraAckUrl = "ackUrl"
@@ -29,6 +32,7 @@ object VoiceNudgeContract {
     const val kindFriendLive = "friend_live"
     const val kindGoneOffline = "gone_offline"
     const val kindResponse = "nudge_response"
+    const val kindDeliveryResult = "nudge_delivery_result"
 
     const val actionAccept = "app.oneone.action.ACCEPT_NUDGE"
     const val actionConnect = "app.oneone.action.CONNECT_NUDGE"
@@ -80,5 +84,39 @@ object VoiceNudgeDiagnostics {
             cause = cause.cause
             depth += 1
         }
+    }
+
+    // ── B3: Comprehensive nudge failure logging to Crashlytics ──
+    //
+    // Every nudge failure is recorded as a non-fatal Crashlytics event with
+    // enough metadata to debug without manual reproduction.  All events use
+    // the custom key "nudge_failure_event" so they are filterable in the
+    // dashboard.
+
+    /** Generic nudge-failure record with a required reason code. */
+    fun recordNudgeFailure(
+        reason: String,
+        eventId: String?,
+        kind: String?,
+        extras: Map<String, String> = emptyMap(),
+    ) {
+        val crashlytics = FirebaseCrashlytics.getInstance()
+        crashlytics.setCustomKey("nudge_failure_event", reason)
+        crashlytics.setCustomKey("nudge_failure_kind", kind ?: "unknown")
+        crashlytics.setCustomKey("device_model", Build.MODEL)
+        crashlytics.setCustomKey("android_sdk", Build.VERSION.SDK_INT.toString())
+        eventId?.let {
+            crashlytics.setCustomKey(
+                "nudge_event_suffix",
+                it.takeLast(8),
+            )
+        }
+        for ((key, value) in extras) {
+            crashlytics.setCustomKey(key, value)
+        }
+        crashlytics.recordException(
+            RuntimeException("Nudge failure: $reason (kind=$kind eventSuffix=${eventId?.takeLast(6) ?: "none"})"),
+        )
+        Log.w(tag, "[NUDGE-FAIL] reason=$reason kind=$kind ${extras}")
     }
 }

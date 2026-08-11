@@ -10,11 +10,9 @@ import {
 import { config } from "../config.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
+import { createAckTicket } from "./nudgeDeliveryService.js";
 import {
-  createDeliveryToken,
   createUploadTicket,
-  deliveryTokenMatches,
-  hashDeliveryToken,
   maxVoiceNudgeBytes,
   validateVoiceNudgeAudio,
   validateVoiceNudgeDuration,
@@ -35,6 +33,9 @@ type RecipientDevice = {
   userId: string;
   deviceId: string;
   fcmToken: string;
+  /** Recipient's display name — used to embed in the delivery ack ticket so
+   *  the sender-side confirmation can read "playing on <name>'s device". */
+  displayName?: string;
 };
 
 export type CreateVoiceNudgeInput = NudgeTarget & {
@@ -226,13 +227,7 @@ async function dispatchVoiceNudgeFromContext(ctx: {
     throw error;
   }
 
-  const deliveryTokens = ctx.recipientDevices.map((device) => ({
-    device,
-    deliveryId: `${device.userId}_${device.deviceId}`,
-    token: createDeliveryToken()
-  }));
-
-  if (deliveryTokens.length === 0) {
+  if (ctx.recipientDevices.length === 0) {
     logger.warn(
       {
         checkpoint: "VOICE-NUDGE-BE-W1",
@@ -262,19 +257,31 @@ async function dispatchVoiceNudgeFromContext(ctx: {
     senderName: ctx.senderName
   });
 
+  const ackUrl = `${baseUrl}/v1/nudges/${ctx.eventId}/ack`;
+  const senderPhotoUrl = await readProfilePhotoUrl(ctx.senderUserId);
   const pushResult = await sendAndroidDataPushes(
-    deliveryTokens.map((delivery) => ({
-      token: delivery.device.fcmToken,
+    ctx.recipientDevices.map((device) => ({
+      token: device.fcmToken,
       data: {
         type: "voice_nudge",
         eventId: ctx.eventId,
         groupId: ctx.groupId,
         senderUserId: ctx.senderUserId,
         senderName: ctx.senderName,
+        ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         durationMs: String(ctx.durationMs),
         expiresAt: String(ctx.expiresAt),
         audioUrl: signedAudioUrl,
-        responseUrl
+        responseUrl,
+        ackUrl,
+        deliveryToken: createAckTicket({
+          eventId: ctx.eventId,
+          groupId: ctx.groupId,
+          kind: "voice_nudge",
+          senderUserId: ctx.senderUserId,
+          recipientUserId: device.userId,
+          recipientName: device.displayName?.trim() || "your friend"
+        })
       }
     })),
     voiceNudgePushTtlMs
@@ -388,6 +395,8 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
     senderName: input.senderName
   });
 
+  const ackUrl = `${baseUrl}/v1/nudges/${eventId}/ack`;
+  const senderPhotoUrl = await readProfilePhotoUrl(input.senderUserId);
   const pushResult = await sendAndroidDataPushes(
     input.recipientDevices.map((device) => ({
       token: device.fcmToken,
@@ -397,8 +406,18 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
         groupId: input.groupId,
         senderUserId: input.senderUserId,
         senderName: input.senderName,
+        ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         durationMs: String(input.durationSeconds * 1000),
-        responseUrl
+        responseUrl,
+        ackUrl,
+        deliveryToken: createAckTicket({
+          eventId,
+          groupId: input.groupId,
+          kind: "ring_nudge",
+          senderUserId: input.senderUserId,
+          recipientUserId: device.userId,
+          recipientName: device.displayName?.trim() || "your friend"
+        })
       }
     })),
     ringNudgePushTtlMs
@@ -550,6 +569,18 @@ async function writeNudgeNotificationEvent(input: {
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
+}
+
+async function readProfilePhotoUrl(userId: string): Promise<string | undefined> {
+  try {
+    const snapshot = await getRealtimeDatabase()
+      .ref(`users/${userId}/profilePhotoUrl`)
+      .get();
+    const url = snapshot.val()?.toString()?.trim();
+    return url || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function describeError(error: unknown) {

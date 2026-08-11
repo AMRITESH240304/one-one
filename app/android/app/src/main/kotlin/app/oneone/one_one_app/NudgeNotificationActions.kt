@@ -76,6 +76,32 @@ object NudgeActionDispatcher {
     }
 }
 
+/**
+ * Bridges real-time nudge delivery confirmation (#5) straight to Flutter
+ * while the sender's send-nudge bottom sheet is open. Only fires when the
+ * app is in the foreground and Flutter is attached — if the sender has
+ * backgrounded the app or closed the sheet, the result is simply not shown
+ * live (the outcome is still logged server-side either way).
+ */
+object NudgeDeliveryResultDispatcher {
+    @Volatile
+    private var channel: MethodChannel? = null
+
+    fun attach(methodChannel: MethodChannel) {
+        channel = methodChannel
+    }
+
+    fun detach(methodChannel: MethodChannel) {
+        if (channel === methodChannel) channel = null
+    }
+
+    fun signal(result: Map<String, String?>) {
+        Handler(Looper.getMainLooper()).post {
+            channel?.invokeMethod("onNudgeDeliveryResult", result)
+        }
+    }
+}
+
 class NudgeNotificationActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val responseAction = when (intent.action) {
@@ -109,6 +135,8 @@ class NudgeNotificationActionReceiver : BroadcastReceiver() {
         )
         val pendingResult = goAsync()
         val appContext = context.applicationContext
+        // B5: Cancel the expiry alarm for any user action (decline/snooze).
+        NudgeExpiryTracker.cancelExpiry(appContext, eventId)
         val user = FirebaseAuth.getInstance().currentUser
         if (user == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[NUDGE-ACTION-W1] No signed-in Firebase user")
@@ -131,16 +159,16 @@ class NudgeNotificationActionReceiver : BroadcastReceiver() {
                     postResponse(responseUrl, idToken, responseAction, snoozeMinutes)
                     VoiceNudgeAudioCache.delete(appContext, eventId)
                     val text = if (responseAction == "snooze") {
-                        "You asked $senderName to wait $snoozeMinutes minutes"
+                        "You asked $senderName to wait $snoozeMinutes minutes ⏳"
                     } else {
-                        "You declined $senderName's nudge"
+                        "You declined $senderName's nudge 💤"
                     }
                     val manager = appContext.getSystemService(NotificationManager::class.java)
                     manager.notify(
                         notificationId,
                         VoiceNudgeNotifications.buildGeneral(
                             appContext,
-                            "Nudge answered",
+                            "Nudge answered ✅",
                             text,
                         ),
                     )

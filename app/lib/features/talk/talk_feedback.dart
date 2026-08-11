@@ -2,7 +2,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-/// Short start/stop tones and haptics for push-to-talk / hand-raise.
+/// Short start/stop tones and haptics for push-to-talk.
 class TalkFeedback {
   TalkFeedback._();
 
@@ -39,29 +39,6 @@ class TalkFeedback {
       _playAsset('sounds/talk_start.wav'),
       if (hapticsEnabled) HapticFeedback.lightImpact(),
     ]);
-  }
-
-  static Future<void> handRaiseChanged({
-    required bool raised,
-    required bool hapticsEnabled,
-  }) async {
-    if (!hapticsEnabled) return;
-    if (raised) {
-      await HapticFeedback.mediumImpact();
-    } else {
-      await HapticFeedback.selectionClick();
-    }
-  }
-
-  /// Remote peer raised their hand — notify this device.
-  static Future<void> remoteHandRaised({required bool hapticsEnabled}) async {
-    if (!hapticsEnabled) return;
-    await HapticFeedback.heavyImpact();
-  }
-
-  static Future<void> reactionReceived({required bool hapticsEnabled}) async {
-    if (!hapticsEnabled) return;
-    await HapticFeedback.selectionClick();
   }
 
   static Future<void> _hapticStart() async {
