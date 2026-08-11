@@ -9,11 +9,9 @@ import '../features/identity/data/identity_repository.dart';
 class GoogleAuthScreen extends StatefulWidget {
   const GoogleAuthScreen({super.key, this.initializing = false});
 
-  /// When true, renders the exact same layout as the interactive welcome
-  /// screen but with the button in a disabled "loading" state and taps
-  /// ignored. Used while Firebase is still initializing so the very first
-  /// frame is pixel-identical to the real welcome screen — nothing shifts
-  /// or jitters once initialization completes and the real screen swaps in.
+  /// When true, shows the brand splash (logo + pulse dots) only — never the
+  /// signed-out welcome CTA. Used while Firebase is still initializing so a
+  /// returning signed-in session never flashes "Welcome to One One".
   final bool initializing;
 
   @override
@@ -76,10 +74,10 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Once sign-in is in flight, show the splash / loading screen immediately.
-    // This matches the StartupGateScreen loading state so the transition is
-    // seamless when the StreamBuilder swaps widgets.
-    if (_isSigningIn) {
+    // Firebase still booting, or Google sign-in just started: brand splash only.
+    // Matches StartupGateScreen so cold starts never flash the welcome CTA at
+    // already-signed-in users.
+    if (widget.initializing || _isSigningIn) {
       return const _SplashGate();
     }
 
@@ -132,9 +130,9 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
                 SizedBox(height: 14.h),
               ],
               _GoogleSignInButton(
-                busy: widget.initializing,
-                busyLabel: widget.initializing ? 'Loading…' : 'Signing in…',
-                onTap: widget.initializing ? () {} : _continueWithGoogle,
+                busy: false,
+                busyLabel: 'Signing in…',
+                onTap: _continueWithGoogle,
               ),
               SizedBox(height: 22.h),
               Text(

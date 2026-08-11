@@ -149,10 +149,8 @@ class _FirebaseGateState extends State<_FirebaseGate> {
       future: _firebaseInit,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          // Pixel-identical to GoogleAuthScreen's real layout (just with the
-          // button disabled) so there is zero visual shift — no jitter —
-          // once Firebase finishes initializing and the real screen swaps
-          // in underneath the StreamBuilder.
+          // Brand splash only — not the signed-out welcome CTA. Returning
+          // sessions must not flash "Welcome to One One" while Firebase boots.
           return const GoogleAuthScreen(initializing: true);
         }
 

@@ -676,8 +676,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _listenToMemberProfiles(members);
   }
 
-  /// Friends' `/users/{id}` nodes are own-uid-only under RTDB rules; avatars
-  /// come from the group members API. This just clears any leftover subs.
+  /// Profile photos are loaded with members via RTDB. This just clears any
+  /// leftover per-user profile subscriptions from earlier builds.
   void _listenToMemberProfiles(List<GroupMemberSummary> members) {
     for (final sub in _memberProfileSubscriptions) {
       unawaited(sub.cancel());

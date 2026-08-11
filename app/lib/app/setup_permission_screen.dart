@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:lottie/lottie.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 enum _SetupStep { mic, notification, background }
@@ -13,29 +12,31 @@ class _StepVisual {
   const _StepVisual({
     required this.iconColor,
     required this.icon,
-    required this.lottieAsset,
+    required this.backgroundAsset,
   });
 
   final Color iconColor;
   final IconData icon;
-  final String lottieAsset;
+  final String backgroundAsset;
 }
 
+/// Icon colors are picked to match the dominant tone of each onboarding
+/// background image so the CTA card feels native to the artwork behind it.
 const Map<_SetupStep, _StepVisual> _stepVisuals = {
   _SetupStep.mic: _StepVisual(
-    iconColor: Color(0xffffb020),
+    iconColor: Color(0xff8fa83e),
     icon: Icons.mic_rounded,
-    lottieAsset: 'assets/lottie/mic_pulse.json',
+    backgroundAsset: 'assets/Onboarding1.png',
   ),
   _SetupStep.notification: _StepVisual(
-    iconColor: Color(0xffff5a5f),
+    iconColor: Color(0xffdb8a1e),
     icon: Icons.notifications_rounded,
-    lottieAsset: 'assets/lottie/notification_wave.json',
+    backgroundAsset: 'assets/Onboarding2.png',
   ),
   _SetupStep.background: _StepVisual(
-    iconColor: Color(0xff4c8dff),
+    iconColor: Color(0xff7a4fc9),
     icon: Icons.battery_saver_rounded,
-    lottieAsset: 'assets/lottie/radio_connect.json',
+    backgroundAsset: 'assets/Onboarding3.png',
   ),
 };
 
@@ -196,153 +197,115 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
 
     return Scaffold(
       backgroundColor: const Color(0xff000000),
-      body: SafeArea(
-        child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: 24.w),
-          child: Column(
-            children: [
-              SizedBox(height: 64.h),
-              Text(
-                'let\'s get those\nover with:',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 32.sp,
-                  height: 1.05,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.6,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          AnimatedSwitcher(
+            duration: _stageTransitionDuration,
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
+            transitionBuilder: (child, animation) {
+              return FadeTransition(opacity: animation, child: child);
+            },
+            child: Image.asset(
+              visual.backgroundAsset,
+              key: ValueKey(visual.backgroundAsset),
+              fit: BoxFit.cover,
+              width: double.infinity,
+              height: double.infinity,
+              alignment: Alignment.center,
+            ),
+          ),
+          // Bottom scrim so the CTA card and footnote stay legible over
+          // whatever part of the artwork ends up behind them.
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: 320.h,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0),
+                    Colors.black.withValues(alpha: 0.55),
+                    Colors.black.withValues(alpha: 0.88),
+                  ],
+                  stops: const [0, 0.45, 1],
                 ),
               ),
-              Expanded(
-                child: Center(
-                  child: AnimatedSwitcher(
+            ),
+          ),
+          SafeArea(
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 24.w),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  AnimatedSwitcher(
                     duration: _stageTransitionDuration,
                     switchInCurve: Curves.easeOutCubic,
                     switchOutCurve: Curves.easeInCubic,
                     transitionBuilder: (child, animation) {
+                      final offsetAnimation = Tween<Offset>(
+                        begin: const Offset(0.12, 0),
+                        end: Offset.zero,
+                      ).animate(animation);
                       return FadeTransition(
                         opacity: animation,
-                        child: ScaleTransition(
-                          scale: Tween<double>(
-                            begin: 0.92,
-                            end: 1,
-                          ).animate(animation),
+                        child: SlideTransition(
+                          position: offsetAnimation,
                           child: child,
                         ),
                       );
                     },
-                    child: _StepHero(
-                      key: ValueKey(_step),
-                      visual: visual,
+                    child: switch (_step) {
+                      _SetupStep.mic => _PermissionCard(
+                        key: const ValueKey('mic-card'),
+                        iconColor: visual.iconColor,
+                        icon: visual.icon,
+                        title: 'mic',
+                        subtitle:
+                            'so your friends can hear you\nwhen you talk...',
+                        checked: _micGranted,
+                        onTap: _requestMicPermission,
+                      ),
+                      _SetupStep.notification => _PermissionCard(
+                        key: const ValueKey('notification-card'),
+                        iconColor: visual.iconColor,
+                        icon: visual.icon,
+                        title: 'notifications',
+                        subtitle: 'know when your friends are\ntalking to you',
+                        checked: _notificationGranted,
+                        onTap: _requestNotificationPermission,
+                      ),
+                      _SetupStep.background => _PermissionCard(
+                        key: const ValueKey('background-card'),
+                        iconColor: visual.iconColor,
+                        icon: visual.icon,
+                        title: 'background activity',
+                        subtitle: 'receive nudges when one one\nisn\'t open',
+                        checked: _backgroundGranted,
+                        onTap: _requestBackgroundPermission,
+                      ),
+                    },
+                  ),
+                  SizedBox(height: 16.h),
+                  Text(
+                    '*we need those for one one to work',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: const Color.fromRGBO(255, 255, 255, 0.72),
+                      fontSize: 11.sp,
+                      height: 1.2,
                     ),
                   ),
-                ),
+                  SizedBox(height: 28.h),
+                ],
               ),
-              AnimatedSwitcher(
-                duration: _stageTransitionDuration,
-                switchInCurve: Curves.easeOutCubic,
-                switchOutCurve: Curves.easeInCubic,
-                transitionBuilder: (child, animation) {
-                  final offsetAnimation = Tween<Offset>(
-                    begin: const Offset(0.12, 0),
-                    end: Offset.zero,
-                  ).animate(animation);
-                  return FadeTransition(
-                    opacity: animation,
-                    child: SlideTransition(
-                      position: offsetAnimation,
-                      child: child,
-                    ),
-                  );
-                },
-                child: switch (_step) {
-                  _SetupStep.mic => _PermissionCard(
-                    key: const ValueKey('mic-card'),
-                    iconColor: visual.iconColor,
-                    icon: visual.icon,
-                    title: 'mic',
-                    subtitle: 'so your friends can hear you\nwhen you talk...',
-                    checked: _micGranted,
-                    onTap: _requestMicPermission,
-                  ),
-                  _SetupStep.notification => _PermissionCard(
-                    key: const ValueKey('notification-card'),
-                    iconColor: visual.iconColor,
-                    icon: visual.icon,
-                    title: 'notifications',
-                    subtitle: 'know when your friends are\ntalking to you',
-                    checked: _notificationGranted,
-                    onTap: _requestNotificationPermission,
-                  ),
-                  _SetupStep.background => _PermissionCard(
-                    key: const ValueKey('background-card'),
-                    iconColor: visual.iconColor,
-                    icon: visual.icon,
-                    title: 'background activity',
-                    subtitle: 'receive nudges when one one\nisn\'t open',
-                    checked: _backgroundGranted,
-                    onTap: _requestBackgroundPermission,
-                  ),
-                },
-              ),
-              SizedBox(height: 28.h),
-              Text(
-                '*we need those for one one to work',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: const Color.fromRGBO(255, 255, 255, 0.72),
-                  fontSize: 11.sp,
-                  height: 1.2,
-                ),
-              ),
-              SizedBox(height: 28.h),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// The big animated centerpiece for the current onboarding step: a looping,
-/// playful Lottie animation (voice waves / signal bursts / radio pulses)
-/// with a colored icon badge grounding it in the permission being requested.
-class _StepHero extends StatelessWidget {
-  const _StepHero({super.key, required this.visual});
-
-  final _StepVisual visual;
-
-  @override
-  Widget build(BuildContext context) {
-    final size = 250.w;
-    return SizedBox(
-      width: size,
-      height: size,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          Lottie.asset(
-            visual.lottieAsset,
-            width: size,
-            height: size,
-            fit: BoxFit.contain,
-            repeat: true,
-          ),
-          Container(
-            width: 86.w,
-            height: 86.w,
-            decoration: BoxDecoration(
-              color: visual.iconColor,
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: visual.iconColor.withValues(alpha: 0.45),
-                  blurRadius: 28,
-                  spreadRadius: 2,
-                ),
-              ],
             ),
-            child: Icon(visual.icon, color: Colors.white, size: 38.sp),
           ),
         ],
       ),
