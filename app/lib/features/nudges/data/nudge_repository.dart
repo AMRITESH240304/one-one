@@ -230,6 +230,59 @@ class NudgeDeliveryException implements Exception {
   String toString() => message;
 }
 
+/// Per-send delivery outcome for a nudge, derived from the aggregate
+/// `sent`/`failed` device counts the backend returns.
+///
+/// The push/ring/voice send APIs only report aggregate counts, not which
+/// specific recipient(s) failed, so [successRecipientIds] /
+/// [failedRecipientIds] are only populated when every intended recipient
+/// landed on the same side (all succeeded, or all failed). For a genuine
+/// partial failure, callers should fall back to [failedCount] /
+/// [totalRecipients] rather than guessing identities.
+class NudgeResult {
+  const NudgeResult({
+    required this.totalRecipients,
+    required this.failedCount,
+    this.successRecipientIds = const [],
+    this.failedRecipientIds = const [],
+  });
+
+  factory NudgeResult.fromSendResponse(
+    Map<String, dynamic> response,
+    List<String> intendedRecipientIds,
+  ) {
+    final total = intendedRecipientIds.length;
+    final failedCount = _readCount(response['failed']).clamp(0, total);
+
+    if (failedCount == 0) {
+      return NudgeResult(
+        totalRecipients: total,
+        failedCount: 0,
+        successRecipientIds: intendedRecipientIds,
+      );
+    }
+    if (failedCount >= total) {
+      return NudgeResult(
+        totalRecipients: total,
+        failedCount: total,
+        failedRecipientIds: intendedRecipientIds,
+      );
+    }
+    return NudgeResult(totalRecipients: total, failedCount: failedCount);
+  }
+
+  final int totalRecipients;
+  final int failedCount;
+  final List<String> successRecipientIds;
+  final List<String> failedRecipientIds;
+
+  int get successCount => totalRecipients - failedCount;
+  bool get isFullSuccess => failedCount == 0;
+  bool get isFullFailure =>
+      totalRecipients > 0 && failedCount >= totalRecipients;
+  bool get isPartialFailure => failedCount > 0 && failedCount < totalRecipients;
+}
+
 int _readCount(Object? value) {
   if (value is int) return value;
   if (value is num) return value.toInt();

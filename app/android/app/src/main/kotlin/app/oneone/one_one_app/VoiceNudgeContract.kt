@@ -4,6 +4,10 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.google.firebase.crashlytics.FirebaseCrashlytics
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.Executors
 
 object VoiceNudgeContract {
     const val flutterChannel = "app.oneone/voice_nudge"
@@ -16,6 +20,7 @@ object VoiceNudgeContract {
     const val extraEventId = "eventId"
     const val extraSenderName = "senderName"
     const val extraSenderPhotoUrl = "senderPhotoUrl"
+    const val extraSenderAvatarAsset = "senderAvatarAsset"
     const val extraDurationMs = "durationMs"
     const val extraAudioUrl = "audioUrl"
     const val extraAckUrl = "ackUrl"
@@ -33,6 +38,10 @@ object VoiceNudgeContract {
     const val kindGoneOffline = "gone_offline"
     const val kindResponse = "nudge_response"
     const val kindDeliveryResult = "nudge_delivery_result"
+    // B7: follow-up push sent once the receiver's ~10s post-playback ambient
+    // sample comes back "high" — surfaced as a real OS notification since the
+    // sender's nudge sheet is almost certainly closed by the time this arrives.
+    const val kindAmbientNoise = "nudge_ambient_noise"
 
     const val actionAccept = "app.oneone.action.ACCEPT_NUDGE"
     const val actionConnect = "app.oneone.action.CONNECT_NUDGE"
@@ -58,6 +67,56 @@ object VoiceNudgeTokenStore {
             "[FCM-05] Registered identifier saved locally " +
                 VoiceNudgeDiagnostics.describeIdentifier(token),
         )
+    }
+}
+
+// ── Delivery ack for failures that happen before VoiceNudgePlaybackService
+// ever gets a chance to run (e.g. the OS rejects the foreground-service
+// launch) ──
+//
+// VoiceNudgePlaybackService.acknowledge() already POSTs a rich ack (with
+// health/ambient-noise data) once the service is running. But when the
+// service never starts at all, nothing ever calls that, so the sender was
+// previously left with no signal beyond a generic ~12s client-side timeout
+// with no specific reason. This lightweight, fire-and-forget helper lets the
+// FCM receiver (which always has the ackUrl/deliveryToken from the payload)
+// report a specific failure reason immediately in that case.
+object VoiceNudgeDeliveryAck {
+    private val executor = Executors.newSingleThreadExecutor()
+
+    fun postFailure(ackUrl: String?, deliveryToken: String?, reason: String) {
+        if (ackUrl.isNullOrBlank() || deliveryToken.isNullOrBlank()) return
+        executor.execute {
+            var connection: HttpURLConnection? = null
+            try {
+                val opened = URL(ackUrl).openConnection() as HttpURLConnection
+                connection = opened
+                opened.connectTimeout = 5_000
+                opened.readTimeout = 5_000
+                opened.requestMethod = "POST"
+                opened.doOutput = true
+                opened.setRequestProperty("content-type", "application/json")
+                opened.setRequestProperty("x-one-one-delivery-token", deliveryToken)
+                val body = JSONObject().apply {
+                    put("status", "failed")
+                    put("reason", reason)
+                }
+                opened.outputStream.use { it.write(body.toString().toByteArray()) }
+                val responseCode = opened.responseCode
+                Log.i(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-E3-ACK] Reported failure before playback started " +
+                        "reason=$reason HTTP=$responseCode",
+                )
+            } catch (error: Exception) {
+                VoiceNudgeDiagnostics.logFailure(
+                    "[FCM-E3-ACK] Reporting failure before playback started",
+                    error,
+                )
+            } finally {
+                connection?.disconnect()
+            }
+        }
     }
 }
 

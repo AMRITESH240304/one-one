@@ -44,10 +44,13 @@ object VoiceNudgeNotifications {
         }
     }
 
-    /** Mic glyph — used only for ring / voice nudge notifications. */
+    /** Mic glyph — used only for ring / voice / push nudge notifications. */
     private val nudgeSmallIcon = R.drawable.ic_voice_nudge
 
-    /** One One logo — used for all notification small icons (status bar). */
+    /**
+     * Stylized One One logo (`new_logo.png`). Black canvas is transparent so
+     * Android's small-icon alpha mask is the logo silhouette, not a square.
+     */
     private val appSmallIcon = R.drawable.new_logo
 
     fun build(

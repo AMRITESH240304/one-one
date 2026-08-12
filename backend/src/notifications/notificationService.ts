@@ -277,6 +277,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
   });
   const senderName = await readDisplayName(input.senderUserId);
   const senderPhotoUrl = await readProfilePhotoUrl(input.senderUserId);
+  const senderAvatarAsset = await readAvatarAsset(input.senderUserId);
   const recipientDevices = await collectRecipientDevices(recipientUserIds);
   const notificationEventId = await createNotificationEvent({
     groupId: input.groupId,
@@ -299,6 +300,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
         senderUserId: input.senderUserId,
         senderName,
         ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
+        ...(senderAvatarAsset ? { senderAvatarAsset } : {}),
         responseUrl: `${baseUrl}/v1/groups/${input.groupId}/nudges/${notificationEventId}/respond`,
         deepLink: `walkie://group/${input.groupId}`
       }
@@ -513,6 +515,21 @@ async function readProfilePhotoUrl(userId: string): Promise<string | undefined> 
     .get();
   const url = snapshot.val()?.toString()?.trim();
   return url || undefined;
+}
+
+async function readAvatarAsset(userId: string): Promise<string | undefined> {
+  const snapshot = await getRealtimeDatabase()
+    .ref(`users/${userId}/avatarAsset`)
+    .get();
+  const value = snapshot.val()?.toString()?.trim();
+  if (!value) return undefined;
+  if (
+    !value.startsWith("assets/avatars/") &&
+    !value.startsWith("assets/avatars2/")
+  ) {
+    return undefined;
+  }
+  return value;
 }
 
 async function findRecentNotificationEvent(input: {

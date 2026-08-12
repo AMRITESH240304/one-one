@@ -31,12 +31,12 @@ const Map<_SetupStep, _StepVisual> _stepVisuals = {
   _SetupStep.notification: _StepVisual(
     iconColor: Color(0xffdb8a1e),
     icon: Icons.notifications_rounded,
-    backgroundAsset: 'assets/Onboarding2.png',
+    backgroundAsset: 'assets/Onboarding3.png',
   ),
   _SetupStep.background: _StepVisual(
     iconColor: Color(0xff7a4fc9),
     icon: Icons.battery_saver_rounded,
-    backgroundAsset: 'assets/Onboarding3.png',
+    backgroundAsset: 'assets/Onboarding2.png',
   ),
 };
 

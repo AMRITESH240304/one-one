@@ -1,6 +1,7 @@
 package app.oneone.one_one_app
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.Service
 import android.content.BroadcastReceiver
@@ -56,13 +57,19 @@ class VoiceNudgePlaybackService : Service() {
     private var activeHealth: NudgeHealthSnapshot? = null
     private var ackedEventId: String? = null
 
-    // ── B7: Ambient noise detection ──
-    // When nudge playback starts we briefly enable the microphone (in a
-    // non-recording capacity) to sample the ambient noise level.  The result
-    // (high / medium / low) is attached to the delivery ack so the sender
-    // can see whether the receiver's surroundings are loud.
+    // ── B7: Ambient noise detection (fixed) ──
+    // Sampled for ~10s AFTER the nudge audio itself has finished playing (so
+    // the reading reflects the receiver's actual surroundings, not the nudge
+    // audio bleeding into the mic), on a dedicated background thread so it
+    // never blocks the main thread. The result (high / medium / low) is sent
+    // as a follow-up delivery ack once ready, so the sender can see whether
+    // the receiver's surroundings are loud even though the nudge already
+    // acked as "played" immediately when playback started.
     private var ambientNoiseLevel: String? = null
     private var ambientNoiseSampleActive = false
+    private var ambientRecorder: AudioRecord? = null
+    private val ambientExecutor = Executors.newSingleThreadExecutor()
+    private var isDestroyed = false
 
     // ── B4: Hardware-button interruption ──
     // When the user presses volume up/down during nudge playback we stop
@@ -70,6 +77,7 @@ class VoiceNudgePlaybackService : Service() {
     // is registered dynamically because API 28+ blocks manifest receivers
     // for implicit broadcasts.
     private var volumeReceiver: BroadcastReceiver? = null
+    private var lastPosted: PostedNotification? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -139,23 +147,24 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-10] Playback service accepted kind=${request.kind} " +
                 "eventSuffix=${request.eventId.takeLast(6)}",
         )
+        val notificationId = VoiceNudgeNotifications.idFor(request.eventId)
         startForeground(
-            VoiceNudgeNotifications.idFor(request.eventId),
-            VoiceNudgeNotifications.build(
-                this,
-                request.eventId,
-                request.groupId,
-                request.responseUrl,
-                request.senderName,
+            notificationId,
+            notification(
+                request,
                 "Preparing nudge… 🎙️",
-                true,
-                largeIcon = NotificationAvatarHelper.largeIcon(
-                    this,
-                    request.senderPhotoUrl,
-                    request.senderName,
-                ),
+                ongoing = true,
+                cachedAudioAvailable = false,
             ),
         )
+        NotificationAvatarHelper.loadAsync(
+            this,
+            request.senderPhotoUrl,
+            request.senderName,
+            request.senderAvatarAsset,
+        ) {
+            refreshPostedNotification()
+        }
         if (active?.eventId != request.eventId && queue.none { it.eventId == request.eventId }) {
             queue.add(request)
         }
@@ -164,6 +173,7 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        isDestroyed = true
         mainHandler.removeCallbacksAndMessages(null)
         releasePlayback()
         releaseWakeLock()
@@ -172,6 +182,10 @@ class VoiceNudgePlaybackService : Service() {
         // The executor guard in acknowledge() prevents new submissions from
         // racing with teardown.
         networkExecutor.shutdown()
+        // Ambient sampling was already told to stop by releasePlayback() ->
+        // stopAmbientNoiseSample() above; shutdownNow() is a backstop so the
+        // executor thread doesn't linger for the rest of the ~10s window.
+        ambientExecutor.shutdownNow()
         volumeReceiver?.let {
             try { unregisterReceiver(it) } catch (_: Exception) {}
         }
@@ -286,8 +300,13 @@ class VoiceNudgePlaybackService : Service() {
             // buffer to finish.
             sendPlayedAckOnce(request)
             // The PCM buffer itself is exactly the requested length. This
-            // callback owns service and notification cleanup at that boundary.
-            mainHandler.postDelayed({ finishActive(success = true) }, request.durationMs)
+            // callback owns service and notification cleanup at that boundary
+            // — B7: sample ambient noise for ~10s before actually tearing
+            // down, so the reading reflects the room, not the ring itself.
+            mainHandler.postDelayed(
+                { finishAfterAmbientSample(request) },
+                request.durationMs,
+            )
         } catch (error: RuntimeException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E4] Ring playback", error)
             VoiceNudgeDiagnostics.recordNudgeFailure(
@@ -480,7 +499,10 @@ class VoiceNudgePlaybackService : Service() {
                             this@VoiceNudgePlaybackService,
                             request.eventId,
                         )
-                        finishActive(success = true)
+                        // B7: sample ambient noise for ~10s before tearing
+                        // down, so the reading reflects the room, not the
+                        // voice nudge itself.
+                        finishAfterAmbientSample(request)
                     }
                 }
 
@@ -636,12 +658,9 @@ class VoiceNudgePlaybackService : Service() {
     private fun sendPlayedAckOnce(request: NudgeRequest) {
         if (ackedEventId == request.eventId) return
         ackedEventId = request.eventId
-
-        // B7: Sample ambient noise as soon as playback genuinely starts.
-        if (request.kind == VoiceNudgeContract.kindVoice ||
-            request.kind == VoiceNudgeContract.kindRing) {
-            ambientNoiseLevel = sampleAmbientNoise()
-        }
+        // B7: Ambient noise is sampled AFTER playback finishes (see
+        // finishAfterAmbientSample), not here — sampling while the nudge
+        // itself is still audible would measure the nudge, not the room.
 
         val health = activeHealth
         val reason = health?.blockingReason()
@@ -840,78 +859,122 @@ class VoiceNudgePlaybackService : Service() {
         }
     }
 
-    // ── B7: Ambient noise sampling (Android only) ──
+    // ── B7: Ambient noise sampling (Android only, fixed) ──
 
     /**
-     * Briefly reads a few raw PCM frames from the mic to estimate the ambient
-     * noise level.  The mic is opened for a short burst (≤ 500 ms) and then
-     * released.  Returns "high", "medium", "low", or null if sampling failed.
+     * Once a nudge has genuinely finished playing, samples the mic for
+     * [ambientSampleDurationMs] (~10s) to estimate the ambient noise level,
+     * then sends a follow-up delivery ack with the result before finally
+     * tearing the service down. Runs entirely on [ambientExecutor] — never
+     * blocks the main thread — and is safely skippable (falls straight
+     * through to [finishActive]) if the mic isn't available.
      */
-    private fun sampleAmbientNoise(): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
-        if (ContextCompat.checkSelfPermission(
+    private fun finishAfterAmbientSample(request: NudgeRequest) {
+        if (isDestroyed || ackedEventId != request.eventId) {
+            // Never genuinely acked as played (e.g. it failed before this
+            // point) — an ambient reading wouldn't mean anything here.
+            finishActive(success = true)
+            return
+        }
+        sampleAmbientNoiseAsync(ambientSampleDurationMs) { level ->
+            if (isDestroyed) return@sampleAmbientNoiseAsync
+            if (level != null) {
+                ambientNoiseLevel = level
+                // Follow-up ack: same event, same "played" status, now with
+                // the ambient reading attached. The sender's live sheet may
+                // already be closed by now — the backend/FCM push is still
+                // the source of truth for a real notification if it's loud.
+                acknowledge(request, "played", null, activeHealth) {}
+                Log.i(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-18] Ambient noise sampled level=$level " +
+                        "eventSuffix=${request.eventId.takeLast(6)}",
+                )
+            }
+            finishActive(success = true)
+        }
+    }
+
+    /**
+     * Reads raw PCM frames from the mic on a background thread for up to
+     * [durationMs] to estimate the ambient noise level, then posts the
+     * result ("high" / "medium" / "low", or null on failure/no permission)
+     * back to the main thread via [onResult]. Cancellable early via
+     * [stopAmbientNoiseSample].
+     */
+    private fun sampleAmbientNoiseAsync(durationMs: Long, onResult: (String?) -> Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            ContextCompat.checkSelfPermission(
                 this, Manifest.permission.RECORD_AUDIO,
             ) != PackageManager.PERMISSION_GRANTED
-        ) return null
-
-        var recorder: AudioRecord? = null
-        try {
-            val sampleRate = 8000
-            val bufferSize = AudioRecord.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-            )
-            if (bufferSize <= 0) return null
-            val effectiveSize = bufferSize.coerceAtLeast(1024)
-
-            recorder = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                effectiveSize,
-            )
-            if (recorder.state != AudioRecord.STATE_INITIALIZED) return null
-
-            recorder.startRecording()
-            ambientNoiseSampleActive = true
-            val samples = ShortArray(effectiveSize / 2)
-
-            // Read up to ~500 ms of audio in small chunks to reduce latency.
-            var totalRead = 0
-            var sumSquared = 0.0
-            val maxFrames = (sampleRate * 0.5).toInt() // 500 ms
-            while (totalRead < maxFrames) {
-                val framesRead = recorder.read(
-                    samples,
-                    0,
-                    samples.size.coerceAtMost(maxFrames - totalRead),
-                )
-                if (framesRead <= 0) break
-                for (i in 0 until framesRead) {
-                    val normalized = samples[i].toDouble()
-                    sumSquared += normalized * normalized
-                }
-                totalRead += framesRead
-            }
-            recorder.stop()
-            ambientNoiseSampleActive = false
-
-            if (totalRead <= 0) return null
-            val rms = kotlin.math.sqrt(sumSquared / totalRead)
-            return classifyAmbientLevel(rms)
-        } catch (error: Exception) {
-            Log.w(
-                VoiceNudgeDiagnostics.tag,
-                "[FCM-NOISE] Ambient noise sampling failed: ${error.message}",
-            )
-            return null
-        } finally {
+        ) {
+            onResult(null)
+            return
+        }
+        ambientNoiseSampleActive = true
+        ambientExecutor.execute {
+            var recorder: AudioRecord? = null
+            var level: String? = null
             try {
-                recorder?.release()
-            } catch (_: Exception) {}
-            ambientNoiseSampleActive = false
+                val sampleRate = 8000
+                val bufferSize = AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                )
+                if (bufferSize > 0) {
+                    val effectiveSize = bufferSize.coerceAtLeast(1024)
+                    recorder = AudioRecord(
+                        MediaRecorder.AudioSource.MIC,
+                        sampleRate,
+                        AudioFormat.CHANNEL_IN_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        effectiveSize,
+                    ).also { ambientRecorder = it }
+
+                    if (recorder.state == AudioRecord.STATE_INITIALIZED) {
+                        recorder.startRecording()
+                        val samples = ShortArray(effectiveSize / 2)
+                        var totalRead = 0
+                        var sumSquared = 0.0
+                        val maxFrames = (sampleRate * (durationMs / 1_000.0)).toInt()
+                        while (totalRead < maxFrames && ambientNoiseSampleActive) {
+                            val framesRead = recorder.read(
+                                samples,
+                                0,
+                                samples.size.coerceAtMost(maxFrames - totalRead),
+                            )
+                            if (framesRead <= 0) break
+                            for (i in 0 until framesRead) {
+                                val normalized = samples[i].toDouble()
+                                sumSquared += normalized * normalized
+                            }
+                            totalRead += framesRead
+                        }
+                        try {
+                            recorder.stop()
+                        } catch (_: IllegalStateException) {
+                            // May already be stopped by a concurrent cancel.
+                        }
+                        if (totalRead > 0) {
+                            val rms = kotlin.math.sqrt(sumSquared / totalRead)
+                            level = classifyAmbientLevel(rms)
+                        }
+                    }
+                }
+            } catch (error: Exception) {
+                Log.w(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-NOISE] Ambient noise sampling failed: ${error.message}",
+                )
+            } finally {
+                try {
+                    recorder?.release()
+                } catch (_: Exception) {}
+                ambientRecorder = null
+                ambientNoiseSampleActive = false
+                mainHandler.post { onResult(level) }
+            }
         }
     }
 
@@ -922,9 +985,19 @@ class VoiceNudgePlaybackService : Service() {
         else -> "low"
     }
 
-    /** Cancel an in-progress ambient noise sample (called during teardown). */
+    /**
+     * Cancel an in-progress ambient noise sample (called during teardown).
+     * Flips the loop guard AND stops the recorder directly so a blocking
+     * [AudioRecord.read] call returns promptly instead of running out the
+     * full ~10s window.
+     */
     private fun stopAmbientNoiseSample() {
         ambientNoiseSampleActive = false
+        try {
+            ambientRecorder?.stop()
+        } catch (_: Exception) {
+            // Already stopped/released — nothing to do.
+        }
     }
 
     private fun captureHealthSnapshot(streamType: Int): NudgeHealthSnapshot {
@@ -1075,22 +1148,56 @@ class VoiceNudgePlaybackService : Service() {
         ongoing: Boolean,
         cachedAudioAvailable: Boolean,
         isPlaying: Boolean = false,
-    ) = VoiceNudgeNotifications.build(
-        this,
-        request.eventId,
-        request.groupId,
-        request.responseUrl,
-        request.senderName,
-        status,
-        ongoing,
-        cachedAudioAvailable,
-        isPlaying,
-        largeIcon = NotificationAvatarHelper.largeIcon(
+    ): Notification {
+        lastPosted = PostedNotification(
+            request = request,
+            status = status,
+            ongoing = ongoing,
+            cachedAudioAvailable = cachedAudioAvailable,
+            isPlaying = isPlaying,
+        )
+        return VoiceNudgeNotifications.build(
             this,
-            request.senderPhotoUrl,
+            request.eventId,
+            request.groupId,
+            request.responseUrl,
             request.senderName,
-        ),
-    )
+            status,
+            ongoing,
+            cachedAudioAvailable,
+            isPlaying,
+            largeIcon = NotificationAvatarHelper.largeIcon(
+                this,
+                request.senderPhotoUrl,
+                request.senderName,
+                request.senderAvatarAsset,
+            ),
+        )
+    }
+
+    private fun refreshPostedNotification() {
+        val posted = lastPosted ?: return
+        try {
+            val manager = getSystemService(NotificationManager::class.java)
+            val notificationId = VoiceNudgeNotifications.idFor(posted.request.eventId)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val stillShowing = manager.activeNotifications.any { it.id == notificationId }
+                if (!stillShowing) return
+            }
+            manager.notify(
+                notificationId,
+                notification(
+                    posted.request,
+                    posted.status,
+                    posted.ongoing,
+                    posted.cachedAudioAvailable,
+                    posted.isPlaying,
+                ),
+            )
+        } catch (_: Exception) {
+            // Service may already have stopped.
+        }
+    }
 
     private fun Intent.toRequest(): NudgeRequest? {
         val kind = getStringExtra(VoiceNudgeContract.extraKind) ?: return null
@@ -1108,6 +1215,7 @@ class VoiceNudgePlaybackService : Service() {
             eventId = eventId,
             senderName = senderName,
             senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
+            senderAvatarAsset = getStringExtra(VoiceNudgeContract.extraSenderAvatarAsset),
             durationMs = durationMs,
             audioUrl = getStringExtra(VoiceNudgeContract.extraAudioUrl),
             ackUrl = getStringExtra(VoiceNudgeContract.extraAckUrl),
@@ -1126,6 +1234,7 @@ class VoiceNudgePlaybackService : Service() {
             eventId = eventId,
             senderName = getStringExtra(VoiceNudgeContract.extraSenderName) ?: "Someone",
             senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
+            senderAvatarAsset = getStringExtra(VoiceNudgeContract.extraSenderAvatarAsset),
             durationMs = 0,
             audioUrl = null,
             ackUrl = null,
@@ -1136,11 +1245,20 @@ class VoiceNudgePlaybackService : Service() {
         )
     }
 
+    private data class PostedNotification(
+        val request: NudgeRequest,
+        val status: String,
+        val ongoing: Boolean,
+        val cachedAudioAvailable: Boolean,
+        val isPlaying: Boolean,
+    )
+
     private data class NudgeRequest(
         val kind: String,
         val eventId: String,
         val senderName: String,
         val senderPhotoUrl: String?,
+        val senderAvatarAsset: String?,
         val durationMs: Long,
         val audioUrl: String?,
         val ackUrl: String?,
@@ -1163,6 +1281,7 @@ class VoiceNudgePlaybackService : Service() {
         private val supportedRingDurationsMs = setOf(3_000L, 5_000L, 10_000L)
         private const val maxAudioBytes = 128 * 1024
         private const val maxWakeLockDurationMs = 30_000L
+        private const val ambientSampleDurationMs = 10_000L
     }
 }
 

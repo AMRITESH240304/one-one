@@ -47,11 +47,30 @@ import '../../talk/talk_feedback.dart';
 import '../../talk/ui/emoji_burst_overlay.dart';
 import '../data/identity_home_bootstrap.dart';
 import '../data/identity_repository.dart';
+import '../data/last_active_group_store.dart';
 import '../models/identity_session.dart';
 import 'group_action_screen.dart';
 import 'no_groups_screen.dart';
 import 'profile_avatar.dart';
 import 'settings_screen.dart';
+
+// [DEBUG] Go-live latency tracing helpers added Aug 12. Remove before
+// production release. Logs a numbered start/end pair for each major step of
+// the receiver's go-live flow (nudge accept -> LiveKit connected) so the
+// ~3-4s/~6-7s latency can be attributed to a specific step from device logs.
+int _goLiveStepStart(int step, String description) {
+  final timestamp = DateTime.now().millisecondsSinceEpoch;
+  debugPrint('[GO-LIVE STEP $step START] $description — timestamp: $timestamp');
+  return timestamp;
+}
+
+void _goLiveStepEnd(int step, String description, int startedAtMs) {
+  final timestamp = DateTime.now().millisecondsSinceEpoch;
+  final elapsed = timestamp - startedAtMs;
+  debugPrint(
+    '[GO-LIVE STEP $step END] $description — timestamp: $timestamp | elapsed: ${elapsed}ms',
+  );
+}
 
 class IdentityHomeScreen extends StatefulWidget {
   const IdentityHomeScreen({
@@ -136,6 +155,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Timer? _usagePersistTimer; // Flushes accumulated seconds to RTDB every 30 s.
 
   int _carouselIndex = 0;
+
+  // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+  // release. Tracks the timestamp LiveKit last finished connecting, and
+  // whether the first post-connect subscribe/audio events have already been
+  // logged, so those steps are only logged once per go-live (not on every
+  // later speaker change).
+  int? _goLiveConnectResolvedAtMs;
+  bool _goLiveFirstSubscribeLogged = false;
+  bool _goLiveFirstAudioLogged = false;
 
   bool _loadingGroups = true;
   bool _busy = false;
@@ -598,6 +626,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Future<void> _takePendingNudgeAction() async {
     if (_nudgeActionInFlight) return;
     NudgeNotificationAction? action;
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release.
+    final step1StartedAt = _goLiveStepStart(
+      1,
+      'Nudge accepted by receiver (user action) — taking pending action from native bridge',
+    );
     try {
       action =
           _deferredNudgeAction ??
@@ -607,6 +641,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _deferredNudgeAction = action;
         return;
       }
+      _goLiveStepEnd(
+        1,
+        'Nudge accepted by receiver (user action) — action=${action.action} '
+        'eventId=${action.eventId} groupId=${action.groupId}',
+        step1StartedAt,
+      );
       _deferredNudgeAction = null;
       _nudgeActionInFlight = true;
       await _processNudgeAction(action);
@@ -621,6 +661,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _processNudgeAction(NudgeNotificationAction action) async {
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release.
+    final step2StartedAt = _goLiveStepStart(
+      2,
+      'FCM/notification payload parsed — resolving target group locally',
+    );
     final index = _groups.indexWhere(
       (group) => group.groupId == action.groupId,
     );
@@ -628,6 +674,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() => _message = 'That nudge group is no longer available.');
       return;
     }
+    _goLiveStepEnd(
+      2,
+      'FCM/notification payload parsed — resolved groupId=${action.groupId} at carouselIndex=$index',
+      step2StartedAt,
+    );
 
     await _onGroupCarouselChanged(index);
     if (!mounted) return;
@@ -1282,6 +1333,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _prevAnyMemberOnline = null;
       _chatOnlineClearInFlight = false;
     });
+    unawaited(LastActiveGroupStore.write(_session.userId, group.groupId));
     if (cachedMembers == null) {
       await _loadMembers(group.groupId);
     }
@@ -2014,6 +2066,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _connectLiveKit(OnlineSession session) async {
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release. Reset once per connect attempt so the post-connect subscribe
+    // and first-audio steps below are only logged for THIS go-live.
+    _goLiveConnectResolvedAtMs = null;
+    _goLiveFirstSubscribeLogged = false;
+    _goLiveFirstAudioLogged = false;
+    final step3StartedAt = _goLiveStepStart(
+      3,
+      'LiveKit room initialization started',
+    );
+
     await _disconnectLiveKit();
     final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
     // B9: Attach Krisp noise filter via capture options so it applies when
@@ -2035,7 +2098,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _state = 'connecting';
       _message = LiveKitStatus.connecting;
     });
+    _goLiveStepEnd(3, 'LiveKit room initialization started', step3StartedAt);
 
+    final step4StartedAt = _goLiveStepStart(4, 'LiveKit room.connect() called');
     await room
         .connect(
           session.livekitServerUrl,
@@ -2043,6 +2108,25 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           connectOptions: const ConnectOptions(autoSubscribe: true),
         )
         .timeout(const Duration(seconds: 20));
+    _goLiveConnectResolvedAtMs = DateTime.now().millisecondsSinceEpoch;
+    _goLiveStepEnd(
+      4,
+      'LiveKit room.connect() resolved (connected)',
+      step4StartedAt,
+    );
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release. Steps 6/7 are timed from this same moment (connect resolved)
+    // since that's the natural "waiting for the sender" starting point; their
+    // END markers are logged from the room event listener below once the
+    // corresponding event actually fires for the first time.
+    _goLiveStepStart(
+      6,
+      'Remote participant (sender) detected / subscribed — waiting for autoSubscribe',
+    );
+    _goLiveStepStart(
+      7,
+      'Audio track from sender is playing — waiting for first remote speaker',
+    );
 
     try {
       await room.setSpeakerOn(speakerOn);
@@ -2071,9 +2155,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     debugPrint('[LiveKit] Noise filter applied to local audio track.');
 
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release.
+    final step5StartedAt = _goLiveStepStart(
+      5,
+      'Local tracks (mic) published — initializing local mic track',
+    );
     await localParticipant
         .setMicrophoneEnabled(false)
         .timeout(const Duration(seconds: 8));
+    _goLiveStepEnd(
+      5,
+      'Local tracks (mic) published — local mic track initialized (walkie mode starts muted)',
+      step5StartedAt,
+    );
   }
 
   Future<void> _applyPreferredAudioRoute() async {
@@ -2227,8 +2322,24 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           event.connectionQuality,
         );
       })
-      ..on<TrackSubscribedEvent>((_) {
+      ..on<TrackSubscribedEvent>((event) {
         // Subscription is an implementation detail — keep UI status clean.
+        // [DEBUG] Go-live latency tracing added Aug 12. Remove before
+        // production release. Only log the FIRST subscribed remote audio
+        // track per go-live, measured from when room.connect() resolved.
+        if (!_goLiveFirstSubscribeLogged &&
+            event.publication.kind == TrackType.AUDIO) {
+          _goLiveFirstSubscribeLogged = true;
+          final startedAt = _goLiveConnectResolvedAtMs;
+          if (startedAt != null) {
+            _goLiveStepEnd(
+              6,
+              'Remote participant (sender) detected / subscribed — '
+              'identity=${event.participant.identity}',
+              startedAt,
+            );
+          }
+        }
       })
       ..on<ActiveSpeakersChangedEvent>((event) {
         final previousRemoteSpeakers = _speakingUserIds.where(
@@ -2246,6 +2357,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             .where((id) => id != _session.userId)
             .any((id) => !previousRemoteSpeakers.contains(id));
         final hasRemoteSpeaker = speaking.any((id) => id != _session.userId);
+        // [DEBUG] Go-live latency tracing added Aug 12. Remove before
+        // production release. Only log the FIRST remote-speaking moment per
+        // go-live, measured from when room.connect() resolved.
+        if (!_goLiveFirstAudioLogged && hasRemoteSpeaker) {
+          _goLiveFirstAudioLogged = true;
+          final startedAt = _goLiveConnectResolvedAtMs;
+          if (startedAt != null) {
+            _goLiveStepEnd(
+              7,
+              'Audio track from sender is playing — first remote speaker detected',
+              startedAt,
+            );
+          }
+        }
         if (hasRemoteSpeaker || speaking.contains(_session.userId)) {
           _recordVoiceActivity();
         }
@@ -2760,6 +2885,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (_inPictureInPicture || MediaQuery.sizeOf(context).height < 480) {
       final member = _pictureInPictureMember;
       return _VoicePictureInPictureView(
+        key: ValueKey(member.userId),
         member: member,
         speaking:
             _speakingUserIds.contains(member.userId) ||
@@ -3012,6 +3138,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
 class _VoicePictureInPictureView extends StatelessWidget {
   const _VoicePictureInPictureView({
+    super.key,
     required this.member,
     required this.speaking,
     required this.talking,
@@ -3205,6 +3332,9 @@ class _BackdropMemberCollage extends StatelessWidget {
         ? '?'
         : member.displayName.trim().substring(0, 1).toUpperCase();
     return ProfileImage(
+      // Keyed by user ID so switching groups/members never reuses another
+      // user's ProfileImage state (and its sticky-photo cache) by position.
+      key: ValueKey(member.userId),
       profilePhotoUrl: member.profilePhotoUrl,
       profilePhotoBase64: member.profilePhotoBase64,
       avatarAsset: member.avatarAsset,
@@ -3557,6 +3687,7 @@ class _FriendsStrip extends StatelessWidget {
             children: [
               for (final friend in friends) ...[
                 _FriendChip(
+                  key: ValueKey(friend.userId),
                   name: friend.displayName,
                   profilePhotoUrl: friend.profilePhotoUrl,
                   profilePhotoBase64: friend.profilePhotoBase64,
@@ -3583,6 +3714,7 @@ class _FriendsStrip extends StatelessWidget {
 
 class _FriendChip extends StatelessWidget {
   const _FriendChip({
+    super.key,
     required this.name,
     required this.profilePhotoUrl,
     required this.profilePhotoBase64,
@@ -4932,6 +5064,9 @@ class _MemberPhotoCollage extends StatelessWidget {
           ? '?'
           : member.displayName.trim().substring(0, 1).toUpperCase();
       return ProfileImage(
+        // Keyed by user ID so switching groups never reuses another user's
+        // ProfileImage state (and its sticky-photo cache) by position.
+        key: ValueKey(member.userId),
         profilePhotoUrl: member.profilePhotoUrl,
         profilePhotoBase64: member.profilePhotoBase64,
         avatarAsset: member.avatarAsset,

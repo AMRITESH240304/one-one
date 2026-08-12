@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
@@ -173,69 +171,11 @@ class _SplashGate extends StatelessWidget {
                   width: 190.w,
                   fit: BoxFit.contain,
                 ),
-                SizedBox(height: 28.h),
-                const _SplashPulseDots(color: Color(0xff384047)),
               ],
             ),
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Three softly breathing dots — same design used by StartupGateScreen so the
-/// splash-to-splash transition is invisible to the user.
-class _SplashPulseDots extends StatefulWidget {
-  const _SplashPulseDots({required this.color});
-
-  final Color color;
-
-  @override
-  State<_SplashPulseDots> createState() => _SplashPulseDotsState();
-}
-
-class _SplashPulseDotsState extends State<_SplashPulseDots>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1100),
-  )..repeat();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: List.generate(3, (index) {
-            final phase = (_controller.value - index * 0.2) % 1.0;
-            final scale =
-                0.55 + 0.45 * (0.5 - 0.5 * math.cos(phase * 2 * math.pi));
-            return Padding(
-              padding: EdgeInsets.symmetric(horizontal: 4.w),
-              child: Transform.scale(
-                scale: scale,
-                child: Container(
-                  width: 8.w,
-                  height: 8.w,
-                  decoration: BoxDecoration(
-                    color: widget.color,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-              ),
-            );
-          }),
-        );
-      },
     );
   }
 }

@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
@@ -11,6 +10,7 @@ import '../features/groups/data/invite_link_bridge.dart';
 import '../features/groups/models/group_summary.dart';
 import '../features/identity/data/identity_home_bootstrap.dart';
 import '../features/identity/data/identity_repository.dart';
+import '../features/identity/data/last_active_group_store.dart';
 import '../features/identity/models/identity_session.dart';
 import '../features/identity/ui/identity_home_screen.dart';
 import '../features/identity/ui/no_groups_screen.dart';
@@ -203,12 +203,19 @@ class _StartupGateScreenState extends State<StartupGateScreen>
       groups = results[1]! as List<GroupSummary>;
     }
 
+    // Invite/nudge deep links always win. Otherwise, restore whichever group
+    // the user was last active in before the app was killed; if that group
+    // no longer exists, IdentityHomeBootstrap.resolveSelectedGroup silently
+    // falls back to the first group.
+    final preferredForBootstrap =
+        invitedGroupId ?? await LastActiveGroupStore.read(session.userId);
+
     IdentityHomeBootstrap bootstrap;
     try {
       bootstrap = await IdentityHomeBootstrap.fromGroups(
         groupRepository: _groupRepository,
         groups: groups,
-        preferredGroupId: invitedGroupId,
+        preferredGroupId: preferredForBootstrap,
       );
     } catch (error) {
       bootstrap = IdentityHomeBootstrap.failure(error);
@@ -229,7 +236,7 @@ class _StartupGateScreenState extends State<StartupGateScreen>
         _nextScreen = IdentityHomeScreen(
           initialSession: session,
           identityRepository: _identityRepository,
-          initialGroupId: invitedGroupId,
+          initialGroupId: preferredForBootstrap,
           initialBootstrap: bootstrap,
         );
       });
@@ -345,9 +352,7 @@ class _StartupGateScreenState extends State<StartupGateScreen>
                   fit: BoxFit.contain,
                 ),
                 SizedBox(height: 28.h),
-                if (_startupError == null)
-                  const _StartupPulseDots(color: Color(0xff384047))
-                else ...[
+                if (_startupError != null) ...[
                   Text(
                     'We couldn\'t finish setting up your account.',
                     textAlign: TextAlign.center,
@@ -368,62 +373,6 @@ class _StartupGateScreenState extends State<StartupGateScreen>
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Three softly breathing dots used in place of a spinning circular loader —
-/// quieter and more "premium" while still clearly communicating progress.
-class _StartupPulseDots extends StatefulWidget {
-  const _StartupPulseDots({required this.color});
-
-  final Color color;
-
-  @override
-  State<_StartupPulseDots> createState() => _StartupPulseDotsState();
-}
-
-class _StartupPulseDotsState extends State<_StartupPulseDots>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1100),
-  )..repeat();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: List.generate(3, (index) {
-            final phase = (_controller.value - index * 0.2) % 1.0;
-            final scale =
-                0.55 + 0.45 * (0.5 - 0.5 * math.cos(phase * 2 * math.pi));
-            return Padding(
-              padding: EdgeInsets.symmetric(horizontal: 4.w),
-              child: Transform.scale(
-                scale: scale,
-                child: Container(
-                  width: 8.w,
-                  height: 8.w,
-                  decoration: BoxDecoration(
-                    color: widget.color,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-              ),
-            );
-          }),
-        );
-      },
     );
   }
 }

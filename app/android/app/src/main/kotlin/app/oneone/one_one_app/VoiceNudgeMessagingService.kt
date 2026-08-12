@@ -195,6 +195,14 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 forwardDeliveryResult(message)
                 return
             }
+            VoiceNudgeContract.kindAmbientNoise -> {
+                // Still forward it in case the sender's nudge sheet happens
+                // to be open, then show a real notification as the primary
+                // channel since that's the common case.
+                forwardDeliveryResult(message)
+                showAmbientNoiseNotification(message)
+                return
+            }
             VoiceNudgeContract.kindVoice,
             VoiceNudgeContract.kindRing -> Unit
             else -> {
@@ -218,6 +226,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         }
         val senderName = data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
         val senderPhotoUrl = data["senderPhotoUrl"]?.takeIf { it.isNotBlank() }
+        val senderAvatarAsset = data["senderAvatarAsset"]?.takeIf { it.isNotBlank() }
         val durationMs = data["durationMs"]?.toLongOrNull()?.coerceIn(250L, 10_000L)
         if (durationMs == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W4] Ignored $kind with invalid duration")
@@ -233,6 +242,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             putExtra(VoiceNudgeContract.extraEventId, eventId)
             putExtra(VoiceNudgeContract.extraSenderName, senderName)
             putExtra(VoiceNudgeContract.extraSenderPhotoUrl, senderPhotoUrl)
+            putExtra(VoiceNudgeContract.extraSenderAvatarAsset, senderAvatarAsset)
             putExtra(VoiceNudgeContract.extraDurationMs, durationMs)
             putExtra(VoiceNudgeContract.extraAudioUrl, data["audioUrl"])
             putExtra(VoiceNudgeContract.extraAckUrl, data["ackUrl"])
@@ -253,8 +263,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             }
         } catch (error: RuntimeException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E3] Native playback start", error)
+            val failureReason =
+                if (error is SecurityException) "permission_denied_foreground_service" else "playback_service_start_error"
             VoiceNudgeDiagnostics.recordNudgeFailure(
-                reason = if (error is SecurityException) "permission_denied_foreground_service" else "playback_service_start_error",
+                reason = failureReason,
                 eventId = eventId,
                 kind = kind,
                 extras = mapOf(
@@ -262,21 +274,40 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                     "error_class" to error.javaClass.simpleName,
                 ),
             )
-            val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
-            val largeIcon = NotificationAvatarHelper.largeIcon(this, data["senderPhotoUrl"], senderName)
-            manager.notify(
-                VoiceNudgeNotifications.idFor(eventId),
-                VoiceNudgeNotifications.build(
-                    this,
-                    eventId,
-                    groupId,
-                    data["responseUrl"],
-                    senderName,
-                    "Tap to open this nudge 👋",
-                    ongoing = false,
-                    largeIcon = largeIcon,
-                ),
+            // The playback service never got a chance to run (and therefore
+            // never got to POST its own ack) — report the specific reason
+            // directly so the sender doesn't just see a generic timeout.
+            VoiceNudgeDeliveryAck.postFailure(
+                data["ackUrl"],
+                data["deliveryToken"],
+                failureReason,
             )
+            val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val notificationId = VoiceNudgeNotifications.idFor(eventId)
+            NotificationAvatarHelper.applyLargeIcon(
+                this,
+                data["senderPhotoUrl"],
+                senderName,
+                data["senderAvatarAsset"],
+            ) { largeIcon ->
+                try {
+                    manager.notify(
+                        notificationId,
+                        VoiceNudgeNotifications.build(
+                            this,
+                            eventId,
+                            groupId,
+                            data["responseUrl"],
+                            senderName,
+                            "Tap to open this nudge 👋",
+                            ongoing = false,
+                            largeIcon = largeIcon,
+                        ),
+                    )
+                } catch (error: SecurityException) {
+                    VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
+                }
+            }
         }
     }
 
@@ -319,6 +350,34 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             )
         } catch (error: SecurityException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
+        }
+    }
+
+    // B7: shown as a genuine OS notification because it arrives ~10s after
+    // playback, well after the sender's in-app nudge sheet has likely closed.
+    private fun showAmbientNoiseNotification(message: RemoteMessage) {
+        val data = message.data
+        val eventId = data["eventId"] ?: "ambient_${message.sentTime}"
+        val recipientName = data["recipientName"]?.take(80).orEmpty().ifBlank { "They" }
+        val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        try {
+            manager.notify(
+                VoiceNudgeNotifications.idFor("ambient_$eventId"),
+                VoiceNudgeNotifications.buildGeneral(
+                    this,
+                    message.notification?.title ?: "It sounds noisy over there \uD83D\uDD0A",
+                    message.notification?.body
+                        ?: "$recipientName may not have heard your nudge clearly.",
+                    data["groupId"],
+                ),
+            )
+            Log.i(
+                VoiceNudgeDiagnostics.tag,
+                "[NUDGE-AMBIENT-01] Ambient-noise notification displayed " +
+                    "eventSuffix=${eventId.takeLast(6)}",
+            )
+        } catch (error: SecurityException) {
+            VoiceNudgeDiagnostics.logFailure("[NUDGE-AMBIENT-E01] Notification permission", error)
         }
     }
 
@@ -419,24 +478,31 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 "importance=${channelImportance ?: "legacy"}",
         )
         try {
-            val largeIcon = NotificationAvatarHelper.largeIcon(
+            val notificationId = VoiceNudgeNotifications.idFor(eventId)
+            NotificationAvatarHelper.applyLargeIcon(
                 this,
                 data["senderPhotoUrl"],
                 senderName,
-            )
-            manager.notify(
-                VoiceNudgeNotifications.idFor(eventId),
-                VoiceNudgeNotifications.buildActionable(
-                    this,
-                    eventId,
-                    groupId,
-                    data["responseUrl"],
-                    senderName,
-                    "👋 $senderName nudged you",
-                    "Accept, snooze, or decline ✨",
-                    largeIcon = largeIcon,
-                ),
-            )
+                data["senderAvatarAsset"],
+            ) { largeIcon ->
+                try {
+                    manager.notify(
+                        notificationId,
+                        VoiceNudgeNotifications.buildActionable(
+                            this,
+                            eventId,
+                            groupId,
+                            data["responseUrl"],
+                            senderName,
+                            "👋 $senderName nudged you",
+                            "Accept, snooze, or decline ✨",
+                            largeIcon = largeIcon,
+                        ),
+                    )
+                } catch (error: SecurityException) {
+                    VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
+                }
+            }
             Log.i(
                 VoiceNudgeDiagnostics.tag,
                 "[FCM-08] Actionable push notification displayed",
@@ -526,6 +592,9 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 "reason" to data["reason"]?.takeIf { it.isNotBlank() },
                 "recipientUserId" to data["recipientUserId"],
                 "recipientName" to data["recipientName"],
+                // B7: ambient noise reading, if this delivery result came
+                // from the ~10s post-playback follow-up ack.
+                "ambientNoiseLevel" to data["ambientNoiseLevel"]?.takeIf { it.isNotBlank() },
             ),
         )
     }
