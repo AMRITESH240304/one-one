@@ -1,6 +1,7 @@
 package app.oneone.one_one_app
 
 import android.Manifest
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.Service
@@ -8,6 +9,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.media.AudioAttributes as PlatformAudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -148,7 +150,7 @@ class VoiceNudgePlaybackService : Service() {
                 "eventSuffix=${request.eventId.takeLast(6)}",
         )
         val notificationId = VoiceNudgeNotifications.idFor(request.eventId)
-        startForeground(
+        startForegroundMediaPlayback(
             notificationId,
             notification(
                 request,
@@ -191,6 +193,32 @@ class VoiceNudgePlaybackService : Service() {
         }
         volumeReceiver = null
         super.onDestroy()
+    }
+
+    /**
+     * Starts the playback foreground service as media playback only.
+     *
+     * This service's real job is playing nudge audio, so it must not request
+     * the "microphone" foreground-service type. Starting a microphone FGS
+     * (which Android 14+ infers from the manifest when using the two-argument
+     * `startForeground`) requires both the runtime `RECORD_AUDIO` permission
+     * and, on Android 15+ (targetSdk 36), that the app be in an eligible
+     * foreground state. A nudge arrives via FCM while the app is backgrounded,
+     * so a microphone FGS can never satisfy those checks and crashes the
+     * process with a SecurityException. Playback itself only needs
+     * `mediaPlayback`.
+     */
+    private fun startForegroundMediaPlayback(notificationId: Int, notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                notificationId,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            startForeground(notificationId, notification)
+        }
     }
 
     private fun stopGroupNudges(groupId: String) {
@@ -240,7 +268,7 @@ class VoiceNudgePlaybackService : Service() {
             request.cachedReplay -> "Preparing replay… ▶️"
             else -> "Downloading voice nudge… 🎙️"
         }
-        startForeground(
+        startForegroundMediaPlayback(
             VoiceNudgeNotifications.idFor(request.eventId),
             notification(
                 request,
@@ -903,7 +931,14 @@ class VoiceNudgePlaybackService : Service() {
      * [stopAmbientNoiseSample].
      */
     private fun sampleAmbientNoiseAsync(durationMs: Long, onResult: (String?) -> Unit) {
+        // Since this service no longer runs as a "microphone" foreground
+        // service, background mic access is blocked on Android 11+ (and on
+        // Android 15+ a microphone FGS can't even be started from an FCM
+        // delivery). Only sample when the app is actually in the foreground,
+        // otherwise a background recording attempt would either throw or
+        // return silence and get misclassified as a "low" ambient reading.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            !isAppInForeground() ||
             ContextCompat.checkSelfPermission(
                 this, Manifest.permission.RECORD_AUDIO,
             ) != PackageManager.PERMISSION_GRANTED
@@ -976,6 +1011,21 @@ class VoiceNudgePlaybackService : Service() {
                 mainHandler.post { onResult(level) }
             }
         }
+    }
+
+    /**
+     * Best-effort check for whether this app currently has a foreground
+     * activity. Used to gate ambient-noise sampling, which now runs without a
+     * microphone foreground service and therefore can only reliably access the
+     * mic while the app is visible.
+     */
+    private fun isAppInForeground(): Boolean {
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            ?: return false
+        val info = activityManager.runningAppProcesses
+            ?.firstOrNull { it.processName == packageName }
+            ?: return false
+        return info.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
     }
 
     /** Classify the RMS amplitude into a simple high / medium / low band. */

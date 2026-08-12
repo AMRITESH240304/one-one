@@ -100,7 +100,7 @@
         <service
             android:name=".VoiceNudgePlaybackService"
             android:exported="false"
-            android:foregroundServiceType="mediaPlayback|microphone"
+            android:foregroundServiceType="mediaPlayback"
             android:stopWithTask="false" />
         <service
             android:name=".VoiceSessionService"
