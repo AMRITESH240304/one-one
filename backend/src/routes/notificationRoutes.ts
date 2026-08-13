@@ -93,6 +93,9 @@ const voiceNudgeAckSchema = z.object({
 const nudgeAckSchema = z.object({
   status: z.enum(["played", "failed"]),
   reason: z.string().min(1).max(120).optional(),
+  // Audibility concern for an otherwise-successful playback
+  // (volume_muted / volume_low / do_not_disturb).
+  attention: z.string().min(1).max(120).optional(),
   health: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
   // B7: ambient noise sampled by the receiver for ~10s after playback,
   // arrives via its own follow-up ack once sampling completes.
@@ -539,6 +542,7 @@ export function createNotificationRoutes() {
         ticket,
         status: body.status,
         reason: body.reason,
+        attention: body.attention,
         health: body.health,
         ambientNoiseLevel: body.ambientNoiseLevel
       });

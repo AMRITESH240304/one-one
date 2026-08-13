@@ -177,6 +177,7 @@ class NudgeDeliveryResult {
     required this.eventId,
     required this.status,
     this.reason,
+    this.attention,
     this.recipientName,
     this.recipientUserId,
     this.ambientNoiseLevel,
@@ -184,11 +185,18 @@ class NudgeDeliveryResult {
 
   final String eventId;
 
-  /// `played` or `failed`.
+  /// `played` or `failed`. Reflects whether playback genuinely started, NOT
+  /// whether the recipient could hear it.
   final String status;
 
-  /// Machine-readable reason code (e.g. `receiver_volume_muted`) when known.
+  /// Machine-readable reason code when playback genuinely failed (e.g.
+  /// `download_error`, `playback_error`, `timeout`).
   final String? reason;
+
+  /// Audibility concern for an otherwise-successful playback
+  /// (`volume_muted`, `volume_low`, or `do_not_disturb`).
+  final String? attention;
+
   final String? recipientName;
   final String? recipientUserId;
 
@@ -197,12 +205,26 @@ class NudgeDeliveryResult {
 
   bool get played => status == 'played';
 
+  /// True when the nudge played but the recipient probably didn't hear it
+  /// (muted / very low volume / Do Not Disturb).
+  bool get playedButNotAudible => played && attention != null;
+
   /// Human-readable description of the ambient noise level for UI display.
   String? get ambientNoiseLabel {
     return switch (ambientNoiseLevel) {
       'high' => '🔊 surroundings are loud',
       'medium' => '🔉 moderate noise',
       'low' => '🔈 quiet surroundings',
+      _ => null,
+    };
+  }
+
+  /// Human-readable description of the audibility concern for UI display.
+  String? get attentionLabel {
+    return switch (attention) {
+      'volume_muted' => 'their volume was muted',
+      'volume_low' => 'their volume was very low',
+      'do_not_disturb' => 'their phone is on Do Not Disturb',
       _ => null,
     };
   }
@@ -219,6 +241,9 @@ class NudgeDeliveryResult {
       reason: raw['reason']?.toString().trim().isEmpty ?? true
           ? null
           : raw['reason'].toString().trim(),
+      attention: raw['attention']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['attention'].toString().trim(),
       recipientName: raw['recipientName']?.toString().trim().isEmpty ?? true
           ? null
           : raw['recipientName'].toString().trim(),

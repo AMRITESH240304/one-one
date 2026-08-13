@@ -620,6 +620,7 @@ class VoiceNudgePlaybackService : Service() {
         status: String,
         reason: String?,
         health: NudgeHealthSnapshot?,
+        attention: String? = null,
         after: () -> Unit,
     ) {
         val ackUrl = request.ackUrl
@@ -655,6 +656,10 @@ class VoiceNudgePlaybackService : Service() {
                     put("status", status)
                     if (reason != null) put("reason", reason)
                     if (health != null) put("health", health.toJson())
+                    // Audibility concern for an otherwise-successful playback
+                    // (mute / very-low volume / Do Not Disturb). Distinct from
+                    // `reason`, which only accompanies a genuine `failed`.
+                    if (attention != null) put("attention", attention)
                     // B7: Attach ambient noise level to the delivery ack.
                     ambientNoiseLevel?.let { put("ambientNoiseLevel", it) }
                 }
@@ -678,10 +683,13 @@ class VoiceNudgePlaybackService : Service() {
      * Fires the delivery ack the instant a nudge genuinely starts producing
      * audio, and triggers matching haptic feedback. Guarded so a single
      * nudge only ever acks once, however many playback-state callbacks fire.
-     * If the health checklist found a likely-blocking condition (e.g. the
-     * receiver's stream is muted), the ack reports "failed" with that reason
-     * instead of "played" — the audio pipeline still ran, but it almost
-     * certainly wasn't heard.
+     *
+     * Delivery status is a pure reflection of whether playback genuinely
+     * started (ring buffer began outputting, or ExoPlayer's isPlaying flipped
+     * true). Audibility concerns — mute, very-low volume, Do Not Disturb —
+     * are NOT delivery failures; they are reported as a separate `attention`
+     * flag so the sender can tell "never received" apart from "received but
+     * probably not heard".
      */
     private fun sendPlayedAckOnce(request: NudgeRequest) {
         if (ackedEventId == request.eventId) return
@@ -691,21 +699,17 @@ class VoiceNudgePlaybackService : Service() {
         // itself is still audible would measure the nudge, not the room.
 
         val health = activeHealth
-        val reason = health?.blockingReason()
-        if (reason != null) {
-            VoiceNudgeDiagnostics.recordNudgeFailure(
-                reason = reason,
-                eventId = request.eventId,
-                kind = request.kind,
-                extras = mapOf(
-                    "stream_volume" to health.streamVolume.toString(),
-                    "stream_max" to health.streamMaxVolume.toString(),
-                    "ringer_mode" to health.ringerMode.toString(),
-                    "dnd_active" to health.dndActive.toString(),
-                ),
+        val attention = health?.attentionReason()
+        if (attention != null && health != null) {
+            Log.i(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-14A] Playback started with audibility concern=$attention " +
+                    "streamVolume=${health.streamVolume}/${health.streamMaxVolume} " +
+                    "dndActive=${health.dndActive} " +
+                    "eventSuffix=${request.eventId.takeLast(6)}",
             )
         }
-        acknowledge(request, if (reason == null) "played" else "failed", reason, health) {}
+        acknowledge(request, "played", null, health, attention) {}
         triggerReceiptHaptics(durationMsForHaptics(request))
     }
 
@@ -872,10 +876,36 @@ class VoiceNudgePlaybackService : Service() {
         val dndActive: Boolean,
         val notificationsEnabled: Boolean,
     ) {
-        fun blockingReason(): String? = when {
-            streamMuted || streamVolume <= 0 -> "receiver_volume_muted"
+        /**
+         * Coarse audibility band, kept deliberately separate from whether
+         * playback genuinely started. A muted/very-low receiver still
+         * "received" the nudge — the audio pipeline ran — so these must never
+         * be reported as a delivery failure. They are surfaced as an
+         * attention flag the sender can act on instead.
+         */
+        val volumeLevel: String
+            get() = when {
+                streamMuted || streamVolume <= 0 -> "muted"
+                streamVolume <= lowVolumeStep() -> "very_low"
+                else -> "ok"
+            }
+
+        /**
+         * Primary listening concern for an otherwise-successful playback.
+         * Do Not Disturb is its own state (see troubleshooting requirements)
+         * and is reported before volume so a DND'd device isn't mislabeled as
+         * muted when the OS happens to also report a muted stream.
+         */
+        fun attentionReason(): String? = when {
+            dndActive -> "do_not_disturb"
+            streamMuted || streamVolume <= 0 -> "volume_muted"
+            streamVolume <= lowVolumeStep() -> "volume_low"
             else -> null
         }
+
+        /** Bottom ~15% of the volume range counts as "very low", minimum one step. */
+        private fun lowVolumeStep(): Int =
+            (streamMaxVolume * 0.15).toInt().coerceAtLeast(1)
 
         fun toJson(): JSONObject = JSONObject().apply {
             put("streamVolume", streamVolume)
@@ -884,6 +914,7 @@ class VoiceNudgePlaybackService : Service() {
             put("ringerMode", ringerMode)
             put("dndActive", dndActive)
             put("notificationsEnabled", notificationsEnabled)
+            put("volumeLevel", volumeLevel)
         }
     }
 
