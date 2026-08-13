@@ -85,6 +85,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   Duration _elapsed = Duration.zero;
   String? _message;
   bool _messageIsError = false;
+  bool _messageIsWarning = false;
   bool _messagePending = false;
 
   // Real-time delivery confirmation (nudge reliability checklist): once a
@@ -140,6 +141,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     if (failure == null) return;
     _message = failure.message;
     _messageIsError = true;
+    _messageIsWarning = false;
     _messagePending = false;
   }
 
@@ -223,6 +225,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _resultsByUserId.clear();
       _message = waitingMessage;
       _messageIsError = false;
+      _messageIsWarning = false;
       _messagePending = true;
     });
     _deliveryTimeoutTimer = Timer(_deliveryConfirmationTimeout, () {
@@ -268,6 +271,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = _buildDeliveryMessage(partial: true);
         _messageIsError = _resultsByUserId.values.any((r) => !r.played);
+        _messageIsWarning = !_messageIsError &&
+            _resultsByUserId.values.any((r) => r.playedButNotAudible);
         _messagePending = true;
       });
     }
@@ -294,6 +299,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _awaitingEventId = null;
         _message = 'Nudge wasn\u2019t played, try again.';
         _messageIsError = true;
+        _messageIsWarning = false;
         _messagePending = false;
       });
       _scheduleAutoDismiss();
@@ -301,9 +307,12 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     }
 
     // Persist a group-scoped failure summary (or clear it on full success)
-    // for the return-to-sheet banner.
+    // for the return-to-sheet banner. Only genuine playback failures count as
+    // failures here \u2014 a muted/low-volume/DND recipient "played" the nudge and
+    // is surfaced as a warning instead of a "did not receive" error.
     final failed = <NudgeDeliveryResult>[];
     final failedNames = <String>[];
+    final hasAttention = _resultsByUserId.values.any((r) => r.playedButNotAudible);
     for (final entry in _resultsByUserId.entries) {
       final result = entry.value;
       final name = result.recipientName ??
@@ -341,6 +350,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _messagePending = false;
       _message = _buildDeliveryMessage(partial: false);
       _messageIsError = failed.isNotEmpty;
+      _messageIsWarning = failed.isEmpty && hasAttention;
     });
     _scheduleAutoDismiss();
   }
@@ -353,23 +363,12 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     }
 
     final failed = results.where((r) => !r.played).toList(growable: false);
-    final played = results.where((r) => r.played).toList(growable: false);
-
-    if (failed.isEmpty) {
-      if (expected.length <= 1 && played.length == 1) {
-        final name = played.first.recipientName ??
-            expected.values.firstOrNull?.displayName;
-        final noiseLabel = played.first.ambientNoiseLabel;
-        if (name == null) {
-          return 'Everyone received the nudge \u2713';
-        }
-        if (noiseLabel != null) {
-          return 'Nudge playing on $name\u2019s device \u2014 $noiseLabel';
-        }
-        return 'Nudge successfully playing on $name\u2019s device';
-      }
-      return 'Everyone received the nudge \u2713';
-    }
+    final attention = results
+        .where((r) => r.playedButNotAudible)
+        .toList(growable: false);
+    final cleanPlayed = results
+        .where((r) => r.played && r.attention == null)
+        .toList(growable: false);
 
     String nameOf(NudgeDeliveryResult r) {
       if (r.recipientName != null && r.recipientName!.trim().isNotEmpty) {
@@ -384,24 +383,46 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       return 'Someone';
     }
 
-    if (failed.length == 1 &&
-        (expected.length <= 1 || played.isEmpty && expected.length == 1)) {
-      final f = failed.first;
-      final name = nameOf(f);
-      return _shortFailureWithReason(name, f.reason);
+    // 1) Genuine playback failures \u2014 the only "did not receive" cases.
+    if (failed.isNotEmpty) {
+      if (failed.length == 1 && (expected.length <= 1 || results.length == 1)) {
+        final f = failed.first;
+        return _shortFailureWithReason(nameOf(f), f.reason);
+      }
+
+      final names = failed.map(nameOf).toList(growable: false);
+      final named = _joinNames(names);
+      if (cleanPlayed.isEmpty && attention.isEmpty) {
+        return '$named did not receive the nudge.';
+      }
+      return '$named did not receive the nudge \u2014 everyone else did.';
     }
 
-    if (failed.length == 1 && played.isNotEmpty) {
-      final f = failed.first;
-      return _shortFailureWithReason(nameOf(f), f.reason);
+    // 2) Played, but likely inaudible (muted / very low / Do Not Disturb).
+    if (attention.isNotEmpty) {
+      if (attention.length == 1 && results.length == 1) {
+        return _attentionMessage(nameOf(attention.first), attention.first);
+      }
+      final names = attention.map(nameOf).toList(growable: false);
+      final named = _joinNames(names);
+      return 'Nudge played, but $named may not have heard it \u2014 check '
+          'their volume or Do Not Disturb.';
     }
 
-    final names = failed.map(nameOf).toList(growable: false);
-    final named = _joinNames(names);
-    if (played.isEmpty) {
-      return '$named did not receive the nudge.';
+    // 3) Clean success.
+    if (expected.length <= 1 && results.length == 1) {
+      final name = results.first.recipientName ??
+          expected.values.firstOrNull?.displayName;
+      final noiseLabel = results.first.ambientNoiseLabel;
+      if (name == null) {
+        return 'Everyone received the nudge \u2713';
+      }
+      if (noiseLabel != null) {
+        return 'Nudge playing on $name\u2019s device \u2014 $noiseLabel';
+      }
+      return 'Nudge successfully playing on $name\u2019s device';
     }
-    return '$named did not receive the nudge \u2014 everyone else did.';
+    return 'Everyone received the nudge \u2713';
   }
 
   String _joinNames(List<String> names) {
@@ -413,8 +434,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   String _shortFailureWithReason(String name, String? reason) {
     switch (reason) {
-      case 'receiver_volume_muted':
-        return 'Nudge did not reach $name \u2014 their volume was too low.';
       case 'playback_error':
       case 'playback_service_start_error':
         return 'Nudge did not reach $name \u2014 error on their device.';
@@ -428,6 +447,16 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       default:
         return 'Nudge did not reach $name.';
     }
+  }
+
+  /// Builds the non-error warning shown when a nudge played but the recipient
+  /// likely didn't hear it (muted / very low volume / Do Not Disturb).
+  String _attentionMessage(String name, NudgeDeliveryResult r) {
+    final label = r.attentionLabel;
+    if (label == null) {
+      return 'Nudge played on $name\u2019s device, but they may not have heard it.';
+    }
+    return 'Nudge played on $name\u2019s device, but $label.';
   }
 
   /// Builds the group-scoped persisted-failure message shown when the
@@ -516,6 +545,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = 'Everyone is already online.';
         _messageIsError = true;
+        _messageIsWarning = false;
       });
       return;
     }
@@ -526,6 +556,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = 'They\u2019re already online.';
         _messageIsError = true;
+        _messageIsWarning = false;
       });
       return;
     }
@@ -533,6 +564,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _busy = true;
       _message = null;
       _messageIsError = false;
+      _messageIsWarning = false;
       _messagePending = false;
     });
     try {
@@ -584,6 +616,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           setState(() {
             _message = message;
             _messageIsError = true;
+            _messageIsWarning = false;
             _messagePending = false;
           });
           _scheduleAutoDismiss();
@@ -598,6 +631,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = successMessage;
         _messageIsError = false;
+        _messageIsWarning = false;
         _messagePending = false;
       });
       _scheduleAutoDismiss();
@@ -631,6 +665,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = message;
         _messageIsError = true;
+        _messageIsWarning = false;
         _busy = false;
       });
     }
@@ -646,6 +681,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           setState(() {
             _message = 'Microphone permission is required.';
             _messageIsError = true;
+            _messageIsWarning = false;
           });
         }
         return;
@@ -689,6 +725,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _elapsed = Duration.zero;
         _message = 'Recording… release to send';
         _messageIsError = false;
+        _messageIsWarning = false;
       });
       if (!_pointerHeld) {
         await _finishRecording(send: _sendAfterPointerEnd);
@@ -698,6 +735,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         setState(() {
           _message = _friendlyError(error);
           _messageIsError = true;
+          _messageIsWarning = false;
         });
       }
     } finally {
@@ -721,6 +759,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _sendingVoice = send;
         _message = send ? 'Sending voice nudge…' : null;
         _messageIsError = false;
+        _messageIsWarning = false;
       });
     }
 
@@ -735,6 +774,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           setState(() {
             _message = 'Hold a little longer to record.';
             _messageIsError = true;
+            _messageIsWarning = false;
           });
         }
         return;
@@ -754,6 +794,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         setState(() {
           _message = _friendlyError(error);
           _messageIsError = true;
+          _messageIsWarning = false;
         });
       }
     } finally {
@@ -786,6 +827,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                 ? 'Nudge sent to ${expected.first.displayName.trim().split(RegExp(r'\s+')).first} \u2713'
                 : 'Everyone received the nudge \u2713';
             _messageIsError = false;
+            _messageIsWarning = false;
             _messagePending = false;
           });
           _scheduleAutoDismiss();
@@ -1257,6 +1299,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                       isError:
                           _friends.isEmpty ||
                           (_messageIsError && _message != null),
+                      isWarning: _messageIsWarning && _message != null,
                       isPending: _friends.isEmpty ? false : _messagePending,
                     ),
                   ),
@@ -1489,11 +1532,13 @@ class _NudgeStatus extends StatelessWidget {
   const _NudgeStatus({
     required this.message,
     required this.isError,
+    this.isWarning = false,
     this.isPending = false,
   });
 
   final String message;
   final bool isError;
+  final bool isWarning;
   final bool isPending;
 
   @override
@@ -1502,6 +1547,8 @@ class _NudgeStatus extends StatelessWidget {
         ? const Color(0xffe0a83c)
         : isError
         ? const Color(0xffff6b6f)
+        : isWarning
+        ? const Color(0xffe0a83c)
         : const Color(0xff9bdc28);
     return Container(
       padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 10.h),
@@ -1526,6 +1573,8 @@ class _NudgeStatus extends StatelessWidget {
             Icon(
               isError
                   ? Icons.error_outline_rounded
+                  : isWarning
+                  ? Icons.warning_amber_rounded
                   : Icons.check_circle_outline,
               color: color,
               size: 17.sp,

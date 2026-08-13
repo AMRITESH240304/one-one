@@ -101,12 +101,14 @@ export type RecordNudgeDeliveryInput = {
   ticket: AckTicket;
   status: NudgeDeliveryStatus;
   reason?: string;
+  /** Audibility concern for an otherwise-successful playback (mute/low/DND). */
+  attention?: string;
   health?: Record<string, unknown>;
   ambientNoiseLevel?: AmbientNoiseLevel;
 };
 
 export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
-  const { ticket, status, reason, health, ambientNoiseLevel } = input;
+  const { ticket, status, reason, attention, health, ambientNoiseLevel } = input;
   const now = nowSeconds();
 
   // Best-effort audit trail — never blocks the ack or the sender push.
@@ -121,6 +123,7 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
       recipientName: ticket.recipientName,
       status,
       reason: reason ?? null,
+      attention: attention ?? null,
       health: health ?? null,
       ...(ambientNoiseLevel ? { ambientNoiseLevel } : {}),
       recordedAt: now
@@ -137,6 +140,22 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
       );
     });
 
+  // Core troubleshooting: maintain a per-recipient rollup so we can identify
+  // users who repeatedly fail to receive nudges without scanning every event.
+  // Only the primary playback ack counts — the ~10s-later ambient-noise
+  // follow-up (which carries `ambientNoiseLevel`) re-acks the same event as
+  // "played" and must not double-count the rollup.
+  if (!ambientNoiseLevel) {
+    await upsertRecipientDeliveryRollup({
+      ticket,
+      status,
+      reason,
+      attention,
+      health,
+      now
+    });
+  }
+
   logger.info(
     {
       checkpoint: "NUDGE-DELIVERY-BE-01",
@@ -146,6 +165,7 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
       recipientUserId: ticket.recipientUserId,
       status,
       reason: reason ?? null,
+      attention: attention ?? null,
       health: health ?? null,
       ambientNoiseLevel: ambientNoiseLevel ?? null
     },
@@ -154,7 +174,13 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
 
   const senderDevices = await collectAndroidDevices(ticket.senderUserId);
   if (senderDevices.length === 0) {
-    return { eventId: ticket.eventId, status, reason: reason ?? null, notifiedSenderDevices: 0 };
+    return {
+      eventId: ticket.eventId,
+      status,
+      reason: reason ?? null,
+      attention: attention ?? null,
+      notifiedSenderDevices: 0
+    };
   }
 
   const pushResult = await sendAndroidDataPushes(
@@ -169,6 +195,7 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
         recipientName: ticket.recipientName,
         status,
         reason: reason ?? "",
+        attention: attention ?? "",
         ambientNoiseLevel: ambientNoiseLevel ?? ""
       }
     })),
@@ -210,10 +237,73 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
     eventId: ticket.eventId,
     status,
     reason: reason ?? null,
+    attention: attention ?? null,
     ambientNoiseLevel: ambientNoiseLevel ?? null,
     notifiedSenderDevices: senderDevices.length,
     sent: pushResult.successCount
   };
+}
+
+/**
+ * Per-recipient troubleshooting rollup. Lets support/eng answer "which users
+ * keep not receiving nudges?" without scanning the full `nudgeDeliveries`
+ * tree. Uses an RTDB transaction so concurrent acks across devices can't
+ * clobber the counters.
+ */
+async function upsertRecipientDeliveryRollup(input: {
+  ticket: AckTicket;
+  status: NudgeDeliveryStatus;
+  reason?: string;
+  attention?: string;
+  health?: Record<string, unknown>;
+  now: number;
+}) {
+  const { ticket, status, reason, attention, health, now } = input;
+  try {
+    await getRealtimeDatabase()
+      .ref(`nudgeDeliveryTroubleshooting/${ticket.recipientUserId}`)
+      .transaction((current) => {
+        const prev = isRecord(current) ? current : {};
+        const played = status === "played";
+        const failed = status === "failed";
+        const hasAttention = Boolean(attention);
+        return {
+          recipientUserId: ticket.recipientUserId,
+          lastEventId: ticket.eventId,
+          lastKind: ticket.kind,
+          lastStatus: status,
+          lastReason: reason ?? null,
+          lastAttention: attention ?? null,
+          lastHealth: health ?? null,
+          lastRecordedAt: now,
+          totalPlayed: toNumber(prev.totalPlayed) + (played ? 1 : 0),
+          totalFailed: toNumber(prev.totalFailed) + (failed ? 1 : 0),
+          totalAttention: toNumber(prev.totalAttention) + (hasAttention ? 1 : 0),
+          consecutiveFailures: failed ? toNumber(prev.consecutiveFailures) + 1 : 0,
+          consecutiveAttention: played && hasAttention ? toNumber(prev.consecutiveAttention) + 1 : 0,
+          updatedAt: now
+        };
+      });
+  } catch (error) {
+    logger.warn(
+      {
+        checkpoint: "NUDGE-TROUBLESHOOTING-BE-W1",
+        category: "expected",
+        recipientUserId: ticket.recipientUserId,
+        error: describeError(error)
+      },
+      "failed to upsert recipient delivery rollup (non-fatal)"
+    );
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function toNumber(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 }
 
 async function collectAndroidDevices(userId: string): Promise<string[]> {

@@ -590,6 +590,9 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 "kind" to data["kind"],
                 "status" to status,
                 "reason" to data["reason"]?.takeIf { it.isNotBlank() },
+                // Audibility concern for an otherwise-played nudge
+                // (volume_muted / volume_low / do_not_disturb).
+                "attention" to data["attention"]?.takeIf { it.isNotBlank() },
                 "recipientUserId" to data["recipientUserId"],
                 "recipientName" to data["recipientName"],
                 // B7: ambient noise reading, if this delivery result came
