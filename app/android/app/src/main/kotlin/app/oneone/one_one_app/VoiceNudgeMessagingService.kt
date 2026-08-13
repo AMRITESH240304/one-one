@@ -181,6 +181,8 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 // B5: Schedule 10-min expiry for push nudges.
                 scheduleNudgeExpiry(data)
                 showActionableNotification(message)
+                data["groupId"]?.takeIf { it.isNotBlank() }
+                    ?.let { NudgeReceivedDispatcher.signal(it) }
                 return
             }
             VoiceNudgeContract.kindFriendLive -> {
@@ -216,6 +218,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W10] Ignored $kind without groupId")
             return
         }
+
+        // Prefetch/warm the LiveKit connection while playback starts so the
+        // accept -> connected path is faster.
+        NudgeReceivedDispatcher.signal(groupId)
         val senderName = data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
         val senderPhotoUrl = data["senderPhotoUrl"]?.takeIf { it.isNotBlank() }
         val senderAvatarAsset = data["senderAvatarAsset"]?.takeIf { it.isNotBlank() }

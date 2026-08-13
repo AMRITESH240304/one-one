@@ -11,6 +11,7 @@ import '../../identity/models/identity_session.dart';
 import '../../talk/data/talk_repository.dart';
 import '../../talk/models/talk_session.dart';
 import '../data/online_repository.dart';
+import '../livekit_connection_warmer.dart';
 import '../livekit_status.dart';
 import '../models/online_session.dart';
 import '../presence_config.dart';
@@ -110,12 +111,20 @@ class _OnlineScreenState extends State<OnlineScreen> {
     }
 
     OnlineSession? createdSession;
+    final speakerOn = widget.identity.settings.audioOutputPreference != 'earpiece';
+    final preparedToken = LiveKitConnectionWarmer.instance.takeToken(
+      widget.group.groupId,
+    );
+    final preparedRoom = LiveKitConnectionWarmer.instance.takeWarmRoom(
+      speakerOn: speakerOn,
+    );
     try {
       createdSession = await _onlineRepository.goOnline(
         identity: widget.identity,
         group: widget.group,
+        preparedToken: preparedToken,
       );
-      await _connectLiveKit(createdSession);
+      await _connectLiveKit(createdSession, preparedRoom: preparedRoom);
       await _onlineRepository.markLive(createdSession);
       _heartbeatTimer?.cancel();
       _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -140,6 +149,10 @@ class _OnlineScreenState extends State<OnlineScreen> {
           reason: 'online_screen_go_online_failed',
         ),
       );
+      // If a warm room was taken but connect never claimed it, release it.
+      if (preparedRoom != null && _room != preparedRoom) {
+        unawaited(preparedRoom.dispose());
+      }
       await _disconnectLiveKit();
       if (createdSession != null) {
         try {
@@ -262,16 +275,20 @@ class _OnlineScreenState extends State<OnlineScreen> {
     }
   }
 
-  Future<void> _connectLiveKit(OnlineSession session) async {
+  Future<void> _connectLiveKit(
+    OnlineSession session, {
+    Room? preparedRoom,
+  }) async {
     await _disconnectLiveKit();
 
-    final room = Room(
-      roomOptions: const RoomOptions(
-        adaptiveStream: false,
-        dynacast: false,
-        defaultAudioOutputOptions: AudioOutputOptions(speakerOn: true),
-      ),
-    );
+    final room = preparedRoom ??
+        Room(
+          roomOptions: const RoomOptions(
+            adaptiveStream: false,
+            dynacast: false,
+            defaultAudioOutputOptions: AudioOutputOptions(speakerOn: true),
+          ),
+        );
 
     _room = room;
     _attachRoomListener(room);
