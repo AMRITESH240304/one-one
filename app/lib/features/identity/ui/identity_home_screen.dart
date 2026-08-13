@@ -32,6 +32,7 @@ import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
 import '../../groups/ui/group_management_screen.dart';
 import '../../online/data/online_repository.dart';
+import '../../online/livekit_connection_warmer.dart';
 import '../../online/livekit_status.dart';
 import '../../online/models/member_availability.dart';
 import '../../online/models/online_session.dart';
@@ -128,6 +129,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Set<String>? _pendingUserGroupIds;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   StreamSubscription<void>? _nudgeActionSubscription;
+  StreamSubscription<String>? _nudgeReceivedSubscription;
   StreamSubscription<void>? _registrationRenewalSubscription;
   StreamSubscription<void>? _inviteLinkSubscription;
   StreamSubscription<VoicePipAction>? _voicePipActionSubscription;
@@ -217,6 +219,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     ) {
       unawaited(_takePendingNudgeAction());
     });
+    _nudgeReceivedSubscription = AndroidVoiceNudgeBridge.receivedSignals.listen(
+      (groupId) => unawaited(_onNudgeReceived(groupId)),
+    );
     _registrationRenewalSubscription = AndroidVoiceNudgeBridge
         .registrationSignals
         .listen((_) {
@@ -289,6 +294,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _memberProfileSubscriptions.clear();
     _connectivitySubscription?.cancel();
     _nudgeActionSubscription?.cancel();
+    _nudgeReceivedSubscription?.cancel();
     _registrationRenewalSubscription?.cancel();
     _inviteLinkSubscription?.cancel();
     _voicePipActionSubscription?.cancel();
@@ -659,6 +665,31 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     } finally {
       _nudgeActionInFlight = false;
     }
+  }
+
+  /// Fired when this device receives a nudge (FCM arrived / playback starting),
+  /// before the user has tapped accept. Prefetches + warms the LiveKit
+  /// connection so the accept -> connected path skips the token round-trip and
+  /// the WebRTC/DNS/TLS warm-up.
+  Future<void> _onNudgeReceived(String groupId) async {
+    final group = _groups
+        .where((candidate) => candidate.groupId == groupId)
+        .firstOrNull;
+    if (group == null) return;
+    await _prefetchLiveKit(group: group);
+  }
+
+  /// Prefetches a LiveKit token and warms the local [Room]/DNS/TLS without
+  /// connecting. Best-effort: any failure here is ignored because the real
+  /// go-online path still performs a synchronous fallback.
+  Future<void> _prefetchLiveKit({required GroupSummary group}) async {
+    final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    await LiveKitConnectionWarmer.instance.prefetch(
+      repository: _onlineRepository,
+      identity: _session,
+      group: group,
+      speakerOn: speakerOn,
+    );
   }
 
   Future<void> _processNudgeAction(NudgeNotificationAction action) async {
@@ -1632,13 +1663,21 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         : MemberAvailability.walkieTalkieMode;
 
     OnlineSession? createdSession;
+    final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    final preparedToken = LiveKitConnectionWarmer.instance.takeToken(
+      group.groupId,
+    );
+    final preparedRoom = LiveKitConnectionWarmer.instance.takeWarmRoom(
+      speakerOn: speakerOn,
+    );
     try {
       createdSession = await _onlineRepository.goOnline(
         identity: _session,
         group: group,
         connectionMode: startingConnectionMode,
+        preparedToken: preparedToken,
       );
-      await _connectLiveKit(createdSession);
+      await _connectLiveKit(createdSession, preparedRoom: preparedRoom);
       if (startInCallMode) {
         await _setMicrophoneEnabled(true);
       }
@@ -1695,6 +1734,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           feature: 'presence',
         ),
       );
+      // If a warm room was taken but connect never claimed it (e.g. the
+      // permission check threw before connect), release it now.
+      if (preparedRoom != null && _room != preparedRoom) {
+        unawaited(preparedRoom.dispose());
+      }
       await _disconnectLiveKit();
       if (createdSession != null) {
         try {
@@ -2069,7 +2113,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
   }
 
-  Future<void> _connectLiveKit(OnlineSession session) async {
+  Future<void> _connectLiveKit(
+    OnlineSession session, {
+    Room? preparedRoom,
+  }) async {
     // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
     // release. Reset once per connect attempt so the post-connect subscribe
     // and first-audio steps below are only logged for THIS go-live.
@@ -2083,17 +2130,26 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     await _disconnectLiveKit();
     final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
-    // B9: Attach Krisp noise filter via capture options so it applies when
-    // the local mic track is created (walkie-talkie and call mode).
-    final noiseFilter = LiveKitNoiseFilter();
-    final room = Room(
-      roomOptions: RoomOptions(
-        adaptiveStream: false,
-        dynacast: false,
-        defaultAudioOutputOptions: AudioOutputOptions(speakerOn: speakerOn),
-        defaultAudioCaptureOptions: AudioCaptureOptions(processor: noiseFilter),
-      ),
-    );
+
+    // Reuse a pre-warmed Room (noise filter + audio route already built)
+    // when available; otherwise build one now. Neither path connects here —
+    // connect() happens below.
+    final Room room;
+    if (preparedRoom != null) {
+      room = preparedRoom;
+    } else {
+      // B9: Attach Krisp noise filter via capture options so it applies when
+      // the local mic track is created (walkie-talkie and call mode).
+      final noiseFilter = LiveKitNoiseFilter();
+      room = Room(
+        roomOptions: RoomOptions(
+          adaptiveStream: false,
+          dynacast: false,
+          defaultAudioOutputOptions: AudioOutputOptions(speakerOn: speakerOn),
+          defaultAudioCaptureOptions: AudioCaptureOptions(processor: noiseFilter),
+        ),
+      );
+    }
 
     _room = room;
     _attachRoomListener(room);
@@ -2663,6 +2719,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (_session.settings.hapticsEnabled) {
       unawaited(HapticFeedback.selectionClick());
     }
+    // Sender-side warm: prefetch this device's LiveKit token now so that if
+    // the nudge is accepted and both sides go online, joining is instant.
+    unawaited(_prefetchLiveKit(group: group));
     final onlineUserIds = <String>{
       for (final entry in _availability.entries)
         if (entry.value.isLive || entry.value.isInVoiceSession) entry.key,
