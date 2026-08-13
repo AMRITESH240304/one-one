@@ -1,4 +1,4 @@
-# One One Token API
+# Duo Token API
 
 Node/TypeScript backend for the Flutter + LiveKit walkie-talkie app.
 

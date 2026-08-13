@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Token and notification API for the One One Flutter + LiveKit walkie-talkie app.",
+  "description": "Token and notification API for the Duo Flutter + LiveKit walkie-talkie app.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",

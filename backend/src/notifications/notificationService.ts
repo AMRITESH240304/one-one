@@ -148,7 +148,7 @@ export async function sendFriendLiveNotification(input: FriendLiveInput) {
   const pushResult = await sendPushToTokens({
     tokens: recipientDevices.map((device) => device.fcmToken),
     title: `🟢 ${senderName} is live`,
-    body: "Tap to open One One 🎙️",
+    body: "Tap to open Duo 🎙️",
     data: {
       type: "friend_live",
       groupId: input.groupId,

@@ -1,4 +1,4 @@
-# One One
+# Duo
 
 Android-first Flutter + LiveKit walkie-talkie app for a small private friend group.
 
@@ -36,7 +36,7 @@ Current state: Phase 1 audio spike, Phase 3 Firebase anonymous identity/device r
 
 Android FCM registration is active. Push, 3/5/10-second ring, and six-second
 voice nudges are available from the home-screen nudge button. Timed rings use
-One One's own two-chime sound and an exact-length PCM buffer instead of the
+Duo's own two-chime sound and an exact-length PCM buffer instead of the
 phone ringtone. Ring and voice nudges use a native foreground playback service
 so Flutter does not need to be running. See
 `requirements/android-nudge-delivery.md` before deployment.

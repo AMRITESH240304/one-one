@@ -3015,11 +3015,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                         // Middle band: ephemeral bubbles sit here (own=right,
                         // others=left). Empty Expanded keeps layout stable so
                         // the feed doesn't jump the carousel when it appears.
+                        // Align to bottom so bubbles sit lower (near the status
+                        // hint) instead of floating mid-screen.
                         Expanded(
                           child: Padding(
                             padding: EdgeInsets.symmetric(horizontal: 16.w),
                             child: Align(
-                              alignment: Alignment.center,
+                              alignment: Alignment.bottomCenter,
                               child: SingleChildScrollView(
                                 reverse: true,
                                 physics: const ClampingScrollPhysics(),
@@ -3520,21 +3522,21 @@ class _StatusToggle extends StatelessWidget {
             ? 'Tap to go away'
             : 'Go online when someone is already live, or send a nudge to go together',
         child: SizedBox(
-          width: 72.w,
-          height: 48,
+          width: 58.w,
+          height: 40,
           child: Material(
             color: Colors.transparent,
             child: InkWell(
               onTap: busy || !enabled ? null : onToggle,
-              borderRadius: BorderRadius.circular(24),
+              borderRadius: BorderRadius.circular(20),
               child: Center(
                 child: Container(
                   width: double.infinity,
-                  height: 30.h,
+                  height: 24.h,
                   padding: EdgeInsets.all(2.w),
                   decoration: BoxDecoration(
                     color: const Color.fromRGBO(255, 255, 255, 0.12),
-                    borderRadius: BorderRadius.circular(18.r),
+                    borderRadius: BorderRadius.circular(14.r),
                     border: Border.all(
                       color: const Color.fromRGBO(255, 255, 255, 0.22),
                     ),
@@ -3548,13 +3550,13 @@ class _StatusToggle extends StatelessWidget {
                             ? Alignment.centerRight
                             : Alignment.centerLeft,
                         child: Container(
-                          width: 34.w,
+                          width: 26.w,
                           height: double.infinity,
                           decoration: BoxDecoration(
                             color: online
                                 ? const Color(0xff7CFF6B)
                                 : Colors.white,
-                            borderRadius: BorderRadius.circular(14.r),
+                            borderRadius: BorderRadius.circular(11.r),
                           ),
                         ),
                       ),
@@ -3563,24 +3565,24 @@ class _StatusToggle extends StatelessWidget {
                           Expanded(
                             child: Center(
                               // Matches the profile-picture away moon badge
-                              // (Icons.dark_mode_rounded @ ~9.sp).
+                              // (Icons.dark_mode_rounded @ ~13.sp).
                               child: Icon(
                                 Icons.dark_mode_rounded,
                                 color: online
                                     ? Colors.white54
                                     : const Color(0xff2a2a2a),
-                                size: 9.sp,
+                                size: 13.sp,
                               ),
                             ),
                           ),
                           Expanded(
                             child: Center(
                               child: busy
-                                  ? Text('…', style: TextStyle(fontSize: 11.sp))
+                                  ? Text('…', style: TextStyle(fontSize: 10.sp))
                                   : online
                                   ? Text(
                                       '🟢',
-                                      style: TextStyle(fontSize: 11.sp),
+                                      style: TextStyle(fontSize: 10.sp),
                                     )
                                   : const SizedBox.shrink(),
                             ),
@@ -3794,8 +3796,7 @@ class _FriendChip extends StatelessWidget {
                 right: -4,
                 bottom: -2,
                 // Away state uses a Material "dark mode" glyph inside a
-                // small circular badge (subtle shadow) instead of the old
-                // 🌙 emoji, sized down noticeably from the previous glyph.
+                // circular badge (subtle shadow) instead of the old 🌙 emoji.
                 // NOTE: no HTML/CSS reference file was available in this
                 // session, so colors are mapped to existing app tokens
                 // (avatar-chip background + white70 icon) rather than the
@@ -3804,8 +3805,8 @@ class _FriendChip extends StatelessWidget {
                 child: live
                     ? Text('🟢', style: TextStyle(fontSize: 14.sp))
                     : Container(
-                        width: 15.w,
-                        height: 15.w,
+                        width: 20.w,
+                        height: 20.w,
                         alignment: Alignment.center,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
@@ -3821,7 +3822,7 @@ class _FriendChip extends StatelessWidget {
                         child: Icon(
                           Icons.dark_mode_rounded,
                           color: Colors.white70,
-                          size: 9.sp,
+                          size: 13.sp,
                         ),
                       ),
               ),

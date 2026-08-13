@@ -20,6 +20,11 @@ const List<AccentOption> accentOptions = [
   AccentOption(key: 'amber', label: 'Amber', color: Color(0xffffb020)),
   AccentOption(key: 'pink', label: 'Pink', color: Color(0xffec4899)),
   AccentOption(key: 'teal', label: 'Teal', color: Color(0xff00b8a9)),
+  AccentOption(key: 'indigo', label: 'Indigo', color: Color(0xff6366f1)),
+  AccentOption(key: 'orange', label: 'Orange', color: Color(0xffff7a3d)),
+  AccentOption(key: 'mint', label: 'Mint', color: Color(0xff34d399)),
+  AccentOption(key: 'yellow', label: 'Yellow', color: Color(0xffeab308)),
+  AccentOption(key: 'cyan', label: 'Cyan', color: Color(0xff22d3ee)),
 ];
 
 Color accentColorForKey(String key) {

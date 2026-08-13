@@ -707,25 +707,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     subtitle: 'Choose the color used across Duo.',
                   ),
                   const SizedBox(height: 16),
-                  Wrap(
-                    spacing: 12,
-                    runSpacing: 12,
-                    children: [
-                      for (final option in accentOptions)
-                        _ColorSwatch(
-                          option: option,
-                          selected: _accentColorKey == option.key,
-                          enabled: !_saving,
-                          onSelected: () {
-                            setState(() {
-                              _accentColorKey = option.key;
-                              _hasUnsavedAccentPreview =
-                                  option.key != _persistedAccentColorKey;
-                            });
-                            AccentThemeController.setAccentKey(option.key);
-                          },
-                        ),
-                    ],
+                  // Two rows of six — 12 accents fill both runs on phone widths.
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      const columns = 6;
+                      const spacing = 12.0;
+                      final swatchSize =
+                          (constraints.maxWidth - spacing * (columns - 1)) /
+                          columns;
+                      return Wrap(
+                        spacing: spacing,
+                        runSpacing: spacing,
+                        children: [
+                          for (final option in accentOptions)
+                            SizedBox(
+                              width: swatchSize,
+                              height: swatchSize,
+                              child: _ColorSwatch(
+                                option: option,
+                                selected: _accentColorKey == option.key,
+                                enabled: !_saving,
+                                onSelected: () {
+                                  setState(() {
+                                    _accentColorKey = option.key;
+                                    _hasUnsavedAccentPreview =
+                                        option.key != _persistedAccentColorKey;
+                                  });
+                                  AccentThemeController.setAccentKey(
+                                    option.key,
+                                  );
+                                },
+                              ),
+                            ),
+                        ],
+                      );
+                    },
                   ),
                   const _SurfaceDivider(),
                   SwitchListTile.adaptive(
@@ -1790,33 +1806,37 @@ class _ColorSwatch extends StatelessWidget {
         button: true,
         selected: selected,
         label: '${option.label} accent',
-        child: SizedBox.square(
-          dimension: 48,
-          child: InkWell(
-            onTap: enabled ? onSelected : null,
-            customBorder: const CircleBorder(),
-            child: Center(
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: option.color,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: selected ? Colors.white : Colors.transparent,
-                    width: 3,
+        child: InkWell(
+          onTap: enabled ? onSelected : null,
+          customBorder: const CircleBorder(),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final side = constraints.biggest.shortestSide;
+              final circle = (side * 0.75).clamp(28.0, 40.0);
+              final checkSize = (circle * 0.53).clamp(14.0, 20.0);
+              return Center(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  width: circle,
+                  height: circle,
+                  decoration: BoxDecoration(
+                    color: option.color,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: selected ? Colors.white : Colors.transparent,
+                      width: 3,
+                    ),
                   ),
+                  child: selected
+                      ? Icon(
+                          Icons.check_rounded,
+                          color: Colors.black,
+                          size: checkSize,
+                        )
+                      : null,
                 ),
-                child: selected
-                    ? const Icon(
-                        Icons.check_rounded,
-                        color: Colors.black,
-                        size: 19,
-                      )
-                    : null,
-              ),
-            ),
+              );
+            },
           ),
         ),
       ),
