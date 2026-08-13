@@ -422,7 +422,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         return 'Nudge did not reach $name \u2014 couldn\u2019t download the audio.';
       case 'permission_denied_foreground_service':
         return 'Nudge did not reach $name \u2014 their phone blocked the app '
-            'from playing it. Ask them to reopen One One.';
+            'from playing it. Ask them to reopen Duo.';
       case 'timeout':
         return 'Nudge did not reach $name \u2014 no confirmation received.';
       default:

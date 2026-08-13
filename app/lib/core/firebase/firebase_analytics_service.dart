@@ -1,7 +1,7 @@
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:flutter/foundation.dart';
 
-/// Production Analytics wrapper for One One.
+/// Production Analytics wrapper for Duo.
 ///
 /// Event names follow Firebase conventions (snake_case, ≤40 chars).
 class AnalyticsService {

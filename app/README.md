@@ -1,6 +1,6 @@
-# One One App
+# Duo App
 
-Android-first Flutter client for the One One LiveKit walkie-talkie app.
+Android-first Flutter client for the Duo LiveKit walkie-talkie app.
 
 The app starts through Google-backed Firebase Authentication and device registration.
 
@@ -48,7 +48,7 @@ Voice recordings are AAC/M4A, mono, 64 kbps, and capped at six seconds. Incoming
 Ring and Voice nudges are handled by native Android services and can play while
 the screen is locked or the Flutter process is absent, provided the app has not
 been force-stopped and the device is online.
-Ring nudges use One One's two-chime sound rather than the device call ringtone;
+Ring nudges use Duo's two-chime sound rather than the device call ringtone;
 the generated audio buffer is exactly 3, 5, or 10 seconds long.
 Actionable notifications support Accept, Decline, and an inline Snooze choice
 for 5 or 15 minutes. Ring and Voice notifications remain in Notification

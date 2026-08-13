@@ -413,9 +413,9 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             "👋 $senderName nudged you"
         }
         val fallbackBody = if (kind == VoiceNudgeContract.kindFriendLive) {
-            "Tap to open One One 🎙️"
+            "Tap to open Duo 🎙️"
         } else {
-            "Come online on One One ✨"
+            "Come online on Duo ✨"
         }
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         val notificationKey = message.messageId ?: "${kind}_${message.sentTime}"

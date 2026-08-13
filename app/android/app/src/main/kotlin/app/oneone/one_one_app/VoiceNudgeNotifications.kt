@@ -36,7 +36,7 @@ object VoiceNudgeNotifications {
                 VoiceNudgeContract.generalNotificationChannelName,
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "Nudges and activity from your One One groups"
+                description = "Nudges and activity from your Duo groups"
                 enableVibration(true)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
@@ -48,7 +48,7 @@ object VoiceNudgeNotifications {
     private val nudgeSmallIcon = R.drawable.ic_voice_nudge
 
     /**
-     * Stylized One One logo (`new_logo.png`). Black canvas is transparent so
+     * Stylized Duo logo (`new_logo.png`). Black canvas is transparent so
      * Android's small-icon alpha mask is the logo silhouette, not a square.
      */
     private val appSmallIcon = R.drawable.new_logo

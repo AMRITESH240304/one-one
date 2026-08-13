@@ -19,7 +19,7 @@
         android:required="false" />
 
     <application
-        android:label="One One"
+        android:label="Duo"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <meta-data

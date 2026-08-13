@@ -286,7 +286,7 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
                         iconColor: visual.iconColor,
                         icon: visual.icon,
                         title: 'background activity',
-                        subtitle: 'receive nudges when one one\nisn\'t open',
+                        subtitle: 'receive nudges when duo\nisn\'t open',
                         checked: _backgroundGranted,
                         onTap: _requestBackgroundPermission,
                       ),
@@ -294,7 +294,7 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
                   ),
                   SizedBox(height: 16.h),
                   Text(
-                    '*we need those for one one to work',
+                    '*we need those for duo to work',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: const Color.fromRGBO(255, 255, 255, 0.72),

@@ -10,7 +10,7 @@ import 'revenue_cat_service.dart';
 /// Brand yellow used on auth/onboarding — not the user accent color.
 const Color _kBrandYellow = Color(0xffF8BE03);
 
-/// In-app Eleven Pro paywall matching Settings UI surfaces.
+/// In-app Duo Pro paywall matching Settings UI surfaces.
 ///
 /// Returns `true` from [open] when the user purchases or restores Pro access.
 class ElevenProPaywallScreen extends StatefulWidget {
@@ -178,7 +178,7 @@ class _ElevenProPaywallScreenState extends State<ElevenProPaywallScreen> {
       }
       setState(() {
         _busy = false;
-        _error = 'No active Eleven Pro subscription found to restore.';
+        _error = 'No active Duo Pro subscription found to restore.';
       });
     } catch (error) {
       if (!mounted) return;
@@ -250,7 +250,7 @@ class _ElevenProPaywallScreenState extends State<ElevenProPaywallScreen> {
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: true,
-        title: const Text('Eleven Pro'),
+        title: const Text('Duo Pro'),
       ),
       body: SafeArea(
         child: _loading
@@ -372,7 +372,7 @@ class _ElevenProPaywallScreenState extends State<ElevenProPaywallScreen> {
                               const SizedBox(height: 4),
                               const Text(
                                 'Prices are set by the App Store or Google Play. '
-                                'Eleven Pro is currently in beta.',
+                                'Duo Pro is currently in beta.',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   color: Colors.white38,
@@ -416,7 +416,7 @@ class _PaywallHero extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 const Text(
-                  'Eleven Pro',
+                  'Duo Pro',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 24,
@@ -429,7 +429,7 @@ class _PaywallHero extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             const Text(
-              'Get early access while Eleven Pro is in beta. Plans and perks may change as we polish the experience.',
+              'Get early access while Duo Pro is in beta. Plans and perks may change as we polish the experience.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: Colors.white60,
@@ -478,11 +478,11 @@ class _FeatureList extends StatelessWidget {
     (
       Icons.bolt_outlined,
       'Early Pro access',
-      'Unlock Eleven Pro features as they roll out during beta.',
+      'Unlock Duo Pro features as they roll out during beta.',
     ),
     (
       Icons.support_agent_outlined,
-      'Talk to Team Eleven',
+      'Talk to Team Duo',
       'Reach us directly for billing or beta feedback.',
     ),
     (
@@ -674,7 +674,7 @@ class _AlreadyProBody extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Text(
-                'You\'re on Eleven Pro',
+                'You\'re on Duo Pro',
                 style: TextStyle(
                   color: Colors.white,
                   fontSize: 22,
@@ -687,7 +687,7 @@ class _AlreadyProBody extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           const Text(
-            'Thanks for testing Eleven Pro while it\'s in beta. Manage your plan or contact Team Eleven anytime from Settings.',
+            'Thanks for testing Duo Pro while it\'s in beta. Manage your plan or contact Team Duo anytime from Settings.',
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.white60, height: 1.45),
           ),

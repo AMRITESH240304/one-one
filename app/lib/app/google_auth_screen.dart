@@ -9,7 +9,7 @@ class GoogleAuthScreen extends StatefulWidget {
 
   /// When true, shows the brand splash (logo + pulse dots) only — never the
   /// signed-out welcome CTA. Used while Firebase is still initializing so a
-  /// returning signed-in session never flashes "Welcome to One One".
+  /// returning signed-in session never flashes "Welcome to Duo".
   final bool initializing;
 
   @override
@@ -96,7 +96,7 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
               ),
               SizedBox(height: 36.h),
               Text(
-                'Welcome to One One',
+                'Welcome to Duo',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: const Color(0xff252a2e),

@@ -1437,7 +1437,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 ),
                 SizedBox(height: 8.h),
                 Text(
-                  'Share this link. Your friend will open One One and join this group automatically.',
+                  'Share this link. Your friend will open Duo and join this group automatically.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Colors.white70, fontSize: 14.sp),
                 ),

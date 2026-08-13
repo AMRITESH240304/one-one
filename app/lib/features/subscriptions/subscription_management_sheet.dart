@@ -4,10 +4,10 @@ import 'package:purchases_ui_flutter/purchases_ui_flutter.dart';
 
 import '../../app/app_config.dart';
 
-/// Manage Subscription sheet with store management + Team Eleven contact.
+/// Manage Subscription sheet with store management + Team Duo contact.
 ///
 /// Keeps Customer Center for store-side cancel/upgrade flows while exposing
-/// a clear in-app contact path during Eleven Pro beta.
+/// a clear in-app contact path during Duo Pro beta.
 class SubscriptionManagementSheet extends StatelessWidget {
   const SubscriptionManagementSheet({super.key});
 
@@ -22,8 +22,8 @@ class SubscriptionManagementSheet extends StatelessWidget {
     );
   }
 
-  static Future<void> contactTeamEleven(BuildContext context) {
-    return _promptContactTeamEleven(context);
+  static Future<void> contactTeamDuo(BuildContext context) {
+    return _promptContactTeamDuo(context);
   }
 
   Future<void> _openCustomerCenter(BuildContext context) async {
@@ -41,8 +41,8 @@ class SubscriptionManagementSheet extends StatelessWidget {
     }
   }
 
-  Future<void> _contactTeamEleven(BuildContext context) {
-    return _promptContactTeamEleven(context);
+  Future<void> _contactTeamDuo(BuildContext context) {
+    return _promptContactTeamDuo(context);
   }
 
   @override
@@ -94,7 +94,7 @@ class SubscriptionManagementSheet extends StatelessWidget {
                       ),
                       SizedBox(height: 2),
                       Text(
-                        'Eleven Pro is currently in beta.',
+                        'Duo Pro is currently in beta.',
                         style: TextStyle(color: Colors.white54, fontSize: 12.5),
                       ),
                     ],
@@ -112,9 +112,9 @@ class SubscriptionManagementSheet extends StatelessWidget {
             const SizedBox(height: 8),
             _SheetAction(
               icon: Icons.mail_outline_rounded,
-              label: 'Contact Team Eleven',
+              label: 'Contact Team Duo',
               subtitle: 'Billing questions & beta feedback',
-              onTap: () => _contactTeamEleven(context),
+              onTap: () => _contactTeamDuo(context),
             ),
             const SizedBox(height: 12),
             const Text(
@@ -133,8 +133,8 @@ class SubscriptionManagementSheet extends StatelessWidget {
   }
 }
 
-Future<void> _promptContactTeamEleven(BuildContext context) async {
-  final email = AppConfig.teamElevenContactEmail;
+Future<void> _promptContactTeamDuo(BuildContext context) async {
+  final email = AppConfig.teamDuoContactEmail;
 
   try {
     await Clipboard.setData(ClipboardData(text: email));
@@ -149,7 +149,7 @@ Future<void> _promptContactTeamEleven(BuildContext context) async {
       return AlertDialog(
         backgroundColor: const Color(0xff1b1b1b),
         title: const Text(
-          'Contact Team Eleven',
+          'Contact Team Duo',
           style: TextStyle(color: Colors.white),
         ),
         content: Column(
@@ -157,7 +157,7 @@ Future<void> _promptContactTeamEleven(BuildContext context) async {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Eleven Pro is in beta. Email us about billing, access, or feedback:',
+              'Duo Pro is in beta. Email us about billing, access, or feedback:',
               style: TextStyle(color: Colors.white70, height: 1.4),
             ),
             const SizedBox(height: 14),

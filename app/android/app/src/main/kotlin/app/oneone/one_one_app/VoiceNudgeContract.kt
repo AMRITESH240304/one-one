@@ -14,7 +14,7 @@ object VoiceNudgeContract {
     const val notificationChannelId = "voice_nudges"
     const val notificationChannelName = "Voice nudges"
     const val generalNotificationChannelId = "walkie_alerts_v2"
-    const val generalNotificationChannelName = "One One alerts"
+    const val generalNotificationChannelName = "Duo alerts"
 
     const val extraKind = "kind"
     const val extraEventId = "eventId"

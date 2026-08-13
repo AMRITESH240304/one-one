@@ -122,7 +122,7 @@ class VoiceSessionService : Service() {
         }
         return builder
             .setSmallIcon(R.drawable.ic_notification_app)
-            .setContentTitle("🎙️ One One voice session")
+            .setContentTitle("🎙️ Duo voice session")
             .setContentText("Live and listening 🟢")
             .setContentIntent(openApp)
             .setCategory(Notification.CATEGORY_CALL)

@@ -46,7 +46,7 @@ class OneOneApp extends StatelessWidget {
     // element tree while screens are still mid setState/pop after save and
     // trips '_dependents.isEmpty'. Accent is applied via Theme in `builder`.
     return MaterialApp(
-      title: 'One One',
+      title: 'Duo',
       debugShowCheckedModeBanner: false,
       navigatorObservers: [AnalyticsService.observer],
       routes: {
@@ -150,7 +150,7 @@ class _FirebaseGateState extends State<_FirebaseGate> {
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           // Brand splash only — not the signed-out welcome CTA. Returning
-          // sessions must not flash "Welcome to One One" while Firebase boots.
+          // sessions must not flash "Welcome to Duo" while Firebase boots.
           return const GoogleAuthScreen(initializing: true);
         }
 

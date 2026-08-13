@@ -77,6 +77,8 @@ dependencies {
     implementation("com.google.firebase:firebase-messaging")
     implementation("com.google.firebase:firebase-crashlytics")
     implementation("com.google.firebase:firebase-perf")
-    implementation("com.android.billingclient:billing:7.1.1")
+    // Play requires Billing Library ≥ 8.0.0 (deadline Aug 31, 2026).
+    // Keep aligned with purchases_flutter / RevenueCat (bc8 → 8.3.x).
+    implementation("com.android.billingclient:billing:8.3.0")
     implementation("androidx.media3:media3-exoplayer:1.10.1")
 }

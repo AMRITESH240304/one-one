@@ -188,10 +188,10 @@ class MainActivity : FlutterFragmentActivity() {
                     } else {
                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "Join my One One group")
+                            putExtra(Intent.EXTRA_SUBJECT, "Join my Duo group")
                             putExtra(
                                 Intent.EXTRA_TEXT,
-                                "Join my group on One One: $inviteUrl",
+                                "Join my group on Duo: $inviteUrl",
                             )
                         }
                         startActivity(Intent.createChooser(shareIntent, "Share group invite"))

@@ -350,7 +350,7 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     /**
-     * Builds One One's own ring instead of delegating to the phone ringtone.
+     * Builds Duo's own ring instead of delegating to the phone ringtone.
      * Each phrase is two short rising chimes followed by breathing space.
      */
     private fun buildNudgeRing(durationMs: Long): ShortArray {

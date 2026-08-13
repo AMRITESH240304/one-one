@@ -209,7 +209,7 @@ class NudgeRepository {
     }
     if (targetDevices == 0) {
       throw const NudgeDeliveryException(
-        'The recipient has no registered Android device. Ask them to open One One once.',
+        'The recipient has no registered Android device. Ask them to open Duo once.',
       );
     }
     if (sent == 0) {

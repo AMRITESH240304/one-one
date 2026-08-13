@@ -33,7 +33,7 @@ class WalkieForegroundTaskHandler extends TaskHandler {
     });
 
     FlutterForegroundTask.updateService(
-      notificationTitle: 'One One is online',
+      notificationTitle: 'Duo is online',
       notificationText: 'Status: $_status | heartbeat $_heartbeatCount',
     );
   }
@@ -203,7 +203,7 @@ class WalkieForegroundTaskHandler extends TaskHandler {
       );
 
       FlutterForegroundTask.updateService(
-        notificationTitle: 'One One is online',
+        notificationTitle: 'Duo is online',
         notificationText: enabled ? 'Talking' : 'Live and listening',
       );
     } catch (error) {

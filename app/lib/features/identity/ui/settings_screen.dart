@@ -403,7 +403,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _logOut() async {
     final confirmed = await _confirmAccountAction(
       title: 'Log out?',
-      message: 'You will need to sign in with Google to use One One again.',
+      message: 'You will need to sign in with Google to use Duo again.',
       actionLabel: 'Log out',
     );
     if (!confirmed || !mounted) return;
@@ -428,7 +428,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final confirmed = await _confirmAccountAction(
       title: 'Delete account permanently?',
       message:
-          'Your One One profile, device information, and preferences will be deleted. This cannot be undone.',
+          'Your Duo profile, device information, and preferences will be deleted. This cannot be undone.',
       actionLabel: 'Delete account',
       destructive: true,
     );
@@ -583,13 +583,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (groupEnded && mounted) Navigator.of(context).pop();
   }
 
-  /// Opens the in-app Eleven Pro paywall (branded UI + RevenueCat packages).
+  /// Opens the in-app Duo Pro paywall (branded UI + RevenueCat packages).
   Future<void> _showPaywall() async {
     try {
       final purchased = await ElevenProPaywallScreen.open(context);
       if (!mounted) return;
       if (purchased) {
-        setState(() => _message = 'Welcome to Eleven Pro!');
+        setState(() => _message = 'Welcome to Duo Pro!');
       }
     } catch (error) {
       if (!mounted) return;
@@ -598,7 +598,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  /// Manage Subscription sheet: store Customer Center + Contact Team Eleven.
+  /// Manage Subscription sheet: store Customer Center + Contact Team Duo.
   Future<void> _showManageSubscription() {
     return SubscriptionManagementSheet.show(context);
   }
@@ -704,7 +704,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _PreferenceHeading(
                     icon: Icons.palette_outlined,
                     title: 'Accent color',
-                    subtitle: 'Choose the color used across One One.',
+                    subtitle: 'Choose the color used across Duo.',
                   ),
                   const SizedBox(height: 16),
                   Wrap(
@@ -1659,7 +1659,7 @@ class _ElevenProSettingsCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Eleven Pro',
+                    'Duo Pro',
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 16,

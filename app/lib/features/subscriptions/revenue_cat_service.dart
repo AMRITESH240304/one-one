@@ -33,6 +33,22 @@ class RevenueCatService {
         ? AppConfig.revenueCatAppleApiKey
         : AppConfig.revenueCatGoogleApiKey;
 
+    // Release / Play builds must never configure the Test Store key — that
+    // triggers RevenueCat's "Wrong API Key" dialog and force-closes the app.
+    if (!kDebugMode && apiKey.startsWith('test_')) {
+      throw StateError(
+        'RevenueCat Test Store API key used in a non-debug build. '
+        'Pass --dart-define=REVENUECAT_GOOGLE_API_KEY=goog_... '
+        '(or ONE_ONE_REVENUECAT_ANDROID_API_KEY) when building release.',
+      );
+    }
+
+    debugPrint(
+      '[RevenueCat] configure key kind='
+      '${apiKey.startsWith('goog_') ? 'goog' : apiKey.startsWith('appl_') ? 'appl' : apiKey.startsWith('test_') ? 'test' : 'other'} '
+      'len=${apiKey.length}',
+    );
+
     await Purchases.configure(PurchasesConfiguration(apiKey));
     if (kDebugMode) {
       await Purchases.setLogLevel(LogLevel.debug);
@@ -91,7 +107,7 @@ class RevenueCatService {
     }
   }
 
-  /// Returns true when the current user has an active "Eleven Pro"
+  /// Returns true when the current user has an active "Duo Pro"
   /// entitlement, whether through subscription or lifetime purchase.
   Future<bool> isEntitledToPro() async {
     try {
@@ -181,7 +197,7 @@ class RevenueCatService {
 // 3. Replace `test_xyMARSpeunlaQbPftjTriypqInZ` in AppConfig (or the
 //    REVENUECAT_GOOGLE_API_KEY / REVENUECAT_APPLE_API_KEY env vars)
 //    with the production key.
-// 4. The entitlement ID (`Eleven Pro`) and package identifiers
+// 4. The entitlement ID (`Eleven Pro` in RC; shown as Duo Pro in UI) and package identifiers
 //    (`monthly`, `three_month`, `yearly`) carry over unchanged between
 //    sandbox and production — no code changes needed.
 // ═══════════════════════════════════════════════════════════════════
