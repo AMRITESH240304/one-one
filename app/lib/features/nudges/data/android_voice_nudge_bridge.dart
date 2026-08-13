@@ -180,7 +180,6 @@ class NudgeDeliveryResult {
     this.attention,
     this.recipientName,
     this.recipientUserId,
-    this.ambientNoiseLevel,
   });
 
   final String eventId;
@@ -194,37 +193,23 @@ class NudgeDeliveryResult {
   final String? reason;
 
   /// Audibility concern for an otherwise-successful playback
-  /// (`volume_muted`, `volume_low`, or `do_not_disturb`).
+  /// (`volume_muted` or `volume_low`). This is a warning, never a failure.
   final String? attention;
 
   final String? recipientName;
   final String? recipientUserId;
 
-  /// B7: `high`, `medium`, `low`, or null if not sampled.
-  final String? ambientNoiseLevel;
-
   bool get played => status == 'played';
 
   /// True when the nudge played but the recipient probably didn't hear it
-  /// (muted / very low volume / Do Not Disturb).
+  /// (muted / very low volume).
   bool get playedButNotAudible => played && attention != null;
-
-  /// Human-readable description of the ambient noise level for UI display.
-  String? get ambientNoiseLabel {
-    return switch (ambientNoiseLevel) {
-      'high' => '🔊 surroundings are loud',
-      'medium' => '🔉 moderate noise',
-      'low' => '🔈 quiet surroundings',
-      _ => null,
-    };
-  }
 
   /// Human-readable description of the audibility concern for UI display.
   String? get attentionLabel {
     return switch (attention) {
       'volume_muted' => 'their volume was muted',
-      'volume_low' => 'their volume was very low',
-      'do_not_disturb' => 'their phone is on Do Not Disturb',
+      'volume_low' => 'their volume was too low',
       _ => null,
     };
   }
@@ -251,10 +236,6 @@ class NudgeDeliveryResult {
           raw['recipientUserId']?.toString().trim().isEmpty ?? true
           ? null
           : raw['recipientUserId'].toString().trim(),
-      ambientNoiseLevel:
-          raw['ambientNoiseLevel']?.toString().trim().isEmpty ?? true
-          ? null
-          : raw['ambientNoiseLevel'].toString().trim(),
     );
   }
 }

@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { getRealtimeDatabase } from "../firebase/database.js";
-import { sendAndroidDataPushes, sendPushToTokens } from "../firebase/messaging.js";
+import { sendAndroidDataPushes } from "../firebase/messaging.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
 
@@ -91,24 +91,17 @@ function isAckTicket(value: unknown): value is AckTicket {
 
 export type NudgeDeliveryStatus = "played" | "failed";
 
-// B7: "high" / "medium" / "low" ambient noise reading sampled by the
-// receiver's device for ~10s after the nudge finished playing. Arrives as
-// its own follow-up ack (same eventId/status="played") once sampling
-// completes, separate from the initial played/failed ack.
-export type AmbientNoiseLevel = "high" | "medium" | "low";
-
 export type RecordNudgeDeliveryInput = {
   ticket: AckTicket;
   status: NudgeDeliveryStatus;
   reason?: string;
-  /** Audibility concern for an otherwise-successful playback (mute/low/DND). */
+  /** Audibility concern for an otherwise-successful playback (mute/low). */
   attention?: string;
   health?: Record<string, unknown>;
-  ambientNoiseLevel?: AmbientNoiseLevel;
 };
 
 export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
-  const { ticket, status, reason, attention, health, ambientNoiseLevel } = input;
+  const { ticket, status, reason, attention, health } = input;
   const now = nowSeconds();
 
   // Best-effort audit trail — never blocks the ack or the sender push.
@@ -125,7 +118,6 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
       reason: reason ?? null,
       attention: attention ?? null,
       health: health ?? null,
-      ...(ambientNoiseLevel ? { ambientNoiseLevel } : {}),
       recordedAt: now
     })
     .catch((error) => {
@@ -142,19 +134,14 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
 
   // Core troubleshooting: maintain a per-recipient rollup so we can identify
   // users who repeatedly fail to receive nudges without scanning every event.
-  // Only the primary playback ack counts — the ~10s-later ambient-noise
-  // follow-up (which carries `ambientNoiseLevel`) re-acks the same event as
-  // "played" and must not double-count the rollup.
-  if (!ambientNoiseLevel) {
-    await upsertRecipientDeliveryRollup({
-      ticket,
-      status,
-      reason,
-      attention,
-      health,
-      now
-    });
-  }
+  await upsertRecipientDeliveryRollup({
+    ticket,
+    status,
+    reason,
+    attention,
+    health,
+    now
+  });
 
   logger.info(
     {
@@ -166,8 +153,7 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
       status,
       reason: reason ?? null,
       attention: attention ?? null,
-      health: health ?? null,
-      ambientNoiseLevel: ambientNoiseLevel ?? null
+      health: health ?? null
     },
     "nudge delivery outcome recorded"
   );
@@ -195,50 +181,17 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
         recipientName: ticket.recipientName,
         status,
         reason: reason ?? "",
-        attention: attention ?? "",
-        ambientNoiseLevel: ambientNoiseLevel ?? ""
+        attention: attention ?? ""
       }
     })),
     30 * 1000
   );
-
-  // Only a genuinely loud environment is worth surfacing as a real OS
-  // notification — quiet/moderate readings are just informational data the
-  // sheet can show inline while it's still open, not worth interrupting for.
-  if (status === "played" && ambientNoiseLevel === "high") {
-    await sendPushToTokens({
-      tokens: senderDevices,
-      title: "It sounds noisy over there \u{1F50A}",
-      body: `${ticket.recipientName} may not have heard your nudge clearly \u2014 it's loud around them right now.`,
-      data: {
-        type: "nudge_ambient_noise",
-        eventId: ticket.eventId,
-        groupId: ticket.groupId,
-        kind: ticket.kind,
-        recipientUserId: ticket.recipientUserId,
-        recipientName: ticket.recipientName,
-        status,
-        ambientNoiseLevel
-      }
-    }).catch((error) => {
-      logger.warn(
-        {
-          checkpoint: "NUDGE-DELIVERY-BE-W2",
-          category: "expected",
-          eventId: ticket.eventId,
-          error: describeError(error)
-        },
-        "failed to send ambient-noise notification to sender (non-fatal)"
-      );
-    });
-  }
 
   return {
     eventId: ticket.eventId,
     status,
     reason: reason ?? null,
     attention: attention ?? null,
-    ambientNoiseLevel: ambientNoiseLevel ?? null,
     notifiedSenderDevices: senderDevices.length,
     sent: pushResult.successCount
   };
