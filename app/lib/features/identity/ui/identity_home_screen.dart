@@ -3019,7 +3019,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                         // hint) instead of floating mid-screen.
                         Expanded(
                           child: Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 16.w),
+                            padding: EdgeInsets.fromLTRB(16.w, 0, 16.w, 14.h),
                             child: Align(
                               alignment: Alignment.bottomCenter,
                               child: SingleChildScrollView(
@@ -3522,7 +3522,7 @@ class _StatusToggle extends StatelessWidget {
             ? 'Tap to go away'
             : 'Go online when someone is already live, or send a nudge to go together',
         child: SizedBox(
-          width: 58.w,
+          width: 66.w,
           height: 40,
           child: Material(
             color: Colors.transparent,
@@ -3550,7 +3550,7 @@ class _StatusToggle extends StatelessWidget {
                             ? Alignment.centerRight
                             : Alignment.centerLeft,
                         child: Container(
-                          width: 26.w,
+                          width: 30.w,
                           height: double.infinity,
                           decoration: BoxDecoration(
                             color: online
