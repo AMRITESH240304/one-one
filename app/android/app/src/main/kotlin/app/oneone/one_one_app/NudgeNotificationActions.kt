@@ -102,6 +102,33 @@ object NudgeDeliveryResultDispatcher {
     }
 }
 
+/**
+ * Signals Flutter that a nudge has *arrived* on this device (FCM received and
+ * native playback is starting), before the user has tapped accept. This lets
+ * the app prefetch/warm the LiveKit connection while the user is still
+ * deciding, so the accept -> connected latency is much lower. Only fires when
+ * the Flutter engine is attached; a killed app simply falls back to a normal
+ * cold connect.
+ */
+object NudgeReceivedDispatcher {
+    @Volatile
+    private var channel: MethodChannel? = null
+
+    fun attach(methodChannel: MethodChannel) {
+        channel = methodChannel
+    }
+
+    fun detach(methodChannel: MethodChannel) {
+        if (channel === methodChannel) channel = null
+    }
+
+    fun signal(groupId: String) {
+        Handler(Looper.getMainLooper()).post {
+            channel?.invokeMethod("onNudgeReceived", groupId)
+        }
+    }
+}
+
 class NudgeNotificationActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val responseAction = when (intent.action) {

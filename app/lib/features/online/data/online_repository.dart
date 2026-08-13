@@ -9,6 +9,7 @@ import '../../identity/models/identity_session.dart';
 import '../models/livekit_token_response.dart';
 import '../models/member_availability.dart';
 import '../models/online_session.dart';
+import '../models/prepared_livekit_token.dart';
 
 class OnlineRepository {
   OnlineRepository({ApiClient? apiClient, FirebaseDatabase? database})
@@ -22,18 +23,29 @@ class OnlineRepository {
     required IdentitySession identity,
     required GroupSummary group,
     String connectionMode = MemberAvailability.walkieTalkieMode,
+    PreparedLiveKitToken? preparedToken,
   }) async {
     await _requestOnlinePermissions();
 
     final now = _nowSeconds();
-    final serviceSessionId = const Uuid().v4();
-    final livekitSessionId = const Uuid().v4();
-    final token = await _requestLiveKitToken(
-      groupId: group.groupId,
-      deviceId: identity.deviceId,
-      serviceSessionId: serviceSessionId,
-      livekitSessionId: livekitSessionId,
-    );
+    final String serviceSessionId;
+    final String livekitSessionId;
+    final LiveKitTokenResponse token;
+
+    if (preparedToken != null && preparedToken.isUsableAt(now)) {
+      serviceSessionId = preparedToken.serviceSessionId;
+      livekitSessionId = preparedToken.livekitSessionId;
+      token = preparedToken.response;
+    } else {
+      serviceSessionId = const Uuid().v4();
+      livekitSessionId = const Uuid().v4();
+      token = await _requestLiveKitToken(
+        groupId: group.groupId,
+        deviceId: identity.deviceId,
+        serviceSessionId: serviceSessionId,
+        livekitSessionId: livekitSessionId,
+      );
+    }
 
     final session = OnlineSession(
       groupId: group.groupId,
@@ -277,6 +289,29 @@ class OnlineRepository {
       'livekitSessionId': livekitSessionId,
     });
     return LiveKitTokenResponse.fromJson(response);
+  }
+
+  /// Fetches a LiveKit token ahead of time (without touching RTDB presence)
+  /// so the actual accept can skip the token round-trip. Returns the token
+  /// plus the session ids it was issued under, so callers can reuse both for
+  /// a fully consistent go-online record.
+  Future<PreparedLiveKitToken> prepareToken({
+    required String groupId,
+    required String deviceId,
+  }) async {
+    final serviceSessionId = const Uuid().v4();
+    final livekitSessionId = const Uuid().v4();
+    final token = await _requestLiveKitToken(
+      groupId: groupId,
+      deviceId: deviceId,
+      serviceSessionId: serviceSessionId,
+      livekitSessionId: livekitSessionId,
+    );
+    return PreparedLiveKitToken(
+      response: token,
+      serviceSessionId: serviceSessionId,
+      livekitSessionId: livekitSessionId,
+    );
   }
 
   Future<void> _requestOnlinePermissions() async {

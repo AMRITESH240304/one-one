@@ -11,11 +11,15 @@ import 'app/startup_performance.dart';
 import 'core/firebase/crashlytics_service.dart';
 import 'core/firebase/firebase_analytics_service.dart';
 import 'core/firebase/firebase_performance_service.dart';
+import 'features/online/livekit_connection_warmer.dart';
 import 'features/subscriptions/revenue_cat_service.dart';
 
 Future<void> main() async {
   await runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    // Touch-load the WebRTC native library in the background now so the
+    // jingle_peerconnection_so load does not sit on the first go-online path.
+    unawaited(LiveKitConnectionWarmer.instance.ensureWebRtcInitialized());
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => logStartupMilestone('first Flutter frame'),
     );

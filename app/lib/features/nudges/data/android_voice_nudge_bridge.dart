@@ -14,6 +14,8 @@ class AndroidVoiceNudgeBridge {
       StreamController<void>.broadcast();
   static final StreamController<NudgeDeliveryResult> _deliveryResults =
       StreamController<NudgeDeliveryResult>.broadcast();
+  static final StreamController<String> _receivedSignals =
+      StreamController<String>.broadcast();
   static bool _handlerInstalled = false;
 
   static Stream<void> get actionSignals {
@@ -24,6 +26,14 @@ class AndroidVoiceNudgeBridge {
   static Stream<void> get registrationSignals {
     _installHandler();
     return _registrationSignals.stream;
+  }
+
+  /// Emits the `groupId` of a nudge the instant the native side receives it
+  /// (FCM arrived / playback starting), before the user taps accept. Used to
+  /// prefetch/warm LiveKit so accept is faster.
+  static Stream<String> get receivedSignals {
+    _installHandler();
+    return _receivedSignals.stream;
   }
 
   /// Real-time played/failed outcomes for ring + voice nudges this device
@@ -43,6 +53,9 @@ class AndroidVoiceNudgeBridge {
       } else if (call.method == 'onFcmRegistrationRenewed') {
         debugPrint('[OneOneFCM][DART-06] Native registration renewed');
         _registrationSignals.add(null);
+      } else if (call.method == 'onNudgeReceived') {
+        final groupId = call.arguments?.toString().trim() ?? '';
+        if (groupId.isNotEmpty) _receivedSignals.add(groupId);
       } else if (call.method == 'onNudgeDeliveryResult') {
         final raw = call.arguments;
         if (raw is Map) {
