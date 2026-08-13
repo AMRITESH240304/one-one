@@ -94,12 +94,9 @@ const nudgeAckSchema = z.object({
   status: z.enum(["played", "failed"]),
   reason: z.string().min(1).max(120).optional(),
   // Audibility concern for an otherwise-successful playback
-  // (volume_muted / volume_low / do_not_disturb).
+  // (volume_muted / volume_low).
   attention: z.string().min(1).max(120).optional(),
-  health: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
-  // B7: ambient noise sampled by the receiver for ~10s after playback,
-  // arrives via its own follow-up ack once sampling completes.
-  ambientNoiseLevel: z.enum(["high", "medium", "low"]).optional()
+  health: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
 });
 
 const nudgeResponseSchema = z.discriminatedUnion("action", [
@@ -543,8 +540,7 @@ export function createNotificationRoutes() {
         status: body.status,
         reason: body.reason,
         attention: body.attention,
-        health: body.health,
-        ambientNoiseLevel: body.ambientNoiseLevel
+        health: body.health
       });
       response.status(200).json(result);
     })

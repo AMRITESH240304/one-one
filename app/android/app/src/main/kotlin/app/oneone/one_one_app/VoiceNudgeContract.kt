@@ -38,10 +38,6 @@ object VoiceNudgeContract {
     const val kindGoneOffline = "gone_offline"
     const val kindResponse = "nudge_response"
     const val kindDeliveryResult = "nudge_delivery_result"
-    // B7: follow-up push sent once the receiver's ~10s post-playback ambient
-    // sample comes back "high" — surfaced as a real OS notification since the
-    // sender's nudge sheet is almost certainly closed by the time this arrives.
-    const val kindAmbientNoise = "nudge_ambient_noise"
 
     const val actionAccept = "app.oneone.action.ACCEPT_NUDGE"
     const val actionConnect = "app.oneone.action.CONNECT_NUDGE"
@@ -75,7 +71,7 @@ object VoiceNudgeTokenStore {
 // launch) ──
 //
 // VoiceNudgePlaybackService.acknowledge() already POSTs a rich ack (with
-// health/ambient-noise data) once the service is running. But when the
+// health data) once the service is running. But when the
 // service never starts at all, nothing ever calls that, so the sender was
 // previously left with no signal beyond a generic ~12s client-side timeout
 // with no specific reason. This lightweight, fire-and-forget helper lets the

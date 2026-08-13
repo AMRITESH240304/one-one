@@ -39,6 +39,7 @@ import '../../online/presence_config.dart';
 import '../../online/voice_pip_bridge.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../../nudges/data/nudge_repository.dart';
+import '../../nudges/nudge_status_memory.dart';
 import '../../nudges/ui/nudge_screen.dart';
 import '../../talk/data/talk_repository.dart';
 import '../../talk/models/emoji_burst.dart';
@@ -693,6 +694,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (!_isOnline) {
       throw StateError('Could not enter the nudge group.');
     }
+    // The receiver accepted the nudge (or this device accepted one) — the
+    // last sent nudge is no longer the active pending state.
+    NudgeStatusMemory.instance.clear(action.groupId);
     if (action.action != 'accept') return;
     await _nudgeRepository.respond(
       groupId: action.groupId,

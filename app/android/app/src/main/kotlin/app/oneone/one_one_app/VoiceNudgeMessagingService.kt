@@ -195,14 +195,6 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 forwardDeliveryResult(message)
                 return
             }
-            VoiceNudgeContract.kindAmbientNoise -> {
-                // Still forward it in case the sender's nudge sheet happens
-                // to be open, then show a real notification as the primary
-                // channel since that's the common case.
-                forwardDeliveryResult(message)
-                showAmbientNoiseNotification(message)
-                return
-            }
             VoiceNudgeContract.kindVoice,
             VoiceNudgeContract.kindRing -> Unit
             else -> {
@@ -350,34 +342,6 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             )
         } catch (error: SecurityException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
-        }
-    }
-
-    // B7: shown as a genuine OS notification because it arrives ~10s after
-    // playback, well after the sender's in-app nudge sheet has likely closed.
-    private fun showAmbientNoiseNotification(message: RemoteMessage) {
-        val data = message.data
-        val eventId = data["eventId"] ?: "ambient_${message.sentTime}"
-        val recipientName = data["recipientName"]?.take(80).orEmpty().ifBlank { "They" }
-        val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
-        try {
-            manager.notify(
-                VoiceNudgeNotifications.idFor("ambient_$eventId"),
-                VoiceNudgeNotifications.buildGeneral(
-                    this,
-                    message.notification?.title ?: "It sounds noisy over there \uD83D\uDD0A",
-                    message.notification?.body
-                        ?: "$recipientName may not have heard your nudge clearly.",
-                    data["groupId"],
-                ),
-            )
-            Log.i(
-                VoiceNudgeDiagnostics.tag,
-                "[NUDGE-AMBIENT-01] Ambient-noise notification displayed " +
-                    "eventSuffix=${eventId.takeLast(6)}",
-            )
-        } catch (error: SecurityException) {
-            VoiceNudgeDiagnostics.logFailure("[NUDGE-AMBIENT-E01] Notification permission", error)
         }
     }
 
@@ -591,13 +555,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 "status" to status,
                 "reason" to data["reason"]?.takeIf { it.isNotBlank() },
                 // Audibility concern for an otherwise-played nudge
-                // (volume_muted / volume_low / do_not_disturb).
+                // (volume_muted / volume_low).
                 "attention" to data["attention"]?.takeIf { it.isNotBlank() },
                 "recipientUserId" to data["recipientUserId"],
                 "recipientName" to data["recipientName"],
-                // B7: ambient noise reading, if this delivery result came
-                // from the ~10s post-playback follow-up ack.
-                "ambientNoiseLevel" to data["ambientNoiseLevel"]?.takeIf { it.isNotBlank() },
             ),
         )
     }
