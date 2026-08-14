@@ -8,7 +8,6 @@ import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.content.Intent
-import android.util.Log
 import android.util.Rational
 import com.google.firebase.FirebaseApp
 import com.google.firebase.installations.FirebaseInstallations

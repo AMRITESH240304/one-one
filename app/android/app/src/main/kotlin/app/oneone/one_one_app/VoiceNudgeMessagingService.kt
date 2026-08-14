@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.SystemClock
-import android.util.Log
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
@@ -239,6 +238,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             putExtra(VoiceNudgeContract.extraKind, kind)
             putExtra(VoiceNudgeContract.extraEventId, eventId)
             putExtra(VoiceNudgeContract.extraSenderName, senderName)
+            putExtra(VoiceNudgeContract.extraSenderUserId, data["senderUserId"])
             putExtra(VoiceNudgeContract.extraSenderPhotoUrl, senderPhotoUrl)
             putExtra(VoiceNudgeContract.extraSenderAvatarAsset, senderAvatarAsset)
             putExtra(VoiceNudgeContract.extraDurationMs, durationMs)
@@ -271,6 +271,9 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                     "error" to (error.message ?: "unknown"),
                     "error_class" to error.javaClass.simpleName,
                 ),
+                groupId = data["groupId"],
+                senderUserId = data["senderUserId"],
+                senderName = senderName,
             )
             // The playback service never got a chance to run (and therefore
             // never got to POST its own ack) — report the specific reason

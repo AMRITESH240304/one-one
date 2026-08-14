@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import io.flutter.plugin.common.MethodChannel
 import java.net.HttpURLConnection

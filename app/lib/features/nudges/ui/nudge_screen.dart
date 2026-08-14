@@ -497,16 +497,20 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   String _shortFailureWithReason(String name, String? reason) {
     switch (reason) {
-      case 'playback_error':
-      case 'playback_service_start_error':
-        return 'Nudge did not reach $name \u2014 error on their device.';
-      case 'download_error':
-        return 'Nudge did not reach $name \u2014 couldn\u2019t download the audio.';
+      // Receiver-device conditions \u2014 show a specific, actionable cause so the
+      // sender knows it's not Duo's fault.
       case 'permission_denied_foreground_service':
         return 'Nudge did not reach $name \u2014 their phone blocked the app '
             'from playing it. Ask them to reopen Duo.';
+      // Duo-side bugs \u2014 be honest that it's our fault. (A "send a report"
+      // affordance will be wired here once the receiver-log delivery channel
+      // is chosen.)
+      case 'playback_error':
+      case 'playback_service_start_error':
+      case 'download_error':
       case 'timeout':
-        return 'Nudge did not reach $name \u2014 no confirmation received.';
+        return 'Nudge did not reach $name \u2014 something went wrong on '
+            'Duo\u2019s end.';
       default:
         return 'Nudge did not reach $name.';
     }
