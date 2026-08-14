@@ -53,6 +53,7 @@ class VoiceNudgePlaybackService : Service() {
     private var activeHealth: NudgeHealthSnapshot? = null
     private var ackedEventId: String? = null
     private var lastPosted: PostedNotification? = null
+    private var activeTimeout: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -96,27 +97,63 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-10] Playback service accepted kind=${request.kind} " +
                 "eventSuffix=${request.eventId.takeLast(6)}",
         )
-        val notificationId = VoiceNudgeNotifications.idFor(request.eventId)
-        startForegroundMediaPlayback(
-            notificationId,
-            notification(
-                request,
-                "Preparing nudge… 🎙️",
-                ongoing = true,
-                cachedAudioAvailable = false,
-            ),
-        )
-        NotificationAvatarHelper.loadAsync(
-            this,
-            request.senderPhotoUrl,
-            request.senderName,
-            request.senderAvatarAsset,
-        ) {
-            refreshPostedNotification()
+
+        val isDuplicate =
+            active?.eventId == request.eventId || queue.any { it.eventId == request.eventId }
+
+        if (isDuplicate) {
+            // The same nudge is already playing or already queued — don't
+            // requeue it and don't repost its notification.
+            processNext()
+            return START_NOT_STICKY
         }
-        if (active?.eventId != request.eventId && queue.none { it.eventId == request.eventId }) {
-            queue.add(request)
+
+        queue.add(request)
+
+        if (active == null) {
+            // This nudge is about to be processed immediately, so promote the
+            // service to the foreground with a "Preparing…" notification.
+            startForegroundMediaPlayback(
+                VoiceNudgeNotifications.idFor(request.eventId),
+                notification(
+                    request,
+                    "Preparing nudge… 🎙️",
+                    ongoing = true,
+                    cachedAudioAvailable = false,
+                ),
+            )
+            NotificationAvatarHelper.loadAsync(
+                this,
+                request.senderPhotoUrl,
+                request.senderName,
+                request.senderAvatarAsset,
+            ) {
+                refreshPostedNotification()
+            }
+        } else {
+            // Another nudge is still active. Queue this one WITHOUT posting a
+            // "Preparing…" foreground notification: doing so used to replace
+            // the active nudge's notification, hide its play/pause controls,
+            // and leave the queued nudge stuck on "Preparing nudge…" with no
+            // Play button. processNext() posts the correct notification the
+            // moment this nudge actually starts.
+            Log.i(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-10A] Nudge queued behind active nudge " +
+                    "kind=${request.kind} eventSuffix=${request.eventId.takeLast(6)} " +
+                    "queueDepth=${queue.size}",
+            )
+            NotificationAvatarHelper.loadAsync(
+                this,
+                request.senderPhotoUrl,
+                request.senderName,
+                request.senderAvatarAsset,
+            ) {
+                // Warm the avatar cache only; the queued nudge has no posted
+                // notification yet, so there is nothing to refresh.
+            }
         }
+
         processNext()
         return START_NOT_STICKY
     }
@@ -166,6 +203,7 @@ class VoiceNudgePlaybackService : Service() {
             releasePlayback()
             releaseWakeLock()
             active = null
+            clearActiveTimeout()
             VoiceNudgeAudioCache.delete(this, current.eventId)
             getSystemService(NotificationManager::class.java).cancel(
                 VoiceNudgeNotifications.idFor(current.eventId),
@@ -201,6 +239,7 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-11] Processing queued nudge kind=${request.kind}",
         )
         holdWakeLock()
+        scheduleActiveTimeout(request)
         val initialStatus = when {
             request.kind == VoiceNudgeContract.kindRing -> "Ringing… 🔔"
             request.cachedReplay -> "Preparing replay… ▶️"
@@ -454,6 +493,13 @@ class VoiceNudgePlaybackService : Service() {
                     if (isPlaying && !request.cachedReplay) {
                         sendPlayedAckOnce(request)
                     }
+                    if (isPlaying) {
+                        // Playback has genuinely started, so the clip must end
+                        // within its duration plus a short grace. Re-arming the
+                        // watchdog here recovers quickly from an audio-focus /
+                        // codec stall that otherwise never fires STATE_ENDED.
+                        schedulePlaybackEndTimeout(request)
+                    }
                 }
 
                 override fun onPlaybackStateChanged(playbackState: Int) {
@@ -515,6 +561,7 @@ class VoiceNudgePlaybackService : Service() {
             )
             releasePlayback()
             active = null
+            clearActiveTimeout()
             releaseWakeLock()
             if (!current.cachedReplay && ackedEventId != current.eventId) {
                 ackedEventId = current.eventId
@@ -824,6 +871,7 @@ class VoiceNudgePlaybackService : Service() {
         )
         releasePlayback()
         active = null
+        clearActiveTimeout()
         val manager = getSystemService(NotificationManager::class.java)
         val cachedAudioAvailable = shouldRetainNotificationAudio(
             success = success,
@@ -907,6 +955,66 @@ class VoiceNudgePlaybackService : Service() {
         } catch (error: RuntimeException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E9] Playback wake lock release", error)
         }
+    }
+
+    /**
+     * Guarantees a queued nudge can never be blocked forever behind an active
+     * nudge whose finish callback was lost (e.g. a dropped `STATE_ENDED` or a
+     * hung download). If the active nudge is still going after a generous,
+     * kind-appropriate window, force-finish it so [processNext] drains the
+     * queue and the next nudge actually plays.
+     */
+    private fun scheduleActiveTimeout(request: NudgeRequest) {
+        clearActiveTimeout()
+        val timeoutMs = when {
+            request.kind == VoiceNudgeContract.kindRing -> request.durationMs + 15_000L
+            request.cachedReplay -> 45_000L
+            // Voice: download (with redirects + connect/read timeouts) + ≤10s playback.
+            else -> 60_000L
+        }
+        armTimeout(request, timeoutMs)
+    }
+
+    /**
+     * Once audio is genuinely outputting, the clip must end within its own
+     * duration plus a short grace period. Replacing the (much looser) download
+     * window here means an audio-focus / codec stall — where `isPlaying` flips
+     * true but `STATE_ENDED` never fires — recovers in ~25s instead of a full
+     * minute, so a queued nudge isn't left waiting behind a dead-but-active
+     * nudge.
+     */
+    private fun schedulePlaybackEndTimeout(request: NudgeRequest) {
+        clearActiveTimeout()
+        // Cached replays carry durationMs = 0; their audio is still capped at
+        // 10s, so a 25s window leaves ample headroom.
+        val timeoutMs = if (request.durationMs > 0) request.durationMs + 15_000L else 25_000L
+        armTimeout(request, timeoutMs)
+    }
+
+    private fun armTimeout(request: NudgeRequest, timeoutMs: Long) {
+        val timeout = Runnable {
+            if (active?.eventId == request.eventId) {
+                Log.w(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-W11] Active nudge timed out kind=${request.kind} " +
+                        "eventSuffix=${request.eventId.takeLast(6)}",
+                )
+                VoiceNudgeDiagnostics.recordNudgeFailure(
+                    reason = "timeout",
+                    eventId = request.eventId,
+                    kind = request.kind,
+                    extras = emptyMap(),
+                )
+                finishActive(success = false)
+            }
+        }
+        activeTimeout = timeout
+        mainHandler.postDelayed(timeout, timeoutMs)
+    }
+
+    private fun clearActiveTimeout() {
+        activeTimeout?.let { mainHandler.removeCallbacks(it) }
+        activeTimeout = null
     }
 
     private fun notify(
