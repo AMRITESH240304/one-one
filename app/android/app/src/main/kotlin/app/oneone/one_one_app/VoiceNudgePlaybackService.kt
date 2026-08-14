@@ -418,6 +418,10 @@ class VoiceNudgePlaybackService : Service() {
                 eventId = request.eventId,
                 kind = request.kind,
                 extras = mapOf("error" to (error.message ?: "unknown")),
+                groupId = request.groupId,
+                senderUserId = request.senderUserId,
+                senderName = request.senderName,
+                health = activeHealth?.toCrashlyticsMap().orEmpty(),
             )
             acknowledge(request, "failed", "playback_error", activeHealth) {
                 finishActive(success = false)
@@ -491,6 +495,10 @@ class VoiceNudgePlaybackService : Service() {
                     eventId = request.eventId,
                     kind = request.kind,
                     extras = mapOf("error" to (error.message ?: "unknown")),
+                    groupId = request.groupId,
+                    senderUserId = request.senderUserId,
+                    senderName = request.senderName,
+                    health = activeHealth?.toCrashlyticsMap().orEmpty(),
                 )
                 acknowledge(request, "failed", "download_error", activeHealth) {
                     finishActive(success = false)
@@ -694,6 +702,10 @@ class VoiceNudgePlaybackService : Service() {
                             "error" to (error.errorCodeName),
                             "cached_replay" to request.cachedReplay.toString(),
                         ),
+                        groupId = request.groupId,
+                        senderUserId = request.senderUserId,
+                        senderName = request.senderName,
+                        health = activeHealth?.toCrashlyticsMap().orEmpty(),
                     )
                     VoiceNudgeAudioCache.delete(
                         this@VoiceNudgePlaybackService,
@@ -1058,6 +1070,16 @@ class VoiceNudgePlaybackService : Service() {
             put("notificationsEnabled", notificationsEnabled)
             put("volumeLevel", volumeLevel)
         }
+
+        /** Flat string map for Crashlytics custom keys (prefixed `health_`). */
+        fun toCrashlyticsMap(): Map<String, String> = mapOf(
+            "streamVolume" to streamVolume.toString(),
+            "streamMaxVolume" to streamMaxVolume.toString(),
+            "streamMuted" to streamMuted.toString(),
+            "ringerMode" to ringerMode.toString(),
+            "notificationsEnabled" to notificationsEnabled.toString(),
+            "volumeLevel" to volumeLevel,
+        )
     }
 
     private fun captureHealthSnapshot(streamType: Int): NudgeHealthSnapshot {
@@ -1272,6 +1294,10 @@ class VoiceNudgePlaybackService : Service() {
                     eventId = request.eventId,
                     kind = request.kind,
                     extras = emptyMap(),
+                    groupId = request.groupId,
+                    senderUserId = request.senderUserId,
+                    senderName = request.senderName,
+                    health = activeHealth?.toCrashlyticsMap().orEmpty(),
                 )
                 finishActive(success = false)
             }
@@ -1425,6 +1451,7 @@ class VoiceNudgePlaybackService : Service() {
             kind = kind,
             eventId = eventId,
             senderName = senderName,
+            senderUserId = getStringExtra(VoiceNudgeContract.extraSenderUserId),
             senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
             senderAvatarAsset = getStringExtra(VoiceNudgeContract.extraSenderAvatarAsset),
             durationMs = durationMs,
@@ -1448,6 +1475,7 @@ class VoiceNudgePlaybackService : Service() {
             kind = VoiceNudgeContract.kindVoice,
             eventId = eventId,
             senderName = getStringExtra(VoiceNudgeContract.extraSenderName) ?: "Someone",
+            senderUserId = getStringExtra(VoiceNudgeContract.extraSenderUserId),
             senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
             senderAvatarAsset = getStringExtra(VoiceNudgeContract.extraSenderAvatarAsset),
             durationMs = 0,
@@ -1472,6 +1500,7 @@ class VoiceNudgePlaybackService : Service() {
         val kind: String,
         val eventId: String,
         val senderName: String,
+        val senderUserId: String?,
         val senderPhotoUrl: String?,
         val senderAvatarAsset: String?,
         val durationMs: Long,

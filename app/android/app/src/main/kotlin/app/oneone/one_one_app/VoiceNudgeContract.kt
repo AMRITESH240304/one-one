@@ -3,6 +3,7 @@ package app.oneone.one_one_app
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -19,6 +20,7 @@ object VoiceNudgeContract {
     const val extraKind = "kind"
     const val extraEventId = "eventId"
     const val extraSenderName = "senderName"
+    const val extraSenderUserId = "senderUserId"
     const val extraSenderPhotoUrl = "senderPhotoUrl"
     const val extraSenderAvatarAsset = "senderAvatarAsset"
     const val extraDurationMs = "durationMs"
@@ -148,30 +150,60 @@ object VoiceNudgeDiagnostics {
     // the custom key "nudge_failure_event" so they are filterable in the
     // dashboard.
 
-    /** Generic nudge-failure record with a required reason code. */
+    /**
+     * Generic nudge-failure record with a required reason code.
+     *
+     * Records a non-fatal Crashlytics event so playback/delivery failures show
+     * up in the console even when the app never crashes. Each event carries
+     * the receiver's own user ID (resolved from Firebase Auth), the group, the
+     * sender, a device snapshot, and a receiver-side health snapshot so a
+     * single event is usually enough to triage without reproduction.
+     */
     fun recordNudgeFailure(
         reason: String,
         eventId: String?,
         kind: String?,
         extras: Map<String, String> = emptyMap(),
+        groupId: String? = null,
+        senderUserId: String? = null,
+        senderName: String? = null,
+        health: Map<String, String> = emptyMap(),
     ) {
         val crashlytics = FirebaseCrashlytics.getInstance()
+        val receiverUserId = FirebaseAuth.getInstance().currentUser?.uid
+
         crashlytics.setCustomKey("nudge_failure_event", reason)
         crashlytics.setCustomKey("nudge_failure_kind", kind ?: "unknown")
         crashlytics.setCustomKey("device_model", Build.MODEL)
+        crashlytics.setCustomKey("device_manufacturer", Build.MANUFACTURER)
         crashlytics.setCustomKey("android_sdk", Build.VERSION.SDK_INT.toString())
+        receiverUserId?.let {
+            crashlytics.setCustomKey("receiver_user_id", it)
+            crashlytics.setUserId(it)
+        }
         eventId?.let {
             crashlytics.setCustomKey(
                 "nudge_event_suffix",
                 it.takeLast(8),
             )
         }
+        groupId?.let { crashlytics.setCustomKey("group_suffix", it.takeLast(8)) }
+        senderUserId?.let { crashlytics.setCustomKey("sender_user_id", it) }
+        senderName?.let { crashlytics.setCustomKey("sender_name", it.take(40)) }
         for ((key, value) in extras) {
             crashlytics.setCustomKey(key, value)
+        }
+        for ((key, value) in health) {
+            crashlytics.setCustomKey("health_$key", value)
         }
         crashlytics.recordException(
             RuntimeException("Nudge failure: $reason (kind=$kind eventSuffix=${eventId?.takeLast(6) ?: "none"})"),
         )
-        Log.w(tag, "[NUDGE-FAIL] reason=$reason kind=$kind ${extras}")
+        Log.w(
+            tag,
+            "[NUDGE-FAIL] reason=$reason kind=$kind " +
+                "groupId=${groupId?.takeLast(6) ?: "none"} " +
+                "receiver=${receiverUserId?.takeLast(6) ?: "none"} ${extras}",
+        )
     }
 }
