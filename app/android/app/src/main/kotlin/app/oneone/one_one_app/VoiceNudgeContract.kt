@@ -2,7 +2,6 @@ package app.oneone.one_one_app
 
 import android.content.Context
 import android.os.Build
-import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import org.json.JSONObject
@@ -196,6 +195,16 @@ object VoiceNudgeDiagnostics {
         for ((key, value) in health) {
             crashlytics.setCustomKey("health_$key", value)
         }
+        // Ship the receiver's recent structured log trace with this non-fatal
+        // event so the report carries device context without needing logcat.
+        // Crashlytics.log() is attached to the very next recordException, so
+        // this must run before it.
+        val trace = NudgeLogBuffer.snapshot()
+        crashlytics.log("nudge_trace_begin reason=$reason kind=$kind lines=${trace.size}")
+        for (line in trace) {
+            crashlytics.log(line)
+        }
+        crashlytics.log("nudge_trace_end")
         crashlytics.recordException(
             RuntimeException("Nudge failure: $reason (kind=$kind eventSuffix=${eventId?.takeLast(6) ?: "none"})"),
         )
