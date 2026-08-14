@@ -59,30 +59,65 @@ class VoiceNudgePlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] Playback service created")
         VoiceNudgeAudioCache.deleteOrphans(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] onStartCommand action=${intent?.action ?: "null"} " +
+                "startId=$startId flags=$flags",
+        )
         val cachedRequest = intent?.toCachedRequest()
         when (intent?.action) {
             VoiceNudgeContract.actionStopGroupNudges -> {
-                stopGroupNudges(
-                    intent.getStringExtra(VoiceNudgeContract.extraGroupId) ?: return START_NOT_STICKY,
+                val groupId = intent.getStringExtra(VoiceNudgeContract.extraGroupId)
+                Log.d(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-D] onStartCommand -> stopGroupNudges groupId=${groupId ?: "null"}",
                 )
+                stopGroupNudges(groupId ?: return START_NOT_STICKY)
                 return START_NOT_STICKY
             }
             VoiceNudgeContract.actionPlayCachedAudio -> {
-                if (cachedRequest == null) return START_NOT_STICKY
+                if (cachedRequest == null) {
+                    Log.w(
+                        VoiceNudgeDiagnostics.tag,
+                        "[FCM-D] playCachedAudio ignored: invalid cached request",
+                    )
+                    return START_NOT_STICKY
+                }
+                Log.d(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-D] onStartCommand -> playCachedAudio " +
+                        "eventSuffix=${cachedRequest.eventId.takeLast(6)}",
+                )
                 if (
                     active?.eventId != cachedRequest.eventId &&
                     queue.none { it.eventId == cachedRequest.eventId }
                 ) {
+                    Log.d(
+                        VoiceNudgeDiagnostics.tag,
+                        "[FCM-D] playCachedAudio: adding to front of queue " +
+                            "queueDepth=${queue.size + 1}",
+                    )
                     queue.addFirst(cachedRequest)
+                } else {
+                    Log.d(
+                        VoiceNudgeDiagnostics.tag,
+                        "[FCM-D] playCachedAudio: already active/queued, skipping queue add",
+                    )
                 }
                 processNext()
                 return START_NOT_STICKY
             }
             VoiceNudgeContract.actionPauseCachedAudio -> {
+                Log.d(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-D] onStartCommand -> pauseCachedAudio " +
+                        "eventSuffix=${cachedRequest?.eventId?.takeLast(6) ?: "null"}",
+                )
                 if (cachedRequest != null) pauseCachedAudio(cachedRequest)
                 return START_NOT_STICKY
             }
@@ -104,11 +139,22 @@ class VoiceNudgePlaybackService : Service() {
         if (isDuplicate) {
             // The same nudge is already playing or already queued — don't
             // requeue it and don't repost its notification.
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] Duplicate nudge ignored kind=${request.kind} " +
+                    "eventSuffix=${request.eventId.takeLast(6)}",
+            )
             processNext()
             return START_NOT_STICKY
         }
 
         queue.add(request)
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] Nudge enqueued kind=${request.kind} " +
+                "eventSuffix=${request.eventId.takeLast(6)} queueDepth=${queue.size} " +
+                "active=${active?.eventId?.takeLast(6) ?: "none"}",
+        )
 
         if (active == null) {
             // This nudge is about to be processed immediately, so promote the
@@ -159,6 +205,11 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] Playback service destroyed queueDepth=${queue.size} " +
+                "active=${active?.eventId?.takeLast(6) ?: "none"}",
+        )
         mainHandler.removeCallbacksAndMessages(null)
         releasePlayback()
         releaseWakeLock()
@@ -184,6 +235,10 @@ class VoiceNudgePlaybackService : Service() {
      * `mediaPlayback`.
      */
     private fun startForegroundMediaPlayback(notificationId: Int, notification: Notification) {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] startForeground notificationId=$notificationId sdk=${Build.VERSION.SDK_INT}",
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 notificationId,
@@ -197,9 +252,20 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun stopGroupNudges(groupId: String) {
+        val removed = queue.count { it.groupId == groupId }
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] stopGroupNudges groupId=$groupId queueDepth=${queue.size} " +
+                "removing=$removed activeGroupId=${active?.groupId ?: "none"}",
+        )
         queue.removeAll { it.groupId == groupId }
         val current = active
         if (current?.groupId == groupId) {
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] stopGroupNudges: active nudge matches group, tearing down " +
+                    "eventSuffix=${current.eventId.takeLast(6)}",
+            )
             releasePlayback()
             releaseWakeLock()
             active = null
@@ -210,6 +276,7 @@ class VoiceNudgePlaybackService : Service() {
             )
         }
         if (active == null && queue.isEmpty()) {
+            Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] stopGroupNudges: queue empty, stopping self")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {
@@ -223,10 +290,21 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun processNext() {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] processNext active=${active?.eventId?.takeLast(6) ?: "none"} " +
+                "queueDepth=${queue.size}",
+        )
         if (active != null || queue.isEmpty()) return
         val request = queue.removeFirst()
         active = request
         ackedEventId = null
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] processNext: activating kind=${request.kind} " +
+                "eventSuffix=${request.eventId.takeLast(6)} cachedReplay=${request.cachedReplay} " +
+                "durationMs=${request.durationMs}",
+        )
         activeHealth = captureHealthSnapshot(
             if (request.kind == VoiceNudgeContract.kindRing) {
                 AudioManager.STREAM_ALARM
@@ -255,20 +333,35 @@ class VoiceNudgePlaybackService : Service() {
             ),
         )
         if (request.kind == VoiceNudgeContract.kindRing) {
+            Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] processNext -> playRing")
             playRing(request)
         } else if (request.cachedReplay) {
             val file = VoiceNudgeAudioCache.file(this, request.eventId)
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] processNext -> cachedReplay file=${file.path} " +
+                    "exists=${file.isFile} bytes=${if (file.isFile) file.length() else -1}",
+            )
             if (file.isFile && file.length() > 0) {
                 startPlayer(request, file)
             } else {
+                Log.w(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-D] cachedReplay file missing/empty, failing nudge",
+                )
                 finishActive(success = false)
             }
         } else {
+            Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] processNext -> downloadAndPlay")
             downloadAndPlay(request)
         }
     }
 
     private fun playRing(request: NudgeRequest) {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] playRing entry durationMs=${request.durationMs}",
+        )
         try {
             Log.i(
                 VoiceNudgeDiagnostics.tag,
@@ -299,10 +392,18 @@ class VoiceNudgePlaybackService : Service() {
                 track.setVolume(0.86f)
                 track.play()
             }
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] playRing: AudioTrack playing samples=${samples.size}",
+            )
             // Ring audio is a static buffer that starts outputting the instant
             // play() returns, so this is genuinely "playing now" — fire the
             // delivery ack + haptics immediately rather than waiting for the
             // buffer to finish.
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] playRing: sending played ack + scheduling finish in ${request.durationMs}ms",
+            )
             sendPlayedAckOnce(request)
             // The PCM buffer itself is exactly the requested length. This
             // callback owns service and notification cleanup at that boundary.
@@ -330,6 +431,10 @@ class VoiceNudgePlaybackService : Service() {
      */
     private fun buildNudgeRing(durationMs: Long): ShortArray {
         val sampleCount = ((durationMs * ringSampleRate) / 1_000L).toInt()
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] buildNudgeRing durationMs=$durationMs sampleCount=$sampleCount",
+        )
         return ShortArray(sampleCount) { sampleIndex ->
             val elapsedMs = sampleIndex * 1_000.0 / ringSampleRate
             val phraseMs = elapsedMs % ringPhraseMs
@@ -363,12 +468,20 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun downloadAndPlay(request: NudgeRequest) {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] downloadAndPlay scheduling download eventSuffix=${request.eventId.takeLast(6)}",
+        )
         networkExecutor.execute {
             try {
                 val file = downloadAudio(request)
                 Log.i(
                     VoiceNudgeDiagnostics.tag,
                     "[FCM-13] Voice audio downloaded bytes=${file.length()}",
+                )
+                Log.d(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-D] downloadAndPlay: download complete, posting startPlayer to main",
                 )
                 mainHandler.post { startPlayer(request, file) }
             } catch (error: Exception) {
@@ -388,7 +501,16 @@ class VoiceNudgePlaybackService : Service() {
 
     private fun downloadAudio(request: NudgeRequest): File {
         val output = VoiceNudgeAudioCache.file(this, request.eventId)
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] downloadAudio target=${output.path} " +
+                "url=${request.audioUrl?.substringAfterLast('/')?.take(24) ?: "null"}",
+        )
         if (output.isFile && output.length() > 0) {
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] downloadAudio: cache hit bytes=${output.length()}, reusing file",
+            )
             VoiceNudgeAudioCache.register(this, request.eventId)
             return output
         }
@@ -422,6 +544,11 @@ class VoiceNudgePlaybackService : Service() {
                     if (redirects >= 3) {
                         throw IllegalStateException("Too many audio download redirects")
                     }
+                    Log.d(
+                        VoiceNudgeDiagnostics.tag,
+                        "[FCM-D] downloadAudio: redirect #${redirects + 1} to " +
+                            "${location.substringAfterLast('/').take(24)}",
+                    )
                     currentUrl = location
                     redirects += 1
                     continue
@@ -449,6 +576,10 @@ class VoiceNudgePlaybackService : Service() {
                     }
                     check(partial.renameTo(output)) { "Could not finalize voice nudge cache" }
                     VoiceNudgeAudioCache.register(this, request.eventId)
+                    Log.d(
+                        VoiceNudgeDiagnostics.tag,
+                        "[FCM-D] downloadAudio: finalized cache bytes=${output.length()}",
+                    )
                 } catch (error: Exception) {
                     partial.delete()
                     throw error
@@ -465,7 +596,17 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun startPlayer(request: NudgeRequest, file: File) {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] startPlayer entry eventSuffix=${request.eventId.takeLast(6)} " +
+                "file=${file.path} bytes=${file.length()} cachedReplay=${request.cachedReplay}",
+        )
         if (active?.eventId != request.eventId) {
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] startPlayer: stale request, active is " +
+                    "${active?.eventId?.takeLast(6) ?: "none"}, aborting",
+            )
             return
         }
         notify(
@@ -493,6 +634,10 @@ class VoiceNudgePlaybackService : Service() {
             setWakeMode(C.WAKE_MODE_LOCAL)
             addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    Log.d(
+                        VoiceNudgeDiagnostics.tag,
+                        "[FCM-D] ExoPlayer onIsPlayingChanged isPlaying=$isPlaying",
+                    )
                     // "Genuinely played" means audio has actually started
                     // outputting — not merely delivered/downloaded — so the ack
                     // fires here, the moment ExoPlayer's isPlaying flips true,
@@ -510,6 +655,10 @@ class VoiceNudgePlaybackService : Service() {
                 }
 
                 override fun onPlaybackStateChanged(playbackState: Int) {
+                    Log.d(
+                        VoiceNudgeDiagnostics.tag,
+                        "[FCM-D] ExoPlayer onPlaybackStateChanged state=${playbackStateName(playbackState)}",
+                    )
                     when (playbackState) {
                         Player.STATE_READY -> {
                             // Prepared and about to play. Arm the tight end-timeout
@@ -531,6 +680,11 @@ class VoiceNudgePlaybackService : Service() {
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
+                    Log.d(
+                        VoiceNudgeDiagnostics.tag,
+                        "[FCM-D] ExoPlayer onPlayerError errorCode=${error.errorCodeName} " +
+                            "message=${error.message}",
+                    )
                     VoiceNudgeDiagnostics.logFailure("[FCM-E6] Voice playback", error)
                     VoiceNudgeDiagnostics.recordNudgeFailure(
                         reason = "playback_error",
@@ -570,18 +724,29 @@ class VoiceNudgePlaybackService : Service() {
 
     private fun pauseCachedAudio(request: NudgeRequest) {
         val current = active
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] pauseCachedAudio eventSuffix=${request.eventId.takeLast(6)} " +
+                "active=${current?.eventId?.takeLast(6) ?: "none"} " +
+                "position=${player?.currentPosition ?: -1}ms",
+        )
         if (current?.eventId == request.eventId) {
-            VoiceNudgeAudioCache.savePosition(
-                this,
-                request.eventId,
-                player?.currentPosition ?: 0,
+            val position = player?.currentPosition ?: 0
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] pauseCachedAudio: saving position ${position}ms and releasing playback",
             )
+            VoiceNudgeAudioCache.savePosition(this, request.eventId, position)
             releasePlayback()
             active = null
             clearActiveTimeout()
             releaseWakeLock()
             if (!current.cachedReplay && ackedEventId != current.eventId) {
                 ackedEventId = current.eventId
+                Log.d(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-D] pauseCachedAudio: acking played before finishing pause",
+                )
                 acknowledge(current, "played", null, activeHealth) { finishPause(request) }
                 return
             }
@@ -590,6 +755,11 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun finishPause(request: NudgeRequest) {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] finishPause eventSuffix=${request.eventId.takeLast(6)} " +
+                "queueDepth=${queue.size}",
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_DETACH)
         } else {
@@ -622,7 +792,17 @@ class VoiceNudgePlaybackService : Service() {
     ) {
         val ackUrl = request.ackUrl
         val deliveryToken = request.deliveryToken
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] acknowledge status=$status reason=${reason ?: "none"} " +
+                "eventSuffix=${request.eventId.takeLast(6)} " +
+                "hasAckUrl=${ackUrl != null} hasToken=${deliveryToken != null}",
+        )
         if (ackUrl == null || deliveryToken == null) {
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] acknowledge: missing ack URL/token, skipping network ack",
+            )
             mainHandler.post(after)
             return
         }
@@ -641,6 +821,10 @@ class VoiceNudgePlaybackService : Service() {
         networkExecutor.execute {
             var connection: HttpURLConnection? = null
             try {
+                Log.d(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-D] acknowledge: posting ack to ${ackUrl.substringAfterLast('/').take(24)}",
+                )
                 val opened = URL(ackUrl).openConnection() as HttpURLConnection
                 connection = opened
                 opened.connectTimeout = 5_000
@@ -686,8 +870,19 @@ class VoiceNudgePlaybackService : Service() {
      * can tell "never received" apart from "received but probably not heard".
      */
     private fun sendPlayedAckOnce(request: NudgeRequest) {
-        if (ackedEventId == request.eventId) return
+        if (ackedEventId == request.eventId) {
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] sendPlayedAckOnce: already acked, skipping " +
+                    "eventSuffix=${request.eventId.takeLast(6)}",
+            )
+            return
+        }
         ackedEventId = request.eventId
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] sendPlayedAckOnce: marking played eventSuffix=${request.eventId.takeLast(6)}",
+        )
 
         val health = activeHealth
         val attention = health?.attentionReason()
@@ -706,7 +901,13 @@ class VoiceNudgePlaybackService : Service() {
     private fun durationMsForHaptics(request: NudgeRequest): Long {
         if (request.kind == VoiceNudgeContract.kindRing) return request.durationMs
         val playerDuration = player?.duration ?: C.TIME_UNSET
-        return if (playerDuration > 0) playerDuration else request.durationMs.takeIf { it > 0 } ?: 6_000L
+        return (if (playerDuration > 0) playerDuration else request.durationMs.takeIf { it > 0 } ?: 6_000L)
+            .also {
+                Log.d(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-D] durationMsForHaptics playerDuration=$playerDuration -> $it",
+                )
+            }
     }
 
     /**
@@ -720,6 +921,7 @@ class VoiceNudgePlaybackService : Service() {
      *   - closing burst: same pattern, scheduled after the audio duration
      */
     private fun triggerReceiptHaptics(durationMs: Long) {
+        Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] triggerReceiptHaptics durationMs=$durationMs")
         val vibrator = (
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 getSystemService(VibratorManager::class.java)?.defaultVibrator
@@ -871,20 +1073,37 @@ class VoiceNudgePlaybackService : Service() {
         } else {
             true
         }
-        return NudgeHealthSnapshot(
+        val snapshot = NudgeHealthSnapshot(
             streamVolume = audioManager.getStreamVolume(streamType),
             streamMaxVolume = audioManager.getStreamMaxVolume(streamType),
             streamMuted = muted,
             ringerMode = audioManager.ringerMode,
             notificationsEnabled = notificationsEnabled,
         )
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] captureHealthSnapshot streamType=$streamType " +
+                "volume=${snapshot.streamVolume}/${snapshot.streamMaxVolume} " +
+                "muted=${snapshot.streamMuted} ringerMode=${snapshot.ringerMode} " +
+                "notificationsEnabled=${snapshot.notificationsEnabled} volumeLevel=${snapshot.volumeLevel}",
+        )
+        return snapshot
     }
 
     private fun finishActive(success: Boolean) {
-        val request = active ?: return
+        val request = active
+        if (request == null) {
+            Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] finishActive: no active nudge, no-op")
+            return
+        }
         Log.i(
             VoiceNudgeDiagnostics.tag,
             "[FCM-17] Nudge finished kind=${request.kind} success=$success",
+        )
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] finishActive: releasing playback queueDepth=${queue.size} " +
+                "eventSuffix=${request.eventId.takeLast(6)}",
         )
         releasePlayback()
         active = null
@@ -902,6 +1121,10 @@ class VoiceNudgePlaybackService : Service() {
             else -> "Voice nudge received 🎙️"
         }
         if (queue.isEmpty()) {
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] finishActive: queue empty, detaching foreground and stopping self",
+            )
             releaseWakeLock()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_DETACH)
@@ -920,6 +1143,10 @@ class VoiceNudgePlaybackService : Service() {
             )
             stopSelf()
         } else {
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] finishActive: more queued, posting final notification and processing next",
+            )
             manager.notify(
                 VoiceNudgeNotifications.idFor(request.eventId),
                 notification(
@@ -934,6 +1161,10 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun releasePlayback() {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] releasePlayback hasPlayer=${player != null} hasRingTrack=${ringTrack != null}",
+        )
         player?.release()
         player = null
         try {
@@ -958,6 +1189,10 @@ class VoiceNudgePlaybackService : Service() {
                     playbackWakeLock = this
                 }
             }
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] holdWakeLock: acquiring for ${maxWakeLockDurationMs}ms",
+            )
             if (lock.isHeld) lock.release()
             lock.acquire(maxWakeLockDurationMs)
             Log.i(VoiceNudgeDiagnostics.tag, "[FCM-11A] Playback wake lock acquired")
@@ -967,6 +1202,10 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun releaseWakeLock() {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] releaseWakeLock held=${playbackWakeLock?.isHeld == true}",
+        )
         try {
             playbackWakeLock?.takeIf { it.isHeld }?.release()
         } catch (error: RuntimeException) {
@@ -989,6 +1228,10 @@ class VoiceNudgePlaybackService : Service() {
             // Voice: download (with redirects + connect/read timeouts) + ≤10s playback.
             else -> 60_000L
         }
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] scheduleActiveTimeout kind=${request.kind} timeoutMs=$timeoutMs",
+        )
         armTimeout(request, timeoutMs)
     }
 
@@ -1005,10 +1248,18 @@ class VoiceNudgePlaybackService : Service() {
         // Cached replays carry durationMs = 0; their audio is still capped at
         // 10s, so a 25s window leaves ample headroom.
         val timeoutMs = if (request.durationMs > 0) request.durationMs + 15_000L else 25_000L
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] schedulePlaybackEndTimeout durationMs=${request.durationMs} timeoutMs=$timeoutMs",
+        )
         armTimeout(request, timeoutMs)
     }
 
     private fun armTimeout(request: NudgeRequest, timeoutMs: Long) {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] armTimeout eventSuffix=${request.eventId.takeLast(6)} timeoutMs=$timeoutMs",
+        )
         val timeout = Runnable {
             if (active?.eventId == request.eventId) {
                 Log.w(
@@ -1030,8 +1281,19 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun clearActiveTimeout() {
+        if (activeTimeout != null) {
+            Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] clearActiveTimeout: cancelling pending timeout")
+        }
         activeTimeout?.let { mainHandler.removeCallbacks(it) }
         activeTimeout = null
+    }
+
+    private fun playbackStateName(state: Int): String = when (state) {
+        Player.STATE_IDLE -> "IDLE"
+        Player.STATE_BUFFERING -> "BUFFERING"
+        Player.STATE_READY -> "READY"
+        Player.STATE_ENDED -> "ENDED"
+        else -> "UNKNOWN($state)"
     }
 
     private fun notify(
@@ -1040,6 +1302,11 @@ class VoiceNudgePlaybackService : Service() {
         cachedAudioAvailable: Boolean = false,
         isPlaying: Boolean = false,
     ) {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] notify status=\"$status\" eventSuffix=${request.eventId.takeLast(6)} " +
+                "cachedAudioAvailable=$cachedAudioAvailable isPlaying=$isPlaying",
+        )
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(
             VoiceNudgeNotifications.idFor(request.eventId),
@@ -1060,6 +1327,11 @@ class VoiceNudgePlaybackService : Service() {
         cachedAudioAvailable: Boolean,
         isPlaying: Boolean = false,
     ): Notification {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] notification status=\"$status\" ongoing=$ongoing " +
+                "eventSuffix=${request.eventId.takeLast(6)}",
+        )
         lastPosted = PostedNotification(
             request = request,
             status = status,
@@ -1087,7 +1359,15 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun refreshPostedNotification() {
-        val posted = lastPosted ?: return
+        val posted = lastPosted
+        if (posted == null) {
+            Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] refreshPostedNotification: nothing posted yet")
+            return
+        }
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] refreshPostedNotification eventSuffix=${posted.request.eventId.takeLast(6)}",
+        )
         try {
             val manager = getSystemService(NotificationManager::class.java)
             val notificationId = VoiceNudgeNotifications.idFor(posted.request.eventId)
@@ -1111,16 +1391,36 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun Intent.toRequest(): NudgeRequest? {
-        val kind = getStringExtra(VoiceNudgeContract.extraKind) ?: return null
-        val eventId = getStringExtra(VoiceNudgeContract.extraEventId) ?: return null
+        val kind = getStringExtra(VoiceNudgeContract.extraKind) ?: run {
+            Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] toRequest: missing kind, ignoring intent")
+            return null
+        }
+        val eventId = getStringExtra(VoiceNudgeContract.extraEventId) ?: run {
+            Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] toRequest: missing eventId, ignoring intent")
+            return null
+        }
         val senderName = getStringExtra(VoiceNudgeContract.extraSenderName) ?: "Someone"
         val suppliedDurationMs = getLongExtra(VoiceNudgeContract.extraDurationMs, 0)
         val durationMs = if (kind == VoiceNudgeContract.kindRing) {
-            suppliedDurationMs.takeIf { it in supportedRingDurationsMs } ?: return null
+            suppliedDurationMs.takeIf { it in supportedRingDurationsMs } ?: run {
+                Log.d(
+                    VoiceNudgeDiagnostics.tag,
+                    "[FCM-D] toRequest: unsupported ring duration $suppliedDurationMs, ignoring",
+                )
+                return null
+            }
         } else {
             suppliedDurationMs.coerceIn(250, 10_000)
         }
-        val groupId = getStringExtra(VoiceNudgeContract.extraGroupId) ?: return null
+        val groupId = getStringExtra(VoiceNudgeContract.extraGroupId) ?: run {
+            Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] toRequest: missing groupId, ignoring intent")
+            return null
+        }
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] toRequest parsed kind=$kind eventSuffix=${eventId.takeLast(6)} " +
+                "durationMs=$durationMs cachedReplay=false",
+        )
         return NudgeRequest(
             kind = kind,
             eventId = eventId,
@@ -1140,6 +1440,10 @@ class VoiceNudgePlaybackService : Service() {
     private fun Intent.toCachedRequest(): NudgeRequest? {
         val eventId = getStringExtra(VoiceNudgeContract.extraEventId) ?: return null
         val groupId = getStringExtra(VoiceNudgeContract.extraGroupId) ?: return null
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] toCachedRequest parsed eventSuffix=${eventId.takeLast(6)} cachedReplay=true",
+        )
         return NudgeRequest(
             kind = VoiceNudgeContract.kindVoice,
             eventId = eventId,
