@@ -476,12 +476,19 @@ class VoiceNudgePlaybackService : Service() {
         )
         Log.i(VoiceNudgeDiagnostics.tag, "[FCM-14] Preparing voice audio player")
         player = ExoPlayer.Builder(this).build().apply {
+            // handleAudioFocus = false: play through regardless of audio-focus
+            // state, matching how ring nudges play via AudioTrack. On some
+            // Android 15 devices (e.g. Moto g64 5G / MediaTek), ExoPlayer's
+            // default focus handling pauses playback on focus loss/denial and
+            // never resumes, leaving the nudge stalled with no STATE_ENDED and
+            // no playback error — so the watchdog times it out instead of the
+            // nudge playing. A short voice nudge should just play like a ring.
             setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
                     .build(),
-                true,
+                false,
             )
             setWakeMode(C.WAKE_MODE_LOCAL)
             addListener(object : Player.Listener {
@@ -503,13 +510,23 @@ class VoiceNudgePlaybackService : Service() {
                 }
 
                 override fun onPlaybackStateChanged(playbackState: Int) {
-                    if (playbackState == Player.STATE_ENDED) {
-                        Log.i(VoiceNudgeDiagnostics.tag, "[FCM-15] Voice playback completed")
-                        VoiceNudgeAudioCache.clearPosition(
-                            this@VoiceNudgePlaybackService,
-                            request.eventId,
-                        )
-                        finishActive(success = true)
+                    when (playbackState) {
+                        Player.STATE_READY -> {
+                            // Prepared and about to play. Arm the tight end-timeout
+                            // here as well so a decoder stall that never flips
+                            // isPlaying (or never reaches STATE_ENDED) still
+                            // recovers quickly rather than waiting out the 60s
+                            // download window.
+                            schedulePlaybackEndTimeout(request)
+                        }
+                        Player.STATE_ENDED -> {
+                            Log.i(VoiceNudgeDiagnostics.tag, "[FCM-15] Voice playback completed")
+                            VoiceNudgeAudioCache.clearPosition(
+                                this@VoiceNudgePlaybackService,
+                                request.eventId,
+                            )
+                            finishActive(success = true)
+                        }
                     }
                 }
 
