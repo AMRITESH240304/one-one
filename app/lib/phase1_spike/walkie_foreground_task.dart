@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:livekit_client/livekit_client.dart';
 
+import '../core/logging/log_level.dart';
+import '../core/logging/log_manager.dart';
 import 'spike_keys.dart';
 
 @pragma('vm:entry-point')
@@ -18,6 +20,11 @@ class WalkieForegroundTaskHandler extends TaskHandler {
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    LogManager.log(
+      LogLevel.info,
+      'ForegroundService',
+      'onStartCommand called starter=${starter.name} at $timestamp',
+    );
     _sendStatus('starting', 'Foreground service started by ${starter.name}.');
     await _connectFromStoredConfig();
   }
@@ -40,6 +47,11 @@ class WalkieForegroundTaskHandler extends TaskHandler {
 
   @override
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
+    LogManager.log(
+      LogLevel.info,
+      'ForegroundService',
+      'service stopped timeout=$isTimeout at $timestamp',
+    );
     _sendStatus(
       'stopping',
       'Foreground service stopping${isTimeout ? ' after timeout' : ''}.',

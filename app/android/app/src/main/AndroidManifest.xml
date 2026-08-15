@@ -20,7 +20,7 @@
 
     <application
         android:label="Duo"
-        android:name="${applicationName}"
+        android:name=".OneOneApplication"
         android:icon="@mipmap/ic_launcher">
         <meta-data
             android:name="firebase_messaging_installation_id_enabled"

@@ -46,6 +46,25 @@ class MainActivity : FlutterFragmentActivity() {
             VoicePipContract.flutterChannel,
         )
         VoicePipActionDispatcher.attach(voicePipChannel)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "app.oneone/device_log",
+        ).setMethodCallHandler { call, result ->
+            DeviceLog.init(this)
+            when (call.method) {
+                "setIdentity" -> {
+                    val arguments = call.arguments as? Map<*, *>
+                    DeviceLog.setIdentity(
+                        arguments?.get("userId")?.toString(),
+                        arguments?.get("groupId")?.toString(),
+                    )
+                    result.success(null)
+                }
+                "getDeviceMeta" -> result.success(DeviceLog.deviceMeta())
+                "getNetworkMeta" -> result.success(DeviceLog.networkMeta())
+                else -> result.notImplemented()
+            }
+        }
         voicePipChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "setSessionState" -> {

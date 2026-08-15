@@ -678,6 +678,18 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
               ? 'Nudge wasn\u2019t delivered to anyone in this group.'
               : 'Nudge wasn\u2019t delivered to ${nudgeResult.failedCount} of '
                     '${nudgeResult.totalRecipients} people.';
+          unawaited(
+            CrashlyticsService.recordNudgeFailure(
+              error: StateError(message),
+              failureReason: NudgeFailureReason.fcmNotDelivered,
+              senderId: widget.currentUserId,
+              groupId: widget.group.groupId,
+              extras: {
+                'failed_count': nudgeResult.failedCount,
+                'total_recipients': nudgeResult.totalRecipients,
+              },
+            ),
+          );
           NudgeFailureMemory.instance.record(
             widget.group.groupId,
             nudgeResult.isFullFailure
@@ -713,10 +725,15 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       final cancelled = error.toString().toLowerCase().contains('cancel');
       if (!cancelled) {
         unawaited(
-          CrashlyticsService.recordError(
-            error,
-            stack,
-            reason: 'nudge_send_failed',
+          CrashlyticsService.recordNudgeFailure(
+            error: error,
+            stack: stack,
+            failureReason: error is ApiException &&
+                    error.code == 'permission_denied'
+                ? NudgeFailureReason.permissionDeniedFirebase
+                : NudgeFailureReason.unknown,
+            senderId: widget.currentUserId,
+            groupId: widget.group.groupId,
           ),
         );
       }

@@ -6,6 +6,9 @@ import 'package:livekit_client/livekit_client.dart';
 
 import '../../../core/firebase/app_database.dart';
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/logging/livekit_lifecycle_logger.dart';
+import '../../../core/logging/log_level.dart';
+import '../../../core/logging/log_manager.dart';
 import '../../groups/models/group_summary.dart';
 import '../../identity/models/identity_session.dart';
 import '../../talk/data/talk_repository.dart';
@@ -143,10 +146,13 @@ class _OnlineScreenState extends State<OnlineScreen> {
       _startUsageTracking();
     } catch (error, stack) {
       unawaited(
-        CrashlyticsService.recordError(
-          error,
-          stack,
-          reason: 'online_screen_go_online_failed',
+        CrashlyticsService.recordNudgeFailure(
+          error: error,
+          stack: stack,
+          failureReason: NudgeFailureReason.livekitSessionFailed,
+          receiverId: widget.identity.userId,
+          groupId: widget.group.groupId,
+          livekitRoomState: _room?.connectionState.toString(),
         ),
       );
       // If a warm room was taken but connect never claimed it, release it.
@@ -298,13 +304,37 @@ class _OnlineScreenState extends State<OnlineScreen> {
       _message = LiveKitStatus.connecting;
     });
 
-    await room
-        .connect(
-          session.livekitServerUrl,
-          session.livekitToken,
-          connectOptions: const ConnectOptions(autoSubscribe: true),
-        )
-        .timeout(const Duration(seconds: 20));
+    LogManager.log(
+      LogLevel.info,
+      'LiveKitManager',
+      'Room connect attempt url=${session.livekitServerUrl} '
+      'room=${session.livekitRoomName}',
+      userId: session.userId,
+      groupId: session.groupId,
+    );
+
+    try {
+      await room
+          .connect(
+            session.livekitServerUrl,
+            session.livekitToken,
+            connectOptions: const ConnectOptions(autoSubscribe: true),
+          )
+          .timeout(const Duration(seconds: 20));
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordNudgeFailure(
+          error: error,
+          stack: stack,
+          failureReason: NudgeFailureReason.livekitSessionFailed,
+          receiverId: session.userId,
+          groupId: session.groupId,
+          livekitRoomState: room.connectionState.toString(),
+          extras: {'checkpoint': 'room.connect'},
+        ),
+      );
+      rethrow;
+    }
 
     try {
       await room.setSpeakerOn(true);
@@ -323,7 +353,11 @@ class _OnlineScreenState extends State<OnlineScreen> {
   }
 
   void _attachRoomListener(Room room) {
-    _roomListener = room.createListener()
+    _roomListener = attachLiveKitLifecycleLogs(
+      room.createListener(),
+      userId: widget.identity.userId,
+      groupId: widget.group.groupId,
+    )
       ..on<RoomConnectedEvent>((_) {
         _reconnectAttempts = 0;
         _reconnectTimer?.cancel();

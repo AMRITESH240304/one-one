@@ -17,6 +17,7 @@ import '../../../core/firebase/app_database.dart';
 import '../../../core/firebase/app_telemetry.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/firebase/firebase_analytics_service.dart';
+import '../../../core/logging/log_manager.dart';
 import '../../../core/storage/profile_photo_storage.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../models/app_user_profile.dart';
@@ -790,6 +791,7 @@ class IdentityRepository {
         environment: kReleaseMode ? 'release' : 'debug',
       ),
     );
+    LogManager.setIdentity(userId: session.userId);
   }
 
   Future<void> _evictProfilePhoto(String? url) async {

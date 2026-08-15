@@ -17,8 +17,12 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
 import '../../../core/firebase/app_database.dart';
+import '../../../core/firebase/app_telemetry.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/firebase/firebase_analytics_service.dart';
+import '../../../core/logging/livekit_lifecycle_logger.dart';
+import '../../../core/logging/log_level.dart';
+import '../../../core/logging/log_manager.dart';
 import '../../../core/network/api_client.dart';
 import '../../chat/data/chat_message_repository.dart';
 import '../../chat/models/group_chat_message.dart';
@@ -220,7 +224,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       unawaited(_takePendingNudgeAction());
     });
     _nudgeReceivedSubscription = AndroidVoiceNudgeBridge.receivedSignals.listen(
-      (groupId) => unawaited(_onNudgeReceived(groupId)),
+      (groupId) {
+        LogManager.log(
+          LogLevel.info,
+          'NudgeService',
+          'FCM trigger received on Dart bridge groupId=$groupId',
+          userId: _session.userId,
+          groupId: groupId,
+        );
+        unawaited(_onNudgeReceived(groupId));
+      },
     );
     _registrationRenewalSubscription = AndroidVoiceNudgeBridge
         .registrationSignals
@@ -255,6 +268,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   void _applyBootstrap(IdentityHomeBootstrap bootstrap) {
     _groups = bootstrap.groups;
     _selectedGroup = bootstrap.selectedGroup;
+    LogManager.setIdentity(
+      userId: _session.userId,
+      groupId: bootstrap.selectedGroup?.groupId,
+    );
     _members = bootstrap.members;
     _membersByGroupId = bootstrap.membersByGroupId;
     _carouselIndex = bootstrap.carouselIndex;
@@ -268,6 +285,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     final selected = _selectedGroup;
     if (selected != null) {
+      unawaited(AppTelemetry.setActiveGroup(selected.groupId));
       _listenToMembers(selected.groupId);
       _listenToAvailability(selected.groupId);
       _listenToChatMessages(selected.groupId);
@@ -1369,6 +1387,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _chatOnlineClearInFlight = false;
     });
     unawaited(LastActiveGroupStore.write(_session.userId, group.groupId));
+    unawaited(AppTelemetry.setActiveGroup(group.groupId));
     if (cachedMembers == null) {
       await _loadMembers(group.groupId);
     }
@@ -1727,11 +1746,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       );
     } catch (error, stack) {
       unawaited(
-        CrashlyticsService.recordError(
-          error,
-          stack,
-          reason: 'livekit_go_online_failed',
-          feature: 'presence',
+        CrashlyticsService.recordNudgeFailure(
+          error: error,
+          stack: stack,
+          failureReason: NudgeFailureReason.livekitSessionFailed,
+          receiverId: _session.userId,
+          groupId: group.groupId,
+          livekitRoomState: _room?.connectionState.toString(),
+          extras: {
+            'feature': 'presence',
+            'connection_mode': startingConnectionMode,
+          },
         ),
       );
       // If a warm room was taken but connect never claimed it (e.g. the
@@ -2161,13 +2186,36 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _goLiveStepEnd(3, 'LiveKit room initialization started', step3StartedAt);
 
     final step4StartedAt = _goLiveStepStart(4, 'LiveKit room.connect() called');
-    await room
-        .connect(
-          session.livekitServerUrl,
-          session.livekitToken,
-          connectOptions: const ConnectOptions(autoSubscribe: true),
-        )
-        .timeout(const Duration(seconds: 20));
+    LogManager.log(
+      LogLevel.info,
+      'LiveKitManager',
+      'Room connect attempt url=${session.livekitServerUrl} '
+      'room=${session.livekitRoomName}',
+      userId: session.userId,
+      groupId: session.groupId,
+    );
+    try {
+      await room
+          .connect(
+            session.livekitServerUrl,
+            session.livekitToken,
+            connectOptions: const ConnectOptions(autoSubscribe: true),
+          )
+          .timeout(const Duration(seconds: 20));
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordNudgeFailure(
+          error: error,
+          stack: stack,
+          failureReason: NudgeFailureReason.livekitSessionFailed,
+          receiverId: session.userId,
+          groupId: session.groupId,
+          livekitRoomState: room.connectionState.toString(),
+          extras: {'checkpoint': 'room.connect'},
+        ),
+      );
+      rethrow;
+    }
     _goLiveConnectResolvedAtMs = DateTime.now().millisecondsSinceEpoch;
     _goLiveStepEnd(
       4,
@@ -2339,7 +2387,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   void _attachRoomListener(Room room) {
-    _roomListener = room.createListener()
+    _roomListener = attachLiveKitLifecycleLogs(
+      room.createListener(),
+      userId: _session.userId,
+      groupId: _selectedGroup?.groupId ?? _onlineSession?.groupId,
+    )
       ..on<RoomConnectedEvent>((_) {
         _syncConnectionQualities(room);
         _setMessage(LiveKitStatus.connected);

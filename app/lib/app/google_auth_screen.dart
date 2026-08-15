@@ -17,13 +17,16 @@ class GoogleAuthScreen extends StatefulWidget {
 }
 
 class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
-  final IdentityRepository _identityRepository = IdentityRepository();
+  IdentityRepository? _identityRepository;
   bool _isSigningIn = false;
   String? _errorMessage;
 
+  IdentityRepository get _repo =>
+      _identityRepository ??= IdentityRepository();
+
   @override
   void dispose() {
-    _identityRepository.dispose();
+    _identityRepository?.dispose();
     super.dispose();
   }
 
@@ -39,7 +42,7 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
     });
 
     try {
-      await _identityRepository.signInWithGoogle();
+      await _repo.signInWithGoogle();
       // On success the root Firebase auth stream advances to onboarding.
       // Don't touch _isSigningIn – leave this screen in its splash state
       // until the StreamBuilder replaces it.
@@ -76,7 +79,7 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
     // Matches StartupGateScreen so cold starts never flash the welcome CTA at
     // already-signed-in users.
     if (widget.initializing || _isSigningIn) {
-      return const _SplashGate();
+      return const BrandSplashScreen();
     }
 
     return Scaffold(
@@ -149,11 +152,10 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
   }
 }
 
-/// Shown immediately when the user taps "Continue with Google", before the
-/// Firebase auth stream has had time to fire. Visually identical to the
-/// [StartupGateScreen] loading state so the transition is seamless.
-class _SplashGate extends StatelessWidget {
-  const _SplashGate();
+/// Brand splash with no Firebase access. Used while Firebase boots and
+/// immediately after tapping Continue with Google.
+class BrandSplashScreen extends StatelessWidget {
+  const BrandSplashScreen({super.key});
 
   @override
   Widget build(BuildContext context) {

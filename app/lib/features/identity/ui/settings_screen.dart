@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../../app/accent_theme.dart';
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/logging/debug_logs_sheet.dart';
 import '../../groups/models/group_summary.dart';
 import '../../subscriptions/eleven_pro_paywall_screen.dart';
 import '../../subscriptions/subscription_management_sheet.dart';
@@ -872,6 +873,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     icon: Icons.manage_accounts_outlined,
                     label: 'Manage Subscription',
                     onTap: _showManageSubscription,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 28),
+              const _SectionTitle('Support'),
+              const SizedBox(height: 12),
+              _SettingsSurface(
+                padding: EdgeInsets.zero,
+                children: [
+                  _NavigationRow(
+                    icon: Icons.bug_report_outlined,
+                    label: 'Debug Logs',
+                    onTap: () => showDebugLogsSheet(context),
                   ),
                 ],
               ),

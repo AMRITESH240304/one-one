@@ -1,0 +1,26 @@
+--------- beginning of main
+08-15 00:13:04.648 16440 29721 I OneOneFCM: [FCM-07] Message received id=0:1786732983913231%6c66b22ef9fd7ecd keys=ackUrl,audioUrl,deliveryToken,durationMs,eventId,expiresAt,groupId,responseUrl,senderAvatarAsset,senderName,senderUserId,type
+08-15 00:13:04.649 16440 29721 I OneOneFCM: [FCM-09] Starting native playback kind=voice_nudge eventSuffix=339521
+08-15 00:13:04.658 16440 16440 I OneOneFCM: [FCM-10] Playback service accepted kind=voice_nudge eventSuffix=339521
+08-15 00:13:12.178 19597 19597 I ExoPlayerImpl: Init fbdcb51 [AndroidXMedia3/1.11.0-rc01] [cancunf, moto g64 5G, motorola, 35]
+08-15 00:13:12.180 19597 19597 I ExoPlayerImpl: Init 9686fb6 [AndroidXMedia3/1.11.0-rc01] [cancunf, moto g64 5G, motorola, 35]
+08-15 00:13:55.323  4822 30105 D AudioTrack: setVolume(20750): 0xb400007bc33f9200, left = 0.501187, right = 0.501187
+08-15 00:13:55.323  4822 30105 D AudioTrack: setVolume: mRelativePercentage:1.000000, left:0.501187, right:0.501187
+08-15 00:13:55.323  4822 30105 D AudioTrack: start(20750): 0xb400007bc33f9200, prior state:STATE_STOPPED
+08-15 00:13:55.465 16440 16440 I OneOneFCM: [FCM-02] Flutter requested FCM installation registration
+08-15 00:13:55.475 16440 29721 I OneOneFCM: [FCM-06] onRegistered callback length=22 suffix=ndrb_d
+08-15 00:13:55.475 16440 29721 I OneOneFCM: [FCM-05] Registered identifier saved locally length=22 suffix=ndrb_d
+08-15 00:13:55.478 16440 16440 I OneOneFCM: [FCM-03] FCM backend registration completed
+08-15 00:13:55.486 16440 16440 I OneOneFCM: [FCM-04] Firebase Installation ID resolved length=22 suffix=ndrb_d
+08-15 00:13:55.486 16440 16440 I OneOneFCM: [FCM-05] Registered identifier saved locally length=22 suffix=ndrb_d
+08-15 00:13:55.673  4822 30105 D AudioTrack: stop(20750): 0xb400007bc33f9200, prior state:STATE_ACTIVE
+08-15 00:13:55.674  4822 30105 D AudioTrack: stop(20750): 0xb400007bc33f9200 stop done
+08-15 00:14:21.779 16440 29721 I OneOneFCM: [FCM-07] Message received id=0:1786733060154209%6c66b22ef9fd7ecd keys=ackUrl,audioUrl,deliveryToken,durationMs,eventId,expiresAt,groupId,responseUrl,senderAvatarAsset,senderName,senderUserId,type
+08-15 00:14:21.780 16440 29721 I OneOneFCM: [FCM-09] Starting native playback kind=voice_nudge eventSuffix=b56f12
+08-15 00:14:21.791 16440 16440 I OneOneFCM: [FCM-10] Playback service accepted kind=voice_nudge eventSuffix=b56f12
+08-15 00:15:27.935 16440 16440 I OneOneFCM: [FCM-02] Flutter requested FCM installation registration
+08-15 00:15:27.938 16440 16440 I OneOneFCM: [FCM-03] FCM backend registration completed
+08-15 00:15:27.944 16440 30405 I OneOneFCM: [FCM-06] onRegistered callback length=22 suffix=ndrb_d
+08-15 00:15:27.945 16440 30405 I OneOneFCM: [FCM-05] Registered identifier saved locally length=22 suffix=ndrb_d
+08-15 00:15:27.946 16440 16440 I OneOneFCM: [FCM-04] Firebase Installation ID resolved length=22 suffix=ndrb_d
+08-15 00:15:27.946 16440 16440 I OneOneFCM: [FCM-05] Registered identifier saved locally length=22 suffix=ndrb_d

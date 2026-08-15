@@ -149,14 +149,26 @@ object VoiceNudgeDiagnostics {
     // the custom key "nudge_failure_event" so they are filterable in the
     // dashboard.
 
+    fun canonicalFailureReason(reason: String): String = when (reason) {
+        "permission_denied_microphone" -> "permission_denied_microphone"
+        "permission_denied_firebase" -> "permission_denied_firebase"
+        "fcm_not_delivered" -> "fcm_not_delivered"
+        "download_failed", "download_error" -> "download_failed"
+        "playback_failed", "playback_error", "playback_service_start_error", "timeout" ->
+            "playback_failed"
+        "volume_too_low", "volume_low", "volume_muted" -> "volume_too_low"
+        "dnd_active" -> "dnd_active"
+        "livekit_session_failed" -> "livekit_session_failed"
+        "background_fg_service_blocked", "permission_denied_foreground_service" ->
+            "background_fg_service_blocked"
+        else -> "unknown"
+    }
+
     /**
      * Generic nudge-failure record with a required reason code.
      *
      * Records a non-fatal Crashlytics event so playback/delivery failures show
-     * up in the console even when the app never crashes. Each event carries
-     * the receiver's own user ID (resolved from Firebase Auth), the group, the
-     * sender, a device snapshot, and a receiver-side health snapshot so a
-     * single event is usually enough to triage without reproduction.
+     * up in the console even when the app never crashes.
      */
     fun recordNudgeFailure(
         reason: String,
@@ -167,27 +179,34 @@ object VoiceNudgeDiagnostics {
         senderUserId: String? = null,
         senderName: String? = null,
         health: Map<String, String> = emptyMap(),
+        throwable: Throwable? = null,
     ) {
         val crashlytics = FirebaseCrashlytics.getInstance()
         val receiverUserId = FirebaseAuth.getInstance().currentUser?.uid
+        val canonical = canonicalFailureReason(reason)
+        val network = DeviceLog.networkMeta()
+        val device = DeviceLog.deviceMeta()
+        val inBackground = DeviceLog.wasAppInBackground()
 
-        crashlytics.setCustomKey("nudge_failure_event", reason)
+        crashlytics.setCustomKey("nudge_sender_id", senderUserId.orEmpty())
+        crashlytics.setCustomKey("nudge_receiver_id", receiverUserId.orEmpty())
+        crashlytics.setCustomKey("group_id", groupId.orEmpty())
+        crashlytics.setCustomKey("failure_reason", canonical)
+        crashlytics.setCustomKey("network_type", network["networkType"] ?: "Unknown")
+        crashlytics.setCustomKey("device_model", device["deviceModel"] ?: Build.MODEL)
+        crashlytics.setCustomKey("android_version", Build.VERSION.RELEASE ?: "")
+        crashlytics.setCustomKey("app_version", DeviceLog.currentAppVersion())
+        crashlytics.setCustomKey("was_app_in_background", inBackground)
+        crashlytics.setCustomKey("livekit_room_state", extras["livekit_room_state"] ?: "")
+        crashlytics.setCustomKey("nudge_failure_event", canonical)
         crashlytics.setCustomKey("nudge_failure_kind", kind ?: "unknown")
-        crashlytics.setCustomKey("device_model", Build.MODEL)
         crashlytics.setCustomKey("device_manufacturer", Build.MANUFACTURER)
         crashlytics.setCustomKey("android_sdk", Build.VERSION.SDK_INT.toString())
-        receiverUserId?.let {
-            crashlytics.setCustomKey("receiver_user_id", it)
-            crashlytics.setUserId(it)
-        }
+        crashlytics.setCustomKey("network_strength", network["networkStrength"] ?: "-")
+        receiverUserId?.let { crashlytics.setUserId(it) }
         eventId?.let {
-            crashlytics.setCustomKey(
-                "nudge_event_suffix",
-                it.takeLast(8),
-            )
+            crashlytics.setCustomKey("nudge_event_suffix", it.takeLast(8))
         }
-        groupId?.let { crashlytics.setCustomKey("group_suffix", it.takeLast(8)) }
-        senderUserId?.let { crashlytics.setCustomKey("sender_user_id", it) }
         senderName?.let { crashlytics.setCustomKey("sender_name", it.take(40)) }
         for ((key, value) in extras) {
             crashlytics.setCustomKey(key, value)
@@ -195,22 +214,21 @@ object VoiceNudgeDiagnostics {
         for ((key, value) in health) {
             crashlytics.setCustomKey("health_$key", value)
         }
-        // Ship the receiver's recent structured log trace with this non-fatal
-        // event so the report carries device context without needing logcat.
-        // Crashlytics.log() is attached to the very next recordException, so
-        // this must run before it.
         val trace = NudgeLogBuffer.snapshot()
-        crashlytics.log("nudge_trace_begin reason=$reason kind=$kind lines=${trace.size}")
+        crashlytics.log("nudge_trace_begin reason=$canonical kind=$kind lines=${trace.size}")
         for (line in trace) {
             crashlytics.log(line)
         }
         crashlytics.log("nudge_trace_end")
         crashlytics.recordException(
-            RuntimeException("Nudge failure: $reason (kind=$kind eventSuffix=${eventId?.takeLast(6) ?: "none"})"),
+            throwable
+                ?: RuntimeException(
+                    "Nudge failure: $canonical (kind=$kind eventSuffix=${eventId?.takeLast(6) ?: "none"})",
+                ),
         )
         Log.w(
             tag,
-            "[NUDGE-FAIL] reason=$reason kind=$kind " +
+            "[NUDGE-FAIL] reason=$canonical kind=$kind " +
                 "groupId=${groupId?.takeLast(6) ?: "none"} " +
                 "receiver=${receiverUserId?.takeLast(6) ?: "none"} ${extras}",
         )

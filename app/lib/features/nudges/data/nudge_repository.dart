@@ -2,6 +2,8 @@ import 'package:flutter/foundation.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/firebase/firebase_analytics_service.dart';
+import '../../../core/logging/log_level.dart';
+import '../../../core/logging/log_manager.dart';
 import '../../../core/network/api_client.dart';
 
 class NudgeTarget {
@@ -45,6 +47,13 @@ class NudgeRepository {
       target.json,
     );
     final result = _requireAcceptedDelivery(response);
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Nudge sent kind=push targetScope=${target.targetScope} '
+      'eventId=${result['notificationEventId'] ?? '-'}',
+      groupId: groupId,
+    );
     await AnalyticsService.logNudgeSent(
       groupId: groupId,
       kind: 'push',
@@ -66,6 +75,14 @@ class NudgeRepository {
       {...target.json, 'durationSeconds': durationSeconds},
     );
     final result = _requireAcceptedDelivery(response);
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Nudge sent kind=ring durationSeconds=$durationSeconds '
+      'targetScope=${target.targetScope} '
+      'eventId=${result['notificationEventId'] ?? '-'}',
+      groupId: groupId,
+    );
     await AnalyticsService.logNudgeSent(
       groupId: groupId,
       kind: 'ring',
@@ -144,6 +161,13 @@ class NudgeRepository {
         'uploadMode=signed_write_url',
       );
       final result = _requireAcceptedDelivery(response);
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'Nudge sent kind=voice bytes=${audio.length} durationMs=$durationMs '
+        'eventId=${result['notificationEventId'] ?? eventId}',
+        groupId: groupId,
+      );
       await AnalyticsService.logNudgeSent(
         groupId: groupId,
         kind: 'voice',
@@ -161,11 +185,18 @@ class NudgeRepository {
         'audioBytes=${audio.length} elapsedMs=${stopwatch.elapsedMilliseconds} '
         '${error.runtimeType}: $error',
       );
-      await CrashlyticsService.recordError(
-        error,
-        stack,
-        reason: 'voice_nudge_upload_failed',
-        feature: 'nudge',
+      LogManager.log(
+        LogLevel.error,
+        'NudgeService',
+        'Nudge not delivered: network error. Voice send failed: $error',
+        groupId: groupId,
+      );
+      await CrashlyticsService.recordNudgeFailure(
+        error: error,
+        stack: stack,
+        failureReason: NudgeFailureReason.unknown,
+        groupId: groupId,
+        extras: {'checkpoint': 'voice_nudge_upload'},
       );
       rethrow;
     }

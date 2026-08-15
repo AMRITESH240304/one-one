@@ -58,11 +58,18 @@ class VoiceNudgePlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        DeviceLog.init(this)
+        DeviceLog.info("NudgeService", "VoiceNudgePlaybackService created")
         Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] Playback service created")
         VoiceNudgeAudioCache.deleteOrphans(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        DeviceLog.init(this)
+        DeviceLog.info(
+            "NudgeService",
+            "Playback onStartCommand called action=${intent?.action ?: "play"} flags=$flags startId=$startId",
+        )
         Log.d(
             VoiceNudgeDiagnostics.tag,
             "[FCM-D] onStartCommand action=${intent?.action ?: "null"} " +
@@ -204,6 +211,7 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        DeviceLog.info("NudgeService", "VoiceNudgePlaybackService stopped")
         Log.d(
             VoiceNudgeDiagnostics.tag,
             "[FCM-D] Playback service destroyed queueDepth=${queue.size} " +
@@ -238,15 +246,43 @@ class VoiceNudgePlaybackService : Service() {
             VoiceNudgeDiagnostics.tag,
             "[FCM-D] startForeground notificationId=$notificationId sdk=${Build.VERSION.SDK_INT}",
         )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                notificationId,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+        DeviceLog.info("NudgeService", "startForeground called notificationId=$notificationId")
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    notificationId,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                startForeground(notificationId, notification)
+            }
+        } catch (error: SecurityException) {
+            DeviceLog.log(
+                "ERROR",
+                "NudgeService",
+                "SecurityException caught while calling startForeground for playback",
+                throwable = error,
             )
-        } else {
-            @Suppress("DEPRECATION")
-            startForeground(notificationId, notification)
+            DeviceLog.error(
+                "NudgeService",
+                "Nudge not delivered: permission denied (foreground service start blocked)",
+            )
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "background_fg_service_blocked",
+                eventId = active?.eventId,
+                kind = active?.kind,
+                extras = mapOf(
+                    "error" to (error.message ?: "unknown"),
+                    "checkpoint" to "playback_startForeground",
+                ),
+                groupId = active?.groupId,
+                senderUserId = active?.senderUserId,
+                senderName = active?.senderName,
+                throwable = error,
+            )
+            throw error
         }
     }
 
@@ -315,6 +351,7 @@ class VoiceNudgePlaybackService : Service() {
             VoiceNudgeDiagnostics.tag,
             "[FCM-11] Processing queued nudge kind=${request.kind}",
         )
+        logNudgeHealthGates(request)
         holdWakeLock()
         scheduleActiveTimeout(request)
         val initialStatus = when {
@@ -404,6 +441,11 @@ class VoiceNudgePlaybackService : Service() {
                 "[FCM-D] playRing: sending played ack + scheduling finish in ${request.durationMs}ms",
             )
             sendPlayedAckOnce(request)
+            DeviceLog.info(
+                "NudgeService",
+                "Playback started kind=ring eventId=${request.eventId} durationMs=${request.durationMs}",
+                groupId = request.groupId,
+            )
             // The PCM buffer itself is exactly the requested length. This
             // callback owns service and notification cleanup at that boundary.
             mainHandler.postDelayed(
@@ -412,6 +454,13 @@ class VoiceNudgePlaybackService : Service() {
             )
         } catch (error: RuntimeException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E4] Ring playback", error)
+            DeviceLog.log(
+                "ERROR",
+                "NudgeService",
+                "Playback failed: ${error.message}. Nudge not delivered: unknown. eventId=${request.eventId}",
+                groupId = request.groupId,
+                throwable = error,
+            )
             VoiceNudgeDiagnostics.recordNudgeFailure(
                 reason = "playback_error",
                 eventId = request.eventId,
@@ -471,6 +520,11 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun downloadAndPlay(request: NudgeRequest) {
+        DeviceLog.info(
+            "NudgeService",
+            "Download started kind=${request.kind} eventId=${request.eventId} urlHost=${request.audioUrl?.substringAfter("://")?.substringBefore("/") ?: "-"}",
+            groupId = request.groupId,
+        )
         Log.d(
             VoiceNudgeDiagnostics.tag,
             "[FCM-D] downloadAndPlay scheduling download eventSuffix=${request.eventId.takeLast(6)}",
@@ -482,6 +536,16 @@ class VoiceNudgePlaybackService : Service() {
                     VoiceNudgeDiagnostics.tag,
                     "[FCM-13] Voice audio downloaded bytes=${file.length()}",
                 )
+                DeviceLog.info(
+                    "NudgeService",
+                    "Download complete bytes=${file.length()} eventId=${request.eventId}",
+                    groupId = request.groupId,
+                )
+                DeviceLog.info(
+                    "NudgeService",
+                    "Download complete bytes=${file.length()} eventId=${request.eventId}",
+                    groupId = request.groupId,
+                )
                 Log.d(
                     VoiceNudgeDiagnostics.tag,
                     "[FCM-D] downloadAndPlay: download complete, posting startPlayer to main",
@@ -489,8 +553,22 @@ class VoiceNudgePlaybackService : Service() {
                 mainHandler.post { startPlayer(request, file) }
             } catch (error: Exception) {
                 VoiceNudgeDiagnostics.logFailure("[FCM-E5] Voice audio download", error)
+                DeviceLog.log(
+                    "ERROR",
+                    "NudgeService",
+                    "Nudge not delivered: network error. Download failed eventId=${request.eventId} detail=${error.message}",
+                    groupId = request.groupId,
+                    throwable = error,
+                )
                 VoiceNudgeDiagnostics.recordNudgeFailure(
-                    reason = "download_error",
+                    reason = if (
+                        error.message?.contains("HTTP 403") == true ||
+                        error.message?.contains("HTTP 401") == true
+                    ) {
+                        "permission_denied_firebase"
+                    } else {
+                        "download_failed"
+                    },
                     eventId = request.eventId,
                     kind = request.kind,
                     extras = mapOf("error" to (error.message ?: "unknown")),
@@ -498,6 +576,7 @@ class VoiceNudgePlaybackService : Service() {
                     senderUserId = request.senderUserId,
                     senderName = request.senderName,
                     health = activeHealth?.toCrashlyticsMap().orEmpty(),
+                    throwable = error,
                 )
                 acknowledge(request, "failed", "download_error", activeHealth) {
                     finishActive(success = false)
@@ -653,6 +732,11 @@ class VoiceNudgePlaybackService : Service() {
                         sendPlayedAckOnce(request)
                     }
                     if (isPlaying) {
+                        DeviceLog.info(
+                            "NudgeService",
+                            "Playback started kind=${request.kind} eventId=${request.eventId}",
+                            groupId = request.groupId,
+                        )
                         // Playback has genuinely started, so the clip must end
                         // within its duration plus a short grace. Re-arming the
                         // watchdog here recovers quickly from an audio-focus /
@@ -677,6 +761,11 @@ class VoiceNudgePlaybackService : Service() {
                         }
                         Player.STATE_ENDED -> {
                             Log.i(VoiceNudgeDiagnostics.tag, "[FCM-15] Voice playback completed")
+                            DeviceLog.info(
+                                "NudgeService",
+                                "Playback complete eventId=${request.eventId}",
+                                groupId = request.groupId,
+                            )
                             VoiceNudgeAudioCache.clearPosition(
                                 this@VoiceNudgePlaybackService,
                                 request.eventId,
@@ -693,6 +782,14 @@ class VoiceNudgePlaybackService : Service() {
                             "message=${error.message}",
                     )
                     VoiceNudgeDiagnostics.logFailure("[FCM-E6] Voice playback", error)
+                    DeviceLog.log(
+                        "ERROR",
+                        "NudgeService",
+                        "Playback failed: ${error.errorCodeName} ${error.message}. " +
+                            "Nudge not delivered: unknown. eventId=${request.eventId}",
+                        groupId = request.groupId,
+                        throwable = error,
+                    )
                     VoiceNudgeDiagnostics.recordNudgeFailure(
                         reason = "playback_error",
                         eventId = request.eventId,
@@ -897,6 +994,36 @@ class VoiceNudgePlaybackService : Service() {
 
         val health = activeHealth
         val attention = health?.attentionReason()
+        if (attention == "volume_muted" || attention == "volume_low") {
+            DeviceLog.warn(
+                "NudgeService",
+                "Nudge not delivered: volume too low " +
+                    "(attention=$attention volume=${health.streamVolume}/${health.streamMaxVolume}) " +
+                    "eventId=${request.eventId}",
+                groupId = request.groupId,
+            )
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "volume_too_low",
+                eventId = request.eventId,
+                kind = request.kind,
+                extras = mapOf("attention" to attention),
+                groupId = request.groupId,
+                senderUserId = request.senderUserId,
+                senderName = request.senderName,
+                health = health.toCrashlyticsMap(),
+            )
+        }
+        if (health != null && health.dndActive) {
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "dnd_active",
+                eventId = request.eventId,
+                kind = request.kind,
+                groupId = request.groupId,
+                senderUserId = request.senderUserId,
+                senderName = request.senderName,
+                health = health.toCrashlyticsMap(),
+            )
+        }
         if (attention != null && health != null) {
             Log.i(
                 VoiceNudgeDiagnostics.tag,
@@ -1031,6 +1158,7 @@ class VoiceNudgePlaybackService : Service() {
         val streamMuted: Boolean,
         val ringerMode: Int,
         val notificationsEnabled: Boolean,
+        val dndActive: Boolean,
     ) {
         /**
          * Coarse audibility band, kept deliberately separate from whether
@@ -1068,6 +1196,7 @@ class VoiceNudgePlaybackService : Service() {
             put("ringerMode", ringerMode)
             put("notificationsEnabled", notificationsEnabled)
             put("volumeLevel", volumeLevel)
+            put("dndActive", dndActive)
         }
 
         /** Flat string map for Crashlytics custom keys (prefixed `health_`). */
@@ -1078,6 +1207,7 @@ class VoiceNudgePlaybackService : Service() {
             "ringerMode" to ringerMode.toString(),
             "notificationsEnabled" to notificationsEnabled.toString(),
             "volumeLevel" to volumeLevel,
+            "dndActive" to dndActive.toString(),
         )
     }
 
@@ -1094,12 +1224,21 @@ class VoiceNudgePlaybackService : Service() {
         } else {
             true
         }
+        val dndActive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val filter = notificationManager.currentInterruptionFilter
+            filter == NotificationManager.INTERRUPTION_FILTER_NONE ||
+                filter == NotificationManager.INTERRUPTION_FILTER_ALARMS ||
+                filter == NotificationManager.INTERRUPTION_FILTER_PRIORITY
+        } else {
+            false
+        }
         val snapshot = NudgeHealthSnapshot(
             streamVolume = audioManager.getStreamVolume(streamType),
             streamMaxVolume = audioManager.getStreamMaxVolume(streamType),
             streamMuted = muted,
             ringerMode = audioManager.ringerMode,
             notificationsEnabled = notificationsEnabled,
+            dndActive = dndActive,
         )
         Log.d(
             VoiceNudgeDiagnostics.tag,
@@ -1109,6 +1248,42 @@ class VoiceNudgePlaybackService : Service() {
                 "notificationsEnabled=${snapshot.notificationsEnabled} volumeLevel=${snapshot.volumeLevel}",
         )
         return snapshot
+    }
+
+    private fun logNudgeHealthGates(request: NudgeRequest) {
+        val health = activeHealth ?: return
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        val dndActive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            notificationManager.currentInterruptionFilter.let { filter ->
+                filter == NotificationManager.INTERRUPTION_FILTER_NONE ||
+                    filter == NotificationManager.INTERRUPTION_FILTER_ALARMS ||
+                    filter == NotificationManager.INTERRUPTION_FILTER_PRIORITY
+            }
+        } else {
+            false
+        }
+        if (!health.notificationsEnabled) {
+            DeviceLog.warn(
+                "NudgeService",
+                "Nudge not delivered: permission denied (notifications disabled) eventId=${request.eventId}",
+                groupId = request.groupId,
+            )
+        }
+        if (dndActive) {
+            DeviceLog.warn(
+                "NudgeService",
+                "Nudge not delivered: DND active eventId=${request.eventId}",
+                groupId = request.groupId,
+            )
+        }
+        if (health.attentionReason() != null) {
+            DeviceLog.warn(
+                "NudgeService",
+                "Nudge not delivered: volume too low " +
+                    "(${health.volumeLevel}) eventId=${request.eventId}",
+                groupId = request.groupId,
+            )
+        }
     }
 
     private fun finishActive(success: Boolean) {
@@ -1121,6 +1296,13 @@ class VoiceNudgePlaybackService : Service() {
             VoiceNudgeDiagnostics.tag,
             "[FCM-17] Nudge finished kind=${request.kind} success=$success",
         )
+        if (success) {
+            DeviceLog.info(
+                "NudgeService",
+                "Playback complete kind=${request.kind} eventId=${request.eventId}",
+                groupId = request.groupId,
+            )
+        }
         Log.d(
             VoiceNudgeDiagnostics.tag,
             "[FCM-D] finishActive: releasing playback queueDepth=${queue.size} " +
@@ -1287,6 +1469,11 @@ class VoiceNudgePlaybackService : Service() {
                     VoiceNudgeDiagnostics.tag,
                     "[FCM-W11] Active nudge timed out kind=${request.kind} " +
                         "eventSuffix=${request.eventId.takeLast(6)}",
+                )
+                DeviceLog.warn(
+                    "NudgeService",
+                    "Playback failed: timeout. Nudge not delivered: unknown. eventId=${request.eventId}",
+                    groupId = request.groupId,
                 )
                 VoiceNudgeDiagnostics.recordNudgeFailure(
                     reason = "timeout",

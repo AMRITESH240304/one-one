@@ -147,6 +147,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        DeviceLog.init(this)
         val data = message.data
         Log.i(
             VoiceNudgeDiagnostics.tag,
@@ -154,6 +155,18 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 "keys=${data.keys.sorted().joinToString(",")}",
         )
         val kind = data["type"]
+        if (kind == VoiceNudgeContract.kindVoice ||
+            kind == VoiceNudgeContract.kindRing ||
+            kind == VoiceNudgeContract.kindPush
+        ) {
+            DeviceLog.info(
+                "NudgeService",
+                "FCM trigger received kind=$kind eventId=${data["eventId"] ?: "-"} " +
+                    "sender=${data["senderName"] ?: "-"}",
+                groupId = data["groupId"],
+                userId = data["senderUserId"],
+            )
+        }
         if (kind == null) {
             if (message.notification != null) {
                 Log.w(
@@ -210,11 +223,26 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         val eventId = data["eventId"]
         if (eventId == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W3] Ignored $kind without eventId")
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "unknown",
+                eventId = null,
+                kind = kind,
+                extras = mapOf("checkpoint" to "fcm_missing_event_id"),
+                groupId = data["groupId"],
+                senderUserId = data["senderUserId"],
+            )
             return
         }
         val groupId = data["groupId"]?.takeIf { it.isNotBlank() }
         if (groupId == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W10] Ignored $kind without groupId")
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "unknown",
+                eventId = eventId,
+                kind = kind,
+                extras = mapOf("checkpoint" to "fcm_missing_group_id"),
+                senderUserId = data["senderUserId"],
+            )
             return
         }
 
@@ -227,10 +255,33 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         val durationMs = data["durationMs"]?.toLongOrNull()?.coerceIn(250L, 10_000L)
         if (durationMs == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W4] Ignored $kind with invalid duration")
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "unknown",
+                eventId = eventId,
+                kind = kind,
+                extras = mapOf("checkpoint" to "fcm_invalid_duration"),
+                groupId = groupId,
+                senderUserId = data["senderUserId"],
+                senderName = senderName,
+            )
             return
         }
         if (kind == VoiceNudgeContract.kindVoice && isExpired(data["expiresAt"])) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W5] Ignored expired voice nudge")
+            DeviceLog.warn(
+                "NudgeService",
+                "Nudge not delivered: unknown (expired before playback) eventId=$eventId",
+                groupId = groupId,
+            )
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "unknown",
+                eventId = eventId,
+                kind = kind,
+                extras = mapOf("checkpoint" to "fcm_expired_voice"),
+                groupId = groupId,
+                senderUserId = data["senderUserId"],
+                senderName = senderName,
+            )
             return
         }
 
@@ -262,7 +313,15 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         } catch (error: RuntimeException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E3] Native playback start", error)
             val failureReason =
-                if (error is SecurityException) "permission_denied_foreground_service" else "playback_service_start_error"
+                if (error is SecurityException) "background_fg_service_blocked" else "playback_failed"
+            DeviceLog.log(
+                "ERROR",
+                "NudgeService",
+                "Nudge not delivered: ${nudgeUndeliveredReason(error)} " +
+                    "kind=$kind eventId=$eventId",
+                groupId = groupId,
+                throwable = error,
+            )
             VoiceNudgeDiagnostics.recordNudgeFailure(
                 reason = failureReason,
                 eventId = eventId,
@@ -270,10 +329,12 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 extras = mapOf(
                     "error" to (error.message ?: "unknown"),
                     "error_class" to error.javaClass.simpleName,
+                    "checkpoint" to "fcm_start_playback_service",
                 ),
                 groupId = data["groupId"],
                 senderUserId = data["senderUserId"],
                 senderName = senderName,
+                throwable = error,
             )
             // The playback service never got a chance to run (and therefore
             // never got to POST its own ack) — report the specific reason
@@ -316,6 +377,12 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         Log.w(
             VoiceNudgeDiagnostics.tag,
             "[FCM-W7] FCM deleted pending messages before delivery",
+        )
+        VoiceNudgeDiagnostics.recordNudgeFailure(
+            reason = "fcm_not_delivered",
+            eventId = null,
+            kind = "fcm",
+            extras = mapOf("checkpoint" to "onDeletedMessages"),
         )
     }
 
@@ -592,5 +659,15 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             groupId,
             recipientName,
         )
+    }
+}
+
+private fun nudgeUndeliveredReason(error: Throwable): String {
+    return when {
+        error is SecurityException -> "permission denied"
+        error.message?.contains("Unable to resolve", ignoreCase = true) == true -> "network error"
+        error.message?.contains("timeout", ignoreCase = true) == true -> "network error"
+        error.message?.contains("UnknownHost", ignoreCase = true) == true -> "network error"
+        else -> "unknown"
     }
 }

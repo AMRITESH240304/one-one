@@ -1,22 +1,120 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
+import '../logging/log_level.dart';
+import '../logging/log_manager.dart';
 import 'firebase_analytics_service.dart';
+
+/// Canonical non-fatal nudge failure reasons shown in Crashlytics.
+abstract final class NudgeFailureReason {
+  static const permissionDeniedMicrophone = 'permission_denied_microphone';
+  static const permissionDeniedFirebase = 'permission_denied_firebase';
+  static const fcmNotDelivered = 'fcm_not_delivered';
+  static const downloadFailed = 'download_failed';
+  static const playbackFailed = 'playback_failed';
+  static const volumeTooLow = 'volume_too_low';
+  static const dndActive = 'dnd_active';
+  static const livekitSessionFailed = 'livekit_session_failed';
+  static const backgroundFgServiceBlocked = 'background_fg_service_blocked';
+  static const unknown = 'unknown';
+
+  static const Set<String> all = {
+    permissionDeniedMicrophone,
+    permissionDeniedFirebase,
+    fcmNotDelivered,
+    downloadFailed,
+    playbackFailed,
+    volumeTooLow,
+    dndActive,
+    livekitSessionFailed,
+    backgroundFgServiceBlocked,
+    unknown,
+  };
+
+  static String canonicalize(String? reason) {
+    switch (reason) {
+      case permissionDeniedMicrophone:
+      case permissionDeniedFirebase:
+      case fcmNotDelivered:
+      case downloadFailed:
+      case playbackFailed:
+      case volumeTooLow:
+      case dndActive:
+      case livekitSessionFailed:
+      case backgroundFgServiceBlocked:
+        return reason!;
+      case 'permission_denied_foreground_service':
+        return backgroundFgServiceBlocked;
+      case 'download_error':
+        return downloadFailed;
+      case 'playback_error':
+      case 'playback_service_start_error':
+      case 'timeout':
+        return playbackFailed;
+      case 'volume_low':
+      case 'volume_muted':
+        return volumeTooLow;
+      default:
+        return unknown;
+    }
+  }
+}
+
+String _deviceLogReason(String reason) {
+  switch (reason) {
+    case NudgeFailureReason.permissionDeniedMicrophone:
+    case NudgeFailureReason.permissionDeniedFirebase:
+    case NudgeFailureReason.backgroundFgServiceBlocked:
+      return 'permission denied';
+    case NudgeFailureReason.volumeTooLow:
+      return 'volume too low';
+    case NudgeFailureReason.dndActive:
+      return 'DND active';
+    case NudgeFailureReason.downloadFailed:
+    case NudgeFailureReason.fcmNotDelivered:
+      return 'network error';
+    default:
+      return 'unknown';
+  }
+}
 
 /// Thin wrapper around [FirebaseCrashlytics] for app-wide crash reporting.
 class CrashlyticsService {
   CrashlyticsService._();
 
   static final FirebaseCrashlytics _crashlytics = FirebaseCrashlytics.instance;
+  static String _appVersion = '';
+  static String _deviceModel = '';
 
   static Future<void> initialize() async {
     // Keep collection on in debug so local verification still uploads reports.
-    // Gate on kReleaseMode later if you want debug builds quiet.
     await _crashlytics.setCrashlyticsCollectionEnabled(true);
+    await _primeSessionKeys();
     debugPrint(
       '[Crashlytics] initialized collectionEnabled='
       '${_crashlytics.isCrashlyticsCollectionEnabled}',
     );
+  }
+
+  static Future<void> _primeSessionKeys() async {
+    try {
+      final package = await PackageInfo.fromPlatform();
+      _appVersion = '${package.version}+${package.buildNumber}';
+      _deviceModel = Platform.localHostname;
+      await setCustomKeys({
+        'app_version': _appVersion,
+        'android_version': Platform.operatingSystemVersion,
+        'device_model': _deviceModel,
+      });
+    } catch (error) {
+      debugPrint('[Crashlytics] session key prime failed: $error');
+    }
   }
 
   static Future<void> recordError(
@@ -31,6 +129,12 @@ class CrashlyticsService {
     debugPrint(
       '[Crashlytics] error recorded fatal=$fatal '
       'reason=${reason ?? '-'} error=$error',
+    );
+    LogManager.log(
+      fatal ? LogLevel.fatal : LogLevel.error,
+      'CrashlyticsService',
+      'Caught ${fatal ? 'fatal' : 'non-fatal'} error reason=${reason ?? '-'} '
+      'error=$error',
     );
     await _crashlytics.recordError(
       error,
@@ -75,12 +179,79 @@ class CrashlyticsService {
       '[Crashlytics] Flutter fatal error recorded '
       'exception=${details.exceptionAsString()}',
     );
+    LogManager.log(
+      LogLevel.fatal,
+      'CrashlyticsService',
+      'Flutter fatal error: ${details.exceptionAsString()}',
+    );
     await _crashlytics.recordFlutterFatalError(details);
     await AnalyticsService.logError(
       errorType: details.exception.runtimeType.toString(),
       feature: 'flutter_framework',
       isFatal: true,
       reason: details.exceptionAsString(),
+    );
+  }
+
+  /// Non-fatal nudge failure with the required Crashlytics custom keys.
+  static Future<void> recordNudgeFailure({
+    required Object error,
+    StackTrace? stack,
+    required String failureReason,
+    String? senderId,
+    String? receiverId,
+    String? groupId,
+    String? livekitRoomState,
+    String? eventId,
+    Map<String, Object> extras = const {},
+  }) async {
+    final reason = NudgeFailureReason.canonicalize(failureReason);
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    final inBackground =
+        lifecycle != null && lifecycle != AppLifecycleState.resumed;
+    String networkType = 'Unknown';
+    try {
+      final results = await Connectivity().checkConnectivity();
+      if (results.contains(ConnectivityResult.wifi)) {
+        networkType = 'WiFi';
+      } else if (results.contains(ConnectivityResult.mobile)) {
+        networkType = 'Mobile';
+      } else if (results.contains(ConnectivityResult.none) || results.isEmpty) {
+        networkType = 'None';
+      } else {
+        networkType = results.first.name;
+      }
+    } catch (_) {}
+
+    await setCustomKeys({
+      'nudge_sender_id': senderId ?? '',
+      'nudge_receiver_id': receiverId ?? '',
+      'group_id': groupId ?? '',
+      'failure_reason': reason,
+      'network_type': networkType,
+      'device_model': _deviceModel,
+      'android_version': Platform.operatingSystemVersion,
+      'app_version': _appVersion,
+      'was_app_in_background': inBackground,
+      'livekit_room_state': livekitRoomState ?? '',
+      if (eventId != null) 'nudge_event_id': eventId,
+      ...extras,
+    });
+    await recordError(
+      error,
+      stack ?? StackTrace.current,
+      reason: reason,
+      fatal: false,
+      feature: 'nudge',
+    );
+    LogManager.log(
+      LogLevel.error,
+      'NudgeService',
+      'Nudge not delivered: ${_deviceLogReason(reason)} '
+      '(failure_reason=$reason networkType=$networkType '
+      'background=$inBackground eventId=${eventId ?? '-'})',
+      userId: receiverId ?? senderId,
+      groupId: groupId,
     );
   }
 
