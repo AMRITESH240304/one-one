@@ -13,30 +13,52 @@ class _StepVisual {
     required this.iconColor,
     required this.icon,
     required this.backgroundAsset,
+    this.boxColor,
+    this.shiftX = 0,
   });
 
   final Color iconColor;
   final IconData icon;
   final String backgroundAsset;
+
+  /// Background color of the image's own artwork. When set, the image is
+  /// wrapped in a box container painted with this exact color so the
+  /// contained illustration blends seamlessly with the frame around it.
+  final Color? boxColor;
+
+  /// Horizontal offset (logical px) applied to the image. Used to nudge a
+  /// step's artwork right by a fixed amount.
+  final double shiftX;
 }
 
 /// Icon colors are picked to match the dominant tone of each onboarding
 /// background image so the CTA card feels native to the artwork behind it.
+///
+/// `boxColor` must match the background color of the artwork exactly. Screens
+/// 1 and 3 (Onboarding1/Onboarding3) use a box container painted with the
+/// image's own backdrop so the illustration doesn't look like it was
+/// over-enlarged to fill the screen.
 const Map<_SetupStep, _StepVisual> _stepVisuals = {
   _SetupStep.mic: _StepVisual(
     iconColor: Color(0xff8fa83e),
     icon: Icons.mic_rounded,
     backgroundAsset: 'assets/Onboarding1.png',
+    // Backdrop of Onboarding1.png is a solid lime green (mode rgb 140,162,77).
+    boxColor: Color(0xff8CA24D),
   ),
   _SetupStep.notification: _StepVisual(
     iconColor: Color(0xff7a4fc9),
     icon: Icons.notifications_rounded,
     backgroundAsset: 'assets/Onboarding3.png',
+    // Backdrop of Onboarding3.png is a solid purple (mode rgb 97,39,123).
+    boxColor: Color(0xff61277B),
   ),
   _SetupStep.background: _StepVisual(
     iconColor: Color(0xffdb8a1e),
     icon: Icons.battery_saver_rounded,
     backgroundAsset: 'assets/Onboarding2.png',
+    // Shift Onboarding2's artwork 20 logical px to the right. No box.
+    shiftX: 20,
   ),
 };
 
@@ -191,6 +213,46 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Renders the step's artwork.
+  ///
+  /// Screens with a [boxColor] (Onboarding1/Onboarding3) are wrapped in a box
+  /// container painted with the image's own backdrop color and fitted with
+  /// `BoxFit.contain`, so the illustration is never enlarged to cover the
+  /// full screen — the matching background blends the letterbox areas in.
+  /// Screens without one keep the full-bleed `BoxFit.cover` and only apply a
+  /// horizontal [shiftX] offset.
+  Widget _buildStepBackground(_StepVisual visual) {
+    final boxColor = visual.boxColor;
+    Widget image = Image.asset(
+      visual.backgroundAsset,
+      key: ValueKey(visual.backgroundAsset),
+      fit: boxColor != null ? BoxFit.contain : BoxFit.cover,
+      width: double.infinity,
+      height: double.infinity,
+      alignment: Alignment.center,
+    );
+    if (visual.shiftX != 0) {
+      image = Transform.translate(
+        offset: Offset(visual.shiftX, 0),
+        child: image,
+      );
+    }
+    if (boxColor != null) {
+      image = Container(
+        color: boxColor,
+        width: double.infinity,
+        height: double.infinity,
+        child: image,
+      );
+    }
+    // The AnimatedSwitcher needs a stable, unique key on the widget it
+    // directly receives so cross-fading detects the step change.
+    return KeyedSubtree(
+      key: ValueKey(visual.backgroundAsset),
+      child: image,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final visual = _stepVisuals[_step]!;
@@ -207,14 +269,7 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
             transitionBuilder: (child, animation) {
               return FadeTransition(opacity: animation, child: child);
             },
-            child: Image.asset(
-              visual.backgroundAsset,
-              key: ValueKey(visual.backgroundAsset),
-              fit: BoxFit.cover,
-              width: double.infinity,
-              height: double.infinity,
-              alignment: Alignment.center,
-            ),
+            child: _buildStepBackground(visual),
           ),
           // Bottom scrim so the CTA card and footnote stay legible over
           // whatever part of the artwork ends up behind them.
