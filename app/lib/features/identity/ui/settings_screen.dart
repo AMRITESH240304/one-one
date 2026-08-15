@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../../app/accent_theme.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/logging/debug_logs_sheet.dart';
@@ -604,6 +606,103 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return SubscriptionManagementSheet.show(context);
   }
 
+  bool _permissionRequestInFlight = false;
+
+  /// Re-triggers the mic permission prompt, then refreshes the device record
+  /// so the settings checklist reflects the grant.
+  Future<void> _requestMicPermission() async {
+    if (_permissionRequestInFlight) return;
+    _permissionRequestInFlight = true;
+    try {
+      final status = await Permission.microphone.request();
+      if (!mounted) return;
+      setState(
+        () => _message = status.isGranted
+            ? 'Microphone permission granted.'
+            : 'Microphone permission was denied.',
+      );
+      await _refreshPermissions();
+    } finally {
+      _permissionRequestInFlight = false;
+    }
+  }
+
+  /// Re-triggers the notification permission prompt, then refreshes the
+  /// device record so the settings checklist reflects the grant.
+  Future<void> _requestNotificationPermission() async {
+    if (_permissionRequestInFlight) return;
+    _permissionRequestInFlight = true;
+    try {
+      final status = await Permission.notification.request();
+      if (!mounted) return;
+      setState(
+        () => _message = status.isGranted
+            ? 'Notification permission granted.'
+            : 'Notification permission was denied.',
+      );
+      await _refreshPermissions();
+    } finally {
+      _permissionRequestInFlight = false;
+    }
+  }
+
+  /// Re-triggers the battery optimization request, then refreshes the device
+  /// record so the settings checklist reflects the grant.
+  Future<void> _requestBatteryOptimization() async {
+    if (_permissionRequestInFlight) return;
+    _permissionRequestInFlight = true;
+    try {
+      try {
+        await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+      } catch (_) {
+        // Best effort — the user can enable it from Android Settings.
+      }
+      if (!mounted) return;
+      setState(
+        () => _message =
+            'Battery optimization request sent. Check your device settings.',
+      );
+      await _refreshPermissions();
+    } finally {
+      _permissionRequestInFlight = false;
+    }
+  }
+
+  /// Re-triggers the missing permissions required for closed-app receive
+  /// (notifications + battery optimization), then refreshes the checklist.
+  Future<void> _requestClosedAppPermissions() async {
+    if (_permissionRequestInFlight) return;
+    _permissionRequestInFlight = true;
+    try {
+      final session = _session.device;
+      if (!session.notificationPermissionGranted) {
+        await Permission.notification.request();
+      }
+      if (!session.batteryOptimizationIgnored) {
+        try {
+          await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+        } catch (_) {
+          // Best effort.
+        }
+      }
+      if (!mounted) return;
+      await _refreshPermissions();
+      setState(() => _message = 'Closed-app receive setup checked.');
+    } finally {
+      _permissionRequestInFlight = false;
+    }
+  }
+
+  /// Re-reads the live permission state and publishes the updated session so
+  /// the checklist checkboxes reflect what was just granted.
+  Future<void> _refreshPermissions() async {
+    try {
+      await widget.identityRepository.ensureIdentity();
+    } catch (_) {
+      // Best-effort — the checklist still shows the session we already have.
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final accent = accentColorForKey(_accentColorKey);
@@ -817,6 +916,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     detail: _session.device.micPermissionGranted
                         ? 'Ready'
                         : 'Required before you can talk.',
+                    onTap: _requestMicPermission,
                   ),
                   _ChecklistItem(
                     ok: _session.device.notificationPermissionGranted,
@@ -824,6 +924,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     detail: _session.device.notificationPermissionGranted
                         ? 'Ready for background activity'
                         : 'Required for reliable background activity.',
+                    onTap: _requestNotificationPermission,
                   ),
                   _ChecklistItem(
                     ok: _session.device.batteryOptimizationIgnored,
@@ -831,6 +932,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     detail: _session.device.batteryOptimizationIgnored
                         ? 'Unrestricted'
                         : 'Your device may interrupt long sessions.',
+                    onTap: _requestBatteryOptimization,
                   ),
                   _ChecklistItem(
                     ok: closedAppReceiveReady,
@@ -839,6 +941,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ? 'Ready for nudges when the app is not open.'
                         : 'Allow notifications and unrestricted background activity.',
                     showDivider: false,
+                    onTap: _requestClosedAppPermissions,
                   ),
                 ],
               ),
@@ -1901,6 +2004,7 @@ class _ChecklistItem extends StatelessWidget {
     required this.label,
     required this.detail,
     this.showDivider = true,
+    this.onTap,
   });
 
   final bool ok;
@@ -1908,34 +2012,46 @@ class _ChecklistItem extends StatelessWidget {
   final String detail;
   final bool showDivider;
 
+  /// Re-triggers the permission prompt when [ok] is false. When null the row
+  /// is informational and not tappable.
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
     final statusColor = ok ? const Color(0xff7CFF6B) : const Color(0xffffb020);
+    final tappable = !ok && onTap != null;
     return Column(
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(
-              ok ? Icons.check_circle_outline : Icons.info_outline,
-              color: statusColor,
-              size: 22,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(label, style: const TextStyle(color: Colors.white)),
-                  const SizedBox(height: 3),
-                  Text(
-                    detail,
-                    style: const TextStyle(color: Colors.white54, fontSize: 13),
+        InkWell(
+          onTap: tappable ? onTap : null,
+          borderRadius: BorderRadius.circular(6),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  ok ? Icons.check_box_rounded : Icons.check_box_outline_blank,
+                  color: statusColor,
+                  size: 22,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(label, style: const TextStyle(color: Colors.white)),
+                      const SizedBox(height: 3),
+                      Text(
+                        detail,
+                        style: const TextStyle(color: Colors.white54, fontSize: 13),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
         if (showDivider) const _SurfaceDivider(),
       ],
