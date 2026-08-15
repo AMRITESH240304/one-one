@@ -150,6 +150,15 @@ class AndroidVoiceNudgeBridge {
     }
   }
 
+  Future<void> clearChatPile(String groupId) async {
+    if (!Platform.isAndroid || groupId.isEmpty) return;
+    try {
+      await _channel.invokeMethod<void>('clearChatPile', groupId);
+    } catch (_) {
+      // Local notification cancel is best-effort.
+    }
+  }
+
   /// Shared instance so multiple widgets can call platform methods without
   /// re-creating the channel handler.
   static final AndroidVoiceNudgeBridge shared = AndroidVoiceNudgeBridge();

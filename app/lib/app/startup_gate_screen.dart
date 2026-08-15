@@ -17,6 +17,7 @@ import '../features/identity/ui/no_groups_screen.dart';
 import '../core/network/api_client.dart';
 import '../core/firebase/crashlytics_service.dart';
 import 'display_name_screen.dart';
+import 'native_splash_bridge.dart';
 import 'profile_picture_screen.dart';
 import 'setup_permission_screen.dart';
 import 'startup_performance.dart';
@@ -334,7 +335,21 @@ class _StartupGateScreenState extends State<StartupGateScreen>
   Widget build(BuildContext context) {
     final nextScreen = _nextScreen;
     if (nextScreen != null) {
+      // A real destination (permissions/onboarding/home/no-groups) is ready
+      // — the native splash can come down now that there's real content
+      // behind it, not another loader.
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => NativeSplashBridge.markReady(),
+      );
       return nextScreen;
+    }
+
+    if (_startupError != null) {
+      // Terminal error state with a retry action — also real, interactive
+      // content, so drop the native splash here too.
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => NativeSplashBridge.markReady(),
+      );
     }
 
     return Scaffold(

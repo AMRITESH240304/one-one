@@ -91,7 +91,9 @@ object DeviceLog {
             if (throwable != null) {
                 append(" exception=").append(throwable.javaClass.name)
                 append(" detail=").append(throwable.message ?: "-")
-                append(" stack=").append(throwable.stackTraceToString().replace("\n", " | "))
+                append(" stack=").append(
+                    throwable.stackTraceToString().replace(Regex("\\n"), " | "),
+                )
             }
             append(" { userId: ").append(userId?.ifBlank { null } ?: this@DeviceLog.userId)
             append(", groupId: ").append(groupId?.ifBlank { null } ?: this@DeviceLog.groupId)

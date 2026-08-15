@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show Color;
 
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -42,6 +43,10 @@ class WalkieForegroundTaskHandler extends TaskHandler {
     FlutterForegroundTask.updateService(
       notificationTitle: 'Duo is online',
       notificationText: 'Status: $_status | heartbeat $_heartbeatCount',
+      notificationIcon: const NotificationIcon(
+        metaDataName: 'app.oneone.notification_app_icon',
+        backgroundColor: Color(0xFFF8BE03),
+      ),
     );
   }
 
@@ -217,6 +222,10 @@ class WalkieForegroundTaskHandler extends TaskHandler {
       FlutterForegroundTask.updateService(
         notificationTitle: 'Duo is online',
         notificationText: enabled ? 'Talking' : 'Live and listening',
+        notificationIcon: const NotificationIcon(
+          metaDataName: 'app.oneone.notification_app_icon',
+          backgroundColor: Color(0xFFF8BE03),
+        ),
       );
     } catch (error) {
       _sendStatus('mic_failed', 'Microphone change failed: $error');

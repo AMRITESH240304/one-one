@@ -333,13 +333,14 @@ export async function sendNudgeNotification(input: NudgeInput) {
   };
 }
 
-/** Fans out a lightweight "New message in [group]" push after a chat bubble
- * (predefined or custom) has already been written to
- * `groupMessages/{groupId}/{messageId}` by the client. Deliberately doesn't
- * preview the message text in the push payload — the RTDB write is the
- * source of truth for in-app rendering, this is just a nudge to reopen the
- * app. Not rate-limited/deduped like nudges: every send is a distinct,
- * user-initiated message. */
+const chatMessageTtlMs = 12 * 60 * 1000;
+const chatPileHint =
+  "You can only check the last 5 messages, see them before they fade away";
+
+/** Fans out a collapsing "X new messages" push after a chat bubble
+ * has already been written to `groupMessages/{groupId}/{messageId}`.
+ * Android receives a data-only FCM so the client can update one
+ * notification in place (WhatsApp-style) instead of alerting per send. */
 export async function sendChatMessageNotification(input: ChatMessageInput) {
   await requireActiveUser(input.senderUserId);
   const group = await requireActiveGroup(input.groupId);
@@ -358,17 +359,39 @@ export async function sendChatMessageNotification(input: ChatMessageInput) {
     metadata: {}
   });
 
-  const pushResult = await sendPushToTokens({
-    tokens: recipientDevices.map((device) => device.fcmToken),
-    title: `💬 New message in ${group.name}`,
-    body: `${senderName} sent a message ✨`,
-    data: {
-      type: "chat_message",
-      groupId: input.groupId,
-      senderUserId: input.senderUserId,
-      deepLink: `walkie://group/${input.groupId}`
-    }
-  });
+  const unreadByUser = new Map<string, number>();
+  for (const userId of recipientUserIds) {
+    unreadByUser.set(userId, await bumpChatUnread(input.groupId, userId));
+  }
+
+  const pushResult = await sendAndroidDataPushes(
+    recipientDevices.map((device) => {
+      const count = unreadByUser.get(device.userId) ?? 1;
+      const title =
+        count <= 1
+          ? `💬 New message in ${group.name}`
+          : `💬 ${count} new messages`;
+      const body =
+        count <= 1
+          ? `${senderName} sent a message. ${chatPileHint}`
+          : chatPileHint;
+      return {
+        token: device.fcmToken,
+        data: {
+          type: "chat_message",
+          groupId: input.groupId,
+          groupName: group.name,
+          senderUserId: input.senderUserId,
+          senderName,
+          unreadCount: String(count),
+          title,
+          body,
+          deepLink: `walkie://group/${input.groupId}`
+        }
+      };
+    }),
+    chatMessageTtlMs
+  );
 
   await writeDeliveries(notificationEventId, recipientDevices, pushResult);
 
@@ -381,6 +404,16 @@ export async function sendChatMessageNotification(input: ChatMessageInput) {
     failed: pushResult.failureCount,
     skipped: recipientUserIds.length === 0 ? 1 : 0
   };
+}
+
+async function bumpChatUnread(groupId: string, userId: string) {
+  const ref = getRealtimeDatabase().ref(`chatUnread/${groupId}/${userId}/count`);
+  const result = await ref.transaction((current: unknown) => {
+    const n = typeof current === "number" ? current : 0;
+    return n + 1;
+  });
+  const value = result.snapshot.val();
+  return typeof value === "number" && value > 0 ? value : 1;
 }
 
 async function activeRecipientUserIds(groupId: string, senderUserId: string) {

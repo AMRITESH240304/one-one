@@ -30,7 +30,13 @@
             android:value="walkie_alerts_v2" />
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
-            android:resource="@drawable/new_logo" />
+            android:resource="@drawable/ic_notification_app" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/notification_accent" />
+        <meta-data
+            android:name="app.oneone.notification_app_icon"
+            android:resource="@drawable/ic_notification_app" />
         <!-- Debug-friendly Performance Monitoring logcat. Safe in release;
              collection still respects setPerformanceCollectionEnabled. -->
         <meta-data

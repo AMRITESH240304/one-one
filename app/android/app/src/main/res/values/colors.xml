@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- No branded native splash — keep the process window transparent. -->
-    <color name="launch_window_background">#00000000</color>
+    <!-- Same brand yellow as the Flutter splash/start-gate/welcome screens
+         (Color(0xffF8BE03) in Dart) so the native splash and the first
+         Flutter frame are visually indistinguishable. -->
+    <color name="splash_background">#F8BE03</color>
+    <color name="notification_accent">#F8BE03</color>
 </resources>

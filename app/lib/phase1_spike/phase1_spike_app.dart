@@ -170,6 +170,10 @@ class _Phase1SpikeScreenState extends State<Phase1SpikeScreen> {
               serviceTypes: const [ForegroundServiceTypes.mediaPlayback],
               notificationTitle: 'Duo is online',
               notificationText: 'Connecting to LiveKit',
+              notificationIcon: const NotificationIcon(
+                metaDataName: 'app.oneone.notification_app_icon',
+                backgroundColor: Color(0xFFF8BE03),
+              ),
               notificationButtons: const [
                 NotificationButton(id: 'stop', text: 'Go away'),
               ],

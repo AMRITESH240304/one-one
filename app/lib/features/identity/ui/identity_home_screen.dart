@@ -9,7 +9,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:livekit_noise_filter/livekit_noise_filter.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -879,6 +878,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// snapshot never shows more than the rolling window.
   void _listenToChatMessages(String groupId) {
     unawaited(_chatMessagesSubscription?.cancel());
+    unawaited(_clearChatPile(groupId));
     _chatMessagesSubscription = _chatMessageRepository
         .groupMessagesRef(groupId)
         .limitToLast(ChatMessageRepository.visibleLimit)
@@ -909,6 +909,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                   )
                 : messages;
             setState(() => _chatMessages = window);
+            unawaited(_clearChatPile(groupId));
           },
           onError: (Object error, StackTrace stackTrace) {
             // Don't leave the feed stuck empty after a transient deny/blip —
@@ -1037,6 +1038,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _chatFeedOpacity = 1;
       _chatOnlineClearInFlight = false;
     });
+  }
+
+  Future<void> _clearChatPile(String groupId) async {
+    unawaited(
+      _chatMessageRepository.clearUnreadPile(
+        groupId: groupId,
+        userId: _session.userId,
+      ),
+    );
+    await _nudgeActionBridge.clearChatPile(groupId);
   }
 
   void _dismissExpiredChatMessage(String messageId) {
@@ -5113,7 +5124,7 @@ class _SleepZAnimationState extends State<_SleepZAnimation>
           scale: scale,
           child: Text(
             'Z',
-            style: GoogleFonts.nunito(
+            style: TextStyle(
               color: Colors.white.withValues(alpha: 0.92),
               fontSize: widget.size * (0.42 + i * 0.1),
               fontWeight: FontWeight.w800,

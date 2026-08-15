@@ -36,7 +36,9 @@ object NotificationAvatarHelper {
     @Volatile
     private var cachedLogoBitmap: Bitmap? = null
 
-    /** Returns the app logo as a (square) bitmap suitable for a large icon. */
+    private val brandYellow = Color.rgb(248, 190, 3)
+
+    /** Returns the app logo on brand yellow, suitable as a large icon. */
     fun appLogoBitmap(context: Context): Bitmap {
         cachedLogoBitmap?.let { return it }
         val resources = context.applicationContext.resources
@@ -47,12 +49,22 @@ object NotificationAvatarHelper {
             inScaled = true
         }
         val decoded = BitmapFactory.decodeResource(resources, R.drawable.new_logo, options)
-            ?: return Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888)
         val size = (64 * resources.displayMetrics.density).toInt().coerceAtLeast(96)
-        val scaled = Bitmap.createScaledBitmap(decoded, size, size, true)
-        if (scaled != decoded) decoded.recycle()
-        cachedLogoBitmap = scaled
-        return scaled
+        val output = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        canvas.drawColor(brandYellow)
+        if (decoded != null) {
+            val pad = (size * 0.06f).toInt()
+            canvas.drawBitmap(
+                decoded,
+                null,
+                RectF(pad.toFloat(), pad.toFloat(), (size - pad).toFloat(), (size - pad).toFloat()),
+                Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG),
+            )
+            decoded.recycle()
+        }
+        cachedLogoBitmap = output
+        return output
     }
 
     /**

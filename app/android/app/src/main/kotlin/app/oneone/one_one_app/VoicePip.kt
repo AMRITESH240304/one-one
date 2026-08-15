@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.Color
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -165,6 +166,8 @@ class VoiceSessionService : Service() {
         }
         return builder
             .setSmallIcon(R.drawable.ic_notification_app)
+            .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(this))
+            .setColor(Color.rgb(248, 190, 3))
             .setContentTitle("🎙️ Duo voice session")
             .setContentText("Live and listening 🟢")
             .setContentIntent(openApp)

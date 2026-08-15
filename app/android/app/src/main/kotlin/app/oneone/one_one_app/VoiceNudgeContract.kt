@@ -37,6 +37,7 @@ object VoiceNudgeContract {
     const val kindPush = "nudge"
     const val kindFriendLive = "friend_live"
     const val kindGoneOffline = "gone_offline"
+    const val kindChatMessage = "chat_message"
     const val kindResponse = "nudge_response"
     const val kindDeliveryResult = "nudge_delivery_result"
 

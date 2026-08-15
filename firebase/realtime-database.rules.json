@@ -67,6 +67,14 @@
         }
       }
     },
+    "chatUnread": {
+      "$groupId": {
+        "$userId": {
+          ".read": "auth != null && auth.uid == $userId",
+          ".write": "auth != null && auth.uid == $userId"
+        }
+      }
+    },
     "groupMessages": {
       "$groupId": {
         ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",

@@ -3,6 +3,7 @@ import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 import '../core/firebase/crashlytics_service.dart';
 import '../features/identity/data/identity_repository.dart';
+import 'native_splash_bridge.dart';
 
 class GoogleAuthScreen extends StatefulWidget {
   const GoogleAuthScreen({super.key, this.initializing = false});
@@ -81,6 +82,12 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
     if (widget.initializing || _isSigningIn) {
       return const BrandSplashScreen();
     }
+
+    // The real welcome/sign-in CTA is about to be shown — the native splash
+    // (identical brand background) can come down now.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => NativeSplashBridge.markReady(),
+    );
 
     return Scaffold(
       backgroundColor: const Color(0xffF8BE03),

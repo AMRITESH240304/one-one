@@ -29,9 +29,11 @@ class ChatMessageRepository {
   /// Rolling window of past messages kept visible on every client.
   static const int visibleLimit = 5;
 
-  /// Hard cap: a bubble never stays longer than this, even if still in the
-  /// rolling window of [visibleLimit] messages.
+  /// Full-opacity window after send.
   static const Duration lifetime = Duration(minutes: 10);
+
+  /// After [lifetime], bubbles fade to 0 over this duration, then drop.
+  static const Duration fadeDuration = Duration(minutes: 2);
 
   DatabaseReference groupMessagesRef(String groupId) =>
       _database.ref('groupMessages/$groupId');
@@ -63,9 +65,7 @@ class ChatMessageRepository {
     // Guard against unauthenticated writes that would fail at the RTDB layer.
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) {
-      throw StateError(
-        'Cannot send chat message — no authenticated user.',
-      );
+      throw StateError('Cannot send chat message — no authenticated user.');
     }
     if (currentUser.uid != senderUserId) {
       throw StateError(
@@ -89,7 +89,7 @@ class ChatMessageRepository {
         'senderDisplayName': senderDisplayName,
         'text': sanitized,
         'createdAt': now,
-        'expiresAt': now + lifetime.inSeconds,
+        'expiresAt': now + lifetime.inSeconds + fadeDuration.inSeconds,
       });
     } on FirebaseException catch (error, stack) {
       unawaited(
@@ -108,6 +108,18 @@ class ChatMessageRepository {
     }
 
     unawaited(_notifyGroup(groupId));
+  }
+
+  /// Clears the collapsing chat notification pile when the group is opened.
+  Future<void> clearUnreadPile({
+    required String groupId,
+    required String userId,
+  }) async {
+    try {
+      await _database.ref('chatUnread/$groupId/$userId/count').set(0);
+    } catch (_) {
+      // Best-effort — the local notification cancel still runs.
+    }
   }
 
   /// Best-effort push fan-out — the bubble is already live in-app via RTDB,
@@ -228,37 +240,38 @@ class ChatMessageRepository {
   /// replays existing children — drop anything older than a couple of
   /// seconds so stale history does not explode as a burst stack.
   Stream<Map<String, dynamic>> watchEmojiBursts(String groupId) {
-    final subscribedAtSec =
-        DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    return emojiBurstsRef(groupId).onChildAdded.map((event) {
-      final raw = event.snapshot.value;
-      if (raw is! Map) return <String, dynamic>{};
-      final data = <String, dynamic>{};
-      raw.forEach((key, value) {
-        data[key.toString()] = value;
-      });
-      // Prefer key from the path when the payload omitted burstId.
-      data['burstId'] ??= event.snapshot.key;
-      return data;
-    }).where((data) {
-      if (data['senderUserId'] == null) return false;
-      final createdAt = data['createdAt'];
-      final createdSec = createdAt is int
-          ? createdAt
-          : int.tryParse(createdAt?.toString() ?? '');
-      // Keep only near-live events (+ small clock skew window).
-      if (createdSec != null && createdSec < subscribedAtSec - 3) {
-        return false;
-      }
-      final expiresAt = data['expiresAt'];
-      final expiresSec = expiresAt is int
-          ? expiresAt
-          : int.tryParse(expiresAt?.toString() ?? '');
-      if (expiresSec != null &&
-          expiresSec < DateTime.now().millisecondsSinceEpoch ~/ 1000) {
-        return false;
-      }
-      return true;
-    });
+    final subscribedAtSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    return emojiBurstsRef(groupId).onChildAdded
+        .map((event) {
+          final raw = event.snapshot.value;
+          if (raw is! Map) return <String, dynamic>{};
+          final data = <String, dynamic>{};
+          raw.forEach((key, value) {
+            data[key.toString()] = value;
+          });
+          // Prefer key from the path when the payload omitted burstId.
+          data['burstId'] ??= event.snapshot.key;
+          return data;
+        })
+        .where((data) {
+          if (data['senderUserId'] == null) return false;
+          final createdAt = data['createdAt'];
+          final createdSec = createdAt is int
+              ? createdAt
+              : int.tryParse(createdAt?.toString() ?? '');
+          // Keep only near-live events (+ small clock skew window).
+          if (createdSec != null && createdSec < subscribedAtSec - 3) {
+            return false;
+          }
+          final expiresAt = data['expiresAt'];
+          final expiresSec = expiresAt is int
+              ? expiresAt
+              : int.tryParse(expiresAt?.toString() ?? '');
+          if (expiresSec != null &&
+              expiresSec < DateTime.now().millisecondsSinceEpoch ~/ 1000) {
+            return false;
+          }
+          return true;
+        });
   }
 }

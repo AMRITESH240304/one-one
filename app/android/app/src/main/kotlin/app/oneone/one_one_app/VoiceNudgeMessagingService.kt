@@ -201,6 +201,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 showForegroundNotification(message, kind)
                 return
             }
+            VoiceNudgeContract.kindChatMessage -> {
+                showChatPileNotification(message)
+                return
+            }
             VoiceNudgeContract.kindResponse -> {
                 showNudgeResponse(message)
                 return
@@ -415,6 +419,39 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                     message.data["body"] ?: "Your group membership changed.",
                     groupId,
                 ),
+            )
+        } catch (error: SecurityException) {
+            VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
+        }
+    }
+
+    private fun showChatPileNotification(message: RemoteMessage) {
+        val groupId = message.data["groupId"]?.takeIf { it.isNotBlank() } ?: return
+        if (!DeviceLog.wasAppInBackground()) {
+            ChatPileStore.reset(this, groupId)
+            VoiceNudgeNotifications.cancelChatPile(this, groupId)
+            return
+        }
+        val groupName = message.data["groupName"]?.takeIf { it.isNotBlank() } ?: "your group"
+        val serverCount = message.data["unreadCount"]?.toIntOrNull()
+        val count = ChatPileStore.resolveCount(this, groupId, serverCount)
+        val title = message.data["title"]?.takeIf { it.isNotBlank() }
+            ?: if (count <= 1) {
+                "💬 New message in $groupName"
+            } else {
+                "💬 $count new messages"
+            }
+        val body = message.data["body"]?.takeIf { it.isNotBlank() }
+            ?: "You can only check the last 5 messages, see them before they fade away"
+        val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        try {
+            manager.notify(
+                VoiceNudgeNotifications.chatPileId(groupId),
+                VoiceNudgeNotifications.buildChatPile(this, groupId, title, body, count),
+            )
+            Log.i(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-08] Chat pile notification displayed groupSuffix=${groupId.takeLast(6)} count=$count",
             )
         } catch (error: SecurityException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
