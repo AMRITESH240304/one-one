@@ -21,7 +21,7 @@ import java.util.concurrent.Executors
  * Builds the large notification icon for nudge notifications, in order:
  * 1. circular Cloudinary profile photo when [photoUrl] is reachable
  * 2. bundled preset avatar when [avatarAsset] is a valid `assets/avatars*` path
- * 3. the app's [new_logo] bitmap
+ * 3. the app logo (`assets/logo.png` bundled as [new_logo])
  *
  * Network I/O never runs on the caller thread. Use [applyLargeIcon] so the
  * notification can show immediately with the avatar or logo, then refresh
@@ -36,9 +36,7 @@ object NotificationAvatarHelper {
     @Volatile
     private var cachedLogoBitmap: Bitmap? = null
 
-    private val brandYellow = Color.rgb(248, 190, 3)
-
-    /** Returns the app logo on brand yellow, suitable as a large icon. */
+    /** Returns the app logo as a square bitmap suitable for a large icon. */
     fun appLogoBitmap(context: Context): Bitmap {
         cachedLogoBitmap?.let { return it }
         val resources = context.applicationContext.resources
@@ -49,22 +47,12 @@ object NotificationAvatarHelper {
             inScaled = true
         }
         val decoded = BitmapFactory.decodeResource(resources, R.drawable.new_logo, options)
+            ?: return Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888)
         val size = (64 * resources.displayMetrics.density).toInt().coerceAtLeast(96)
-        val output = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-        canvas.drawColor(brandYellow)
-        if (decoded != null) {
-            val pad = (size * 0.06f).toInt()
-            canvas.drawBitmap(
-                decoded,
-                null,
-                RectF(pad.toFloat(), pad.toFloat(), (size - pad).toFloat(), (size - pad).toFloat()),
-                Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG),
-            )
-            decoded.recycle()
-        }
-        cachedLogoBitmap = output
-        return output
+        val scaled = Bitmap.createScaledBitmap(decoded, size, size, true)
+        if (scaled != decoded) decoded.recycle()
+        cachedLogoBitmap = scaled
+        return scaled
     }
 
     /**

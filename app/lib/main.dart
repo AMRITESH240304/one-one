@@ -56,9 +56,7 @@ Future<void> main() async {
     // until *after* runApp() so the first Flutter frame paints immediately.
     WidgetsFlutterBinding.ensureInitialized();
 
-    // Avoid a network fetch for fonts on cold start — fall back to the
-    // platform default font instantly instead of blocking (or flashing)
-    // while Poppins downloads from gstatic.
+    // Use bundled Poppins under google_fonts/ — never fetch from gstatic.
     GoogleFonts.config.allowRuntimeFetching = false;
 
     FlutterError.onError = (details) {

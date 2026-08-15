@@ -12,9 +12,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Rational
-import android.view.View
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.core.splashscreen.SplashScreenViewProvider
 import com.google.firebase.FirebaseApp
 import com.google.firebase.installations.FirebaseInstallations
 import com.google.firebase.messaging.FirebaseMessaging
@@ -34,14 +32,13 @@ class MainActivity : FlutterFragmentActivity() {
     // "app/splash" channel below). A generous failsafe timeout guarantees
     // the splash can never get stuck forever if that signal is ever lost.
     @Volatile private var isFlutterReady = false
-    private var splashScreenView: SplashScreenViewProvider? = null
     private val splashFailsafeHandler = Handler(Looper.getMainLooper())
     private val splashFailsafeRunnable = Runnable {
         Log.w(
             VoiceNudgeDiagnostics.tag,
             "[SPLASH-01] flutterReady signal not received within failsafe window; releasing splash",
         )
-        dismissNativeSplash()
+        isFlutterReady = true
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,47 +46,8 @@ class MainActivity : FlutterFragmentActivity() {
         // installed before the window content view is set.
         val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
-        // Take over the system splash on exit so we can scale the logo 4x
-        // and hold it until Flutter is actually ready.
-        splashScreen.setOnExitAnimationListener { view ->
-            splashScreenView = view
-            scaleSplashLogo(view)
-            if (isFlutterReady) {
-                view.remove()
-                splashScreenView = null
-            }
-        }
+        splashScreen.setKeepOnScreenCondition { !isFlutterReady }
         splashFailsafeHandler.postDelayed(splashFailsafeRunnable, SPLASH_FAILSAFE_TIMEOUT_MS)
-    }
-
-    private fun scaleSplashLogo(view: SplashScreenViewProvider) {
-        val icon = view.iconView ?: return
-        val applyScale = {
-            icon.pivotX = icon.width / 2f
-            icon.pivotY = icon.height / 2f
-            icon.scaleX = SPLASH_LOGO_SCALE
-            icon.scaleY = SPLASH_LOGO_SCALE
-        }
-        if (icon.width > 0 && icon.height > 0) {
-            applyScale()
-        } else {
-            icon.addOnLayoutChangeListener(object : View.OnLayoutChangeListener {
-                override fun onLayoutChange(
-                    v: View?, left: Int, top: Int, right: Int, bottom: Int,
-                    oldLeft: Int, oldTop: Int, oldRight: Int, oldBottom: Int,
-                ) {
-                    icon.removeOnLayoutChangeListener(this)
-                    applyScale()
-                }
-            })
-        }
-    }
-
-    private fun dismissNativeSplash() {
-        isFlutterReady = true
-        splashFailsafeHandler.removeCallbacks(splashFailsafeRunnable)
-        splashScreenView?.remove()
-        splashScreenView = null
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -100,7 +58,8 @@ class MainActivity : FlutterFragmentActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "flutterReady" -> {
-                    dismissNativeSplash()
+                    isFlutterReady = true
+                    splashFailsafeHandler.removeCallbacks(splashFailsafeRunnable)
                     result.success(null)
                 }
                 else -> result.notImplemented()
@@ -520,6 +479,5 @@ class MainActivity : FlutterFragmentActivity() {
         // Flutter — well beyond any realistic boot time, purely a safety
         // net so a bug can never brick the launch screen.
         const val SPLASH_FAILSAFE_TIMEOUT_MS = 8_000L
-        const val SPLASH_LOGO_SCALE = 4f
     }
 }

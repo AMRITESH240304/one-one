@@ -48,9 +48,8 @@ object VoiceNudgeNotifications {
     private val nudgeSmallIcon = R.drawable.ic_voice_nudge
 
     /**
-     * White "11" silhouette for status-bar / small icons. Color PNGs are
-     * flattened to an alpha mask by Android, so the drawable logo cannot
-     * be used here.
+     * Status-bar / title-row small icon. Android only draws the alpha of
+     * this asset (white silhouette), generated from [assets/logo.png].
      */
     private val appSmallIcon = R.drawable.ic_notification_app
 
