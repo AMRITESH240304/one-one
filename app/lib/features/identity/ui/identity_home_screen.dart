@@ -123,6 +123,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   int _chatVisibleAfterCreatedAt = 0;
   bool? _prevAnyMemberOnline;
   bool _chatOnlineClearInFlight = false;
+  /// App is assumed foreground at startup; lifecycle callbacks keep it current.
+  AppLifecycleState _appLifecycle = AppLifecycleState.resumed;
   GroupSummary? _selectedGroup;
   StreamSubscription<DatabaseEvent>? _availabilitySubscription;
   Timer? _availabilityExpiryTimer;
@@ -344,10 +346,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appLifecycle = state;
     if (state == AppLifecycleState.resumed) {
       unawaited(_refreshDeviceRegistration());
       unawaited(_takePendingNudgeAction());
       unawaited(_takePendingInviteLink());
+      // The user is now actively looking at the app, so any pile that
+      // accumulated while backgrounded should be cleared.
+      final selected = _selectedGroup;
+      if (selected != null) {
+        unawaited(_clearChatPile(selected.groupId));
+      }
     }
   }
 
@@ -1051,6 +1060,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _clearChatPile(String groupId) async {
+    // Only the foreground app clears the pile. The RTDB listener keeps
+    // firing in the background, and clearing there would cancel the pile
+    // notification and reset the server unread count right after the FCM
+    // service posts it — breaking the WhatsApp-style collapse.
+    if (_appLifecycle != AppLifecycleState.resumed) return;
     unawaited(
       _chatMessageRepository.clearUnreadPile(
         groupId: groupId,
