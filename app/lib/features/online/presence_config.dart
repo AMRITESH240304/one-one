@@ -14,6 +14,15 @@ class PresenceConfig {
   /// auto-closes. Set short for testing (1 minute); raise for production.
   static const Duration inactivityTimeout = Duration(minutes: 1);
 
+  /// How long a user may remain the *sole* connected participant in a LiveKit
+  /// room before the app treats it as an invalid state: it reports a non-fatal
+  /// Crashlytics bug (with on-device logs) and auto-disconnects the user.
+  ///
+  /// Driven entirely by LiveKit room state (`room.remoteParticipants`) so it
+  /// needs no backend/DB presence round-trips. Applies in every connection
+  /// mode (walkie-talkie, call, any state).
+  static const Duration soloParticipantTimeout = Duration(minutes: 1);
+
   /// Maximum total online time per user per group per day. Beyond this,
   /// the app blocks further "go online" attempts until the next UTC day.
   /// Prevents runaway sessions from unattended devices.

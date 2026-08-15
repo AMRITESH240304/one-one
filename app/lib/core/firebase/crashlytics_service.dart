@@ -255,6 +255,77 @@ class CrashlyticsService {
     );
   }
 
+  /// Non-fatal bug report for the invalid "single user alone in a room" state.
+  ///
+  /// Captures the LiveKit-room context explaining how the user ended up alone
+  /// (including how many participants were present at connect) and attaches a
+  /// tail of the on-device logs so a "went south" state is diagnosable without
+  /// reproducing it on-device.
+  static Future<void> recordSoloParticipant({
+    required String userId,
+    String? groupId,
+    required String roomName,
+    required String livekitConnectionState,
+    required int remoteParticipantCount,
+    required int remoteCountAtConnect,
+    required int remoteCountAtSoloStart,
+    required int soloDurationSeconds,
+    String entryReason = 'unknown',
+    String? connectionMode,
+  }) async {
+    const reason = 'single_user_in_room';
+    final deviceLogTail = _deviceLogTail(120);
+
+    await setCustomKeys({
+      'solo_user_id': userId,
+      'group_id': groupId ?? '',
+      'solo_room_name': roomName,
+      'livekit_connection_state': livekitConnectionState,
+      'solo_remote_count': remoteParticipantCount,
+      'solo_remote_count_at_connect': remoteCountAtConnect,
+      'solo_remote_count_at_solo_start': remoteCountAtSoloStart,
+      'solo_duration_seconds': soloDurationSeconds,
+      'solo_entry_reason': entryReason,
+      'connection_mode': connectionMode ?? '',
+    });
+
+    final error = StateError(
+      'Single-user-in-room: $userId was the sole connected participant in '
+      'room "$roomName" for $soloDurationSeconds s '
+      '(remoteCountAtConnect=$remoteCountAtConnect, '
+      'remoteCountAtSoloStart=$remoteCountAtSoloStart, '
+      'entryReason=$entryReason, mode=${connectionMode ?? 'unknown'}).',
+    );
+
+    await recordError(
+      error,
+      StackTrace.current,
+      reason: reason,
+      fatal: false,
+      feature: 'presence',
+      information: deviceLogTail,
+    );
+
+    LogManager.log(
+      LogLevel.error,
+      'SoloParticipantGuard',
+      'Reported single-user-in-room as non-fatal bug '
+      '(room=$roomName remoteCountAtConnect=$remoteCountAtConnect '
+      'soloDurationSeconds=$soloDurationSeconds entryReason=$entryReason '
+      'mode=${connectionMode ?? '-'})',
+      userId: userId,
+      groupId: groupId,
+    );
+  }
+
+  /// Returns the most recent [maxLines] on-device log lines (oldest → newest),
+  /// suitable for attaching to a non-fatal report.
+  static List<String> _deviceLogTail(int maxLines) {
+    final snapshot = LogManager.memorySnapshot();
+    if (snapshot.length <= maxLines) return snapshot;
+    return snapshot.sublist(snapshot.length - maxLines);
+  }
+
   static Future<void> log(String message) async {
     debugPrint('[Crashlytics] log: $message');
     await _crashlytics.log(message);
