@@ -41,6 +41,7 @@ import '../../online/livekit_status.dart';
 import '../../online/models/member_availability.dart';
 import '../../online/models/online_session.dart';
 import '../../online/presence_config.dart';
+import '../../online/solo_participant_guard.dart';
 import '../../online/voice_pip_bridge.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../../nudges/data/nudge_repository.dart';
@@ -142,8 +143,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   TalkSession? _talkSession;
   Room? _room;
   EventsListener<RoomEvent>? _roomListener;
+  SoloParticipantGuard? _soloGuard;
   Timer? _heartbeatTimer;
   List<EmojiBurst> _emojiBursts = const [];
+
+  // True when the current online session was entered by accepting (or
+  // connecting to) a nudge. Used to explain *why* a single-user-in-room bug
+  // occurred when the solo-participant timeout later fires.
+  bool _enteredViaNudge = false;
 
   // Automatic-offline-on-disconnect (with grace period) bookkeeping. See
   // _evaluatePeerPresenceForAutoOffline for the state machine.
@@ -743,6 +750,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (!_isOnline) {
       throw StateError('Could not enter the nudge group.');
     }
+    // Entered (or is entering) via nudge — remember so a later
+    // single-user-in-room bug report can explain how it occurred.
+    _enteredViaNudge = true;
     // The receiver accepted the nudge (or this device accepted one) — the
     // last sent nudge is no longer the active pending state.
     NudgeStatusMemory.instance.clear(action.groupId);
@@ -1622,6 +1632,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _goOnline() async {
+    // Going online resets the nudge-origin marker; the nudge path re-asserts
+    // it after a successful connect so manual joins are never mislabeled.
+    _enteredViaNudge = false;
     final group = _selectedGroup;
     if (group == null) {
       setState(() => _message = 'Create or join a group first.');
@@ -1834,6 +1847,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         unawaited(_persistDailyUsage(groupId));
       }
       _peerWasLiveWithMe = false;
+      _enteredViaNudge = false;
       await _disconnectLiveKit();
       await _onlineRepository.goAway(session, reason: reason);
       unawaited(
@@ -2032,6 +2046,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _cancelCallModeTimeout();
       }
       _syncPipSessionState();
+      // A mode change (call ↔ walkie-talkie) is a LiveKit state signal; give
+      // the solo-participant countdown a fresh start off the latest state.
+      _soloGuard?.refreshCountdown();
       unawaited(
         AnalyticsService.logConnectionModeChanged(
           groupId: session.groupId,
@@ -2079,6 +2096,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() => _connectionMode = MemberAvailability.walkieTalkieMode);
       _cancelCallModeTimeout();
       _syncPipSessionState();
+      // Auto-exiting call mode flips the mic off (a LiveKit state signal).
+      // Re-base the solo-participant countdown for any remaining participant.
+      _soloGuard?.refreshCountdown();
       _showCallModeTimeoutSnackbar();
     } catch (_) {
       // Best-effort; leave local state as-is if the write fails so the user
@@ -2178,6 +2198,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     _room = room;
     _attachRoomListener(room);
+    _soloGuard = SoloParticipantGuard(
+      userId: session.userId,
+      groupId: session.groupId,
+      onSoloTimeout: _handleSoloTimeout,
+    )..attach(room);
 
     setState(() {
       _state = 'connecting';
@@ -2591,6 +2616,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _callModeTimeoutTimer = null;
     _usagePersistTimer?.cancel();
     _usagePersistTimer = null;
+    _enteredViaNudge = false;
     if (mounted) {
       setState(() {
         _onlineSession = null;
@@ -2631,11 +2657,42 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (mounted) _showPresenceSnackbar(message);
   }
 
+  /// Fired by [SoloParticipantGuard] after the local user has remained the
+  /// sole connected participant for [PresenceConfig.soloParticipantTimeout].
+  /// Reports the invalid state as a non-fatal bug (with on-device logs) and
+  /// takes the user offline so they never sit alone online indefinitely.
+  Future<void> _handleSoloTimeout(SoloSessionContext context) async {
+    final session = _onlineSession;
+    if (session == null || !mounted) return;
+
+    unawaited(
+      CrashlyticsService.recordSoloParticipant(
+        userId: _session.userId,
+        groupId: session.groupId,
+        roomName: context.roomName,
+        livekitConnectionState: context.connectionState,
+        remoteParticipantCount: context.remoteParticipantCount,
+        remoteCountAtConnect: context.remoteCountAtConnect,
+        remoteCountAtSoloStart: context.remoteCountAtSoloStart,
+        soloDurationSeconds: context.soloDuration.inSeconds,
+        entryReason: _enteredViaNudge ? 'nudge_accept' : 'manual_join',
+        connectionMode: _connectionMode,
+      ),
+    );
+
+    await _goAway(reason: 'solo_timeout');
+    _showPresenceSnackbar(
+      'You were the only one left online, so the room closed automatically.',
+    );
+  }
+
   Future<void> _disconnectLiveKit() async {
     final room = _room;
     _room = null;
     _roomListener?.dispose();
     _roomListener = null;
+    _soloGuard?.detach();
+    _soloGuard = null;
     _speakingUserIds = const {};
     _clearConnectionQualities();
 
