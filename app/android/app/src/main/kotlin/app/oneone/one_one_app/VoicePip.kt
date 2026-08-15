@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.Color
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -71,6 +72,11 @@ class VoiceSessionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        DeviceLog.init(this)
+        DeviceLog.info(
+            "VoiceSessionService",
+            "onStartCommand called flags=$flags startId=$startId sdk=${Build.VERSION.SDK_INT}",
+        )
         // B1: On API 34+ (and especially 36), starting a foreground service of
         // type "microphone" requires android.permission.FOREGROUND_SERVICE_MICROPHONE
         // (declared in the manifest) AND android.permission.RECORD_AUDIO to be
@@ -88,21 +94,59 @@ class VoiceSessionService : Service() {
                         "RECORD_AUDIO not granted at runtime. " +
                         "foregroundServiceMicrophone=${checkSelfPermission(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE) == PackageManager.PERMISSION_GRANTED}",
                 )
+                DeviceLog.error(
+                    "VoiceSessionService",
+                    "Nudge not delivered / service not started: permission denied " +
+                        "(RECORD_AUDIO missing for microphone foreground service)",
+                )
+                VoiceNudgeDiagnostics.recordNudgeFailure(
+                    reason = "permission_denied_microphone",
+                    eventId = null,
+                    kind = "voice_session",
+                    extras = mapOf("checkpoint" to "VoiceSessionService.onStartCommand"),
+                )
                 stopSelf()
                 return START_NOT_STICKY
             }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                notificationId,
-                notification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+        try {
+            DeviceLog.info("VoiceSessionService", "startForeground called")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    notificationId,
+                    notification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                startForeground(notificationId, notification())
+            }
+        } catch (error: SecurityException) {
+            DeviceLog.log(
+                "ERROR",
+                "VoiceSessionService",
+                "SecurityException caught while calling startForeground",
+                throwable = error,
             )
-        } else {
-            @Suppress("DEPRECATION")
-            startForeground(notificationId, notification())
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "background_fg_service_blocked",
+                eventId = null,
+                kind = "voice_session",
+                extras = mapOf(
+                    "error" to (error.message ?: "unknown"),
+                    "error_class" to error.javaClass.simpleName,
+                ),
+                throwable = error,
+            )
+            stopSelf()
+            return START_NOT_STICKY
         }
         return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        DeviceLog.info("VoiceSessionService", "service stopped")
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -122,7 +166,9 @@ class VoiceSessionService : Service() {
         }
         return builder
             .setSmallIcon(R.drawable.ic_notification_app)
-            .setContentTitle("🎙️ One One voice session")
+            .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(this))
+            .setColor(Color.rgb(248, 190, 3))
+            .setContentTitle("🎙️ Duo voice session")
             .setContentText("Live and listening 🟢")
             .setContentIntent(openApp)
             .setCategory(Notification.CATEGORY_CALL)

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'native_splash_bridge.dart';
+
 class FirebaseSetupBlockedScreen extends StatelessWidget {
   const FirebaseSetupBlockedScreen({super.key, required this.errorText});
 
@@ -7,6 +9,10 @@ class FirebaseSetupBlockedScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Terminal (error) state — real content is up, drop the native splash.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => NativeSplashBridge.markReady(),
+    );
     return Scaffold(
       appBar: AppBar(title: const Text('Startup blocked')),
       body: SafeArea(

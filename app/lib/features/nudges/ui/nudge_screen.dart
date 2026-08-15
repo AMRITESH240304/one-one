@@ -16,6 +16,7 @@ import '../data/android_voice_nudge_bridge.dart';
 import '../data/nudge_repository.dart';
 import '../nudge_cooldowns.dart';
 import '../nudge_failure_memory.dart';
+import '../nudge_status_memory.dart';
 
 Future<void> showNudgeBottomSheet(
   BuildContext context, {
@@ -65,7 +66,7 @@ class _QuickNudgeSheet extends StatefulWidget {
 
 class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   static const _maxVoiceDuration = Duration(seconds: 6);
-  static const _autoDismissDelay = Duration(seconds: 3);
+  static const _autoDismissDelay = Duration(seconds: 5);
 
   final NudgeRepository _repository = NudgeRepository();
   final AudioRecorder _recorder = AudioRecorder();
@@ -85,6 +86,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   Duration _elapsed = Duration.zero;
   String? _message;
   bool _messageIsError = false;
+  bool _messageIsWarning = false;
   bool _messagePending = false;
 
   // Real-time delivery confirmation (nudge reliability checklist): once a
@@ -111,6 +113,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _onDeliveryResult,
     );
     _restorePersistedFailures();
+    _restoreLastNudgeStatus();
   }
 
   /// Re-surface the latest failure reason for anyone who didn't receive the
@@ -134,18 +137,63 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   }
 
   void _restorePersistedFailures() {
-    final failures = NudgeFailureMemory.instance.active;
-    if (failures.isEmpty) return;
-    final lines = failures
-        .map(
-          (entry) => entry.message.isNotEmpty
-              ? entry.message
-              : 'Last nudge to ${entry.displayName} wasn\u2019t received.',
-        )
-        .toList(growable: false);
-    _message = lines.join('\n');
+    // Scoped to this group only — a failure from a different group must
+    // never bleed into this sheet.
+    final failure = NudgeFailureMemory.instance.forGroup(widget.group.groupId);
+    if (failure == null) return;
+    _message = failure.message;
     _messageIsError = true;
+    _messageIsWarning = false;
     _messagePending = false;
+  }
+
+  /// Re-surface the most recent nudge's lifecycle status for this group so
+  /// tapping the main nudge button shows where the last nudge stands (waiting
+  /// for the receiver, played, low volume) instead of a blank send sheet.
+  /// Runs after [_restorePersistedFailures] so the newest state wins.
+  void _restoreLastNudgeStatus() {
+    final last = NudgeStatusMemory.instance.forGroup(widget.group.groupId);
+    if (last == null) return;
+    switch (last.status) {
+      case LastNudgeStatus.sent:
+      case LastNudgeStatus.waiting:
+        _message = last.message;
+        _messageIsError = false;
+        _messageIsWarning = false;
+        _messagePending = true;
+        break;
+      case LastNudgeStatus.played:
+        _message = last.message;
+        _messageIsError = false;
+        _messageIsWarning = false;
+        _messagePending = false;
+        break;
+      case LastNudgeStatus.volumeLow:
+      case LastNudgeStatus.volumeMuted:
+        _message = last.message;
+        _messageIsError = false;
+        _messageIsWarning = true;
+        _messagePending = false;
+        break;
+      case LastNudgeStatus.failed:
+        _message = last.message;
+        _messageIsError = true;
+        _messageIsWarning = false;
+        _messagePending = false;
+        break;
+    }
+  }
+
+  void _recordLastStatus(LastNudgeStatus status, String message) {
+    NudgeStatusMemory.instance.record(
+      widget.group.groupId,
+      LastNudgeState(
+        eventId: _awaitingEventId ?? '',
+        status: status,
+        message: message,
+        at: DateTime.now(),
+      ),
+    );
   }
 
   List<GroupMemberSummary> get _friends => widget.members
@@ -228,8 +276,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _resultsByUserId.clear();
       _message = waitingMessage;
       _messageIsError = false;
+      _messageIsWarning = false;
       _messagePending = true;
     });
+    _recordLastStatus(LastNudgeStatus.waiting, 'Waiting for receiver');
     _deliveryTimeoutTimer = Timer(_deliveryConfirmationTimeout, () {
       if (!mounted || _awaitingEventId != eventId) return;
       _finalizeDeliverySummary(timedOut: true);
@@ -273,6 +323,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = _buildDeliveryMessage(partial: true);
         _messageIsError = _resultsByUserId.values.any((r) => !r.played);
+        _messageIsWarning = !_messageIsError &&
+            _resultsByUserId.values.any((r) => r.playedButNotAudible);
         _messagePending = true;
       });
     }
@@ -299,41 +351,73 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _awaitingEventId = null;
         _message = 'Nudge wasn\u2019t played, try again.';
         _messageIsError = true;
+        _messageIsWarning = false;
         _messagePending = false;
       });
       _scheduleAutoDismiss();
       return;
     }
 
-    // Persist failures + clear successes for the return-to-sheet banner.
+    // Persist a group-scoped failure summary (or clear it on full success)
+    // for the return-to-sheet banner. Only genuine playback failures count as
+    // failures here \u2014 a muted/low-volume recipient "played" the nudge and
+    // is surfaced as a warning instead of a "did not receive" error.
     final failed = <NudgeDeliveryResult>[];
-    final succeeded = <String>[];
+    final failedNames = <String>[];
+    final hasAttention = _resultsByUserId.values.any((r) => r.playedButNotAudible);
     for (final entry in _resultsByUserId.entries) {
       final result = entry.value;
       final name = result.recipientName ??
           _expectedRecipients[entry.key]?.displayName ??
           'them';
-      if (result.played) {
-        succeeded.add(entry.key);
-        NudgeFailureMemory.instance.clearUser(entry.key);
-      } else {
+      if (!result.played) {
         failed.add(result);
-        final failureMessage = _persistedFailureMessage(name, result.reason);
-        NudgeFailureMemory.instance.record(
-          userId: entry.key,
-          displayName: name,
-          message: failureMessage,
-          reasonCode: result.reason,
-        );
+        failedNames.add(name.trim().split(RegExp(r'\s+')).first);
       }
     }
-    NudgeFailureMemory.instance.clearSuccessful(succeeded);
+    final totalRecipients = _resultsByUserId.length;
+    if (failed.isEmpty) {
+      NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
+    } else {
+      // With exactly one failed recipient, keep the specific reason-coded
+      // message (more useful than a generic count) instead of collapsing it.
+      final message = failed.length == 1
+          ? _shortFailureWithReason(failedNames.first, failed.first.reason)
+          : _persistedFailureMessage(
+              failed.length,
+              totalRecipients,
+              failedNames,
+            );
+      NudgeFailureMemory.instance.record(
+        widget.group.groupId,
+        failed.length >= totalRecipients
+            ? NudgeErrorSeverity.full
+            : NudgeErrorSeverity.partial,
+        message,
+      );
+    }
+
+    final summaryMessage = _buildDeliveryMessage(partial: false);
+    if (failed.isNotEmpty) {
+      _recordLastStatus(LastNudgeStatus.failed, summaryMessage);
+    } else if (hasAttention) {
+      final allMuted = _resultsByUserId.values
+          .where((r) => r.playedButNotAudible)
+          .every((r) => r.attention == 'volume_muted');
+      _recordLastStatus(
+        allMuted ? LastNudgeStatus.volumeMuted : LastNudgeStatus.volumeLow,
+        summaryMessage,
+      );
+    } else {
+      _recordLastStatus(LastNudgeStatus.played, summaryMessage);
+    }
 
     setState(() {
       _awaitingEventId = null;
       _messagePending = false;
-      _message = _buildDeliveryMessage(partial: false);
+      _message = summaryMessage;
       _messageIsError = failed.isNotEmpty;
+      _messageIsWarning = failed.isEmpty && hasAttention;
     });
     _scheduleAutoDismiss();
   }
@@ -346,23 +430,12 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     }
 
     final failed = results.where((r) => !r.played).toList(growable: false);
-    final played = results.where((r) => r.played).toList(growable: false);
-
-    if (failed.isEmpty) {
-      if (expected.length <= 1 && played.length == 1) {
-        final name = played.first.recipientName ??
-            expected.values.firstOrNull?.displayName;
-        final noiseLabel = played.first.ambientNoiseLabel;
-        if (name == null) {
-          return 'Everyone received the nudge \u2713';
-        }
-        if (noiseLabel != null) {
-          return 'Nudge playing on $name\u2019s device \u2014 $noiseLabel';
-        }
-        return 'Nudge successfully playing on $name\u2019s device';
-      }
-      return 'Everyone received the nudge \u2713';
-    }
+    final attention = results
+        .where((r) => r.playedButNotAudible)
+        .toList(growable: false);
+    final cleanPlayed = results
+        .where((r) => r.played && r.attention == null)
+        .toList(growable: false);
 
     String nameOf(NudgeDeliveryResult r) {
       if (r.recipientName != null && r.recipientName!.trim().isNotEmpty) {
@@ -377,24 +450,42 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       return 'Someone';
     }
 
-    if (failed.length == 1 &&
-        (expected.length <= 1 || played.isEmpty && expected.length == 1)) {
-      final f = failed.first;
-      final name = nameOf(f);
-      return _shortFailureWithReason(name, f.reason);
+    // 1) Genuine playback failures \u2014 the only "did not receive" cases.
+    if (failed.isNotEmpty) {
+      if (failed.length == 1 && (expected.length <= 1 || results.length == 1)) {
+        final f = failed.first;
+        return _shortFailureWithReason(nameOf(f), f.reason);
+      }
+
+      final names = failed.map(nameOf).toList(growable: false);
+      final named = _joinNames(names);
+      if (cleanPlayed.isEmpty && attention.isEmpty) {
+        return '$named did not receive the nudge.';
+      }
+      return '$named did not receive the nudge \u2014 everyone else did.';
     }
 
-    if (failed.length == 1 && played.isNotEmpty) {
-      final f = failed.first;
-      return _shortFailureWithReason(nameOf(f), f.reason);
+    // 2) Played, but likely inaudible (muted / very low volume).
+    if (attention.isNotEmpty) {
+      if (attention.length == 1 && results.length == 1) {
+        return _attentionMessage(nameOf(attention.first), attention.first);
+      }
+      final names = attention.map(nameOf).toList(growable: false);
+      final named = _joinNames(names);
+      return 'Nudge played, but $named may not have heard it \u2014 check '
+          'their volume.';
     }
 
-    final names = failed.map(nameOf).toList(growable: false);
-    final named = _joinNames(names);
-    if (played.isEmpty) {
-      return '$named did not receive the nudge.';
+    // 3) Clean success.
+    if (expected.length <= 1 && results.length == 1) {
+      final name = results.first.recipientName ??
+          expected.values.firstOrNull?.displayName;
+      if (name == null) {
+        return 'Everyone received the nudge \u2713';
+      }
+      return 'Nudge successfully playing on $name\u2019s device';
     }
-    return '$named did not receive the nudge \u2014 everyone else did.';
+    return 'Everyone received the nudge \u2713';
   }
 
   String _joinNames(List<String> names) {
@@ -406,31 +497,56 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   String _shortFailureWithReason(String name, String? reason) {
     switch (reason) {
-      case 'receiver_volume_muted':
-        return 'Nudge did not reach $name \u2014 their volume was too low.';
+      // Receiver-device conditions \u2014 show a specific, actionable cause so the
+      // sender knows it's not Duo's fault.
+      case 'permission_denied_foreground_service':
+        return 'Nudge did not reach $name \u2014 their phone blocked the app '
+            'from playing it. Ask them to reopen Duo.';
+      // Duo-side bugs \u2014 be honest that it's our fault. (A "send a report"
+      // affordance will be wired here once the receiver-log delivery channel
+      // is chosen.)
       case 'playback_error':
+      case 'playback_service_start_error':
       case 'download_error':
-        return 'Nudge did not reach $name \u2014 error on their device.';
       case 'timeout':
-        return 'Nudge did not reach $name \u2014 no confirmation received.';
+        return 'Nudge did not reach $name \u2014 something went wrong on '
+            'Duo\u2019s end.';
       default:
         return 'Nudge did not reach $name.';
     }
   }
 
-  String _persistedFailureMessage(String displayName, String? reason) {
-    final short = displayName.trim().split(RegExp(r'\s+')).first;
-    switch (reason) {
-      case 'receiver_volume_muted':
-        return 'Last nudge to $short wasn\u2019t played \u2014 their volume was too low';
-      case 'playback_error':
-      case 'download_error':
-        return 'Last nudge to $short wasn\u2019t played \u2014 error on their device';
-      case 'timeout':
-        return 'Last nudge to $short wasn\u2019t played \u2014 no confirmation received';
+  /// Builds the non-error warning shown when a nudge played but the recipient
+  /// likely didn't hear it (muted / very low volume). Low volume is surfaced
+  /// as the standalone warning "Volume is too low" rather than a "did not
+  /// receive" error.
+  String _attentionMessage(String name, NudgeDeliveryResult r) {
+    switch (r.attention) {
+      case 'volume_low':
+        return 'Volume is too low \u2014 the nudge may not be audible.';
+      case 'volume_muted':
+        return 'Their volume was muted \u2014 the nudge may not be audible.';
       default:
-        return 'Last nudge to $short wasn\u2019t received';
+        return 'Nudge played on $name\u2019s device, but they may not have heard it.';
     }
+  }
+
+  /// Builds the group-scoped persisted-failure message shown when the
+  /// sheet is reopened. Uses real names for a full failure (small groups),
+  /// and falls back to a plain count for partial failures where we can't
+  /// attribute the message to one or two people cleanly.
+  String _persistedFailureMessage(
+    int failedCount,
+    int totalRecipients,
+    List<String> failedNames,
+  ) {
+    if (failedCount >= totalRecipients) {
+      return 'Nudge wasn\u2019t delivered to anyone in this group.';
+    }
+    if (failedNames.length == failedCount && failedNames.length <= 2) {
+      return 'Last nudge to ${_joinNames(failedNames)} wasn\u2019t received.';
+    }
+    return 'Nudge wasn\u2019t delivered to $failedCount of $totalRecipients people.';
   }
 
   /// Remaining local cooldown for [kind]. Purely a UX affordance — the
@@ -501,6 +617,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = 'Everyone is already online.';
         _messageIsError = true;
+        _messageIsWarning = false;
       });
       return;
     }
@@ -511,6 +628,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = 'They\u2019re already online.';
         _messageIsError = true;
+        _messageIsWarning = false;
       });
       return;
     }
@@ -518,6 +636,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _busy = true;
       _message = null;
       _messageIsError = false;
+      _messageIsWarning = false;
       _messagePending = false;
     });
     try {
@@ -545,16 +664,60 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           _scheduleSenderExpiry(eventId, expected);
         }
       }
-      // Push (and unconfirmed ring/voice) — brief success, then 3s dismiss.
+      // Push (and unconfirmed ring/voice) has no per-recipient playback
+      // confirmation, but the send response still reports aggregate
+      // sent/failed device counts — use those to catch partial failures
+      // instead of always reporting success when `sent > 0`.
+      if (!awaitsDeliveryConfirmation && result is Map<String, dynamic>) {
+        final nudgeResult = NudgeResult.fromSendResponse(
+          result,
+          expected.map((e) => e.userId).toList(growable: false),
+        );
+        if (!nudgeResult.isFullSuccess) {
+          final message = nudgeResult.isFullFailure
+              ? 'Nudge wasn\u2019t delivered to anyone in this group.'
+              : 'Nudge wasn\u2019t delivered to ${nudgeResult.failedCount} of '
+                    '${nudgeResult.totalRecipients} people.';
+          unawaited(
+            CrashlyticsService.recordNudgeFailure(
+              error: StateError(message),
+              failureReason: NudgeFailureReason.fcmNotDelivered,
+              senderId: widget.currentUserId,
+              groupId: widget.group.groupId,
+              extras: {
+                'failed_count': nudgeResult.failedCount,
+                'total_recipients': nudgeResult.totalRecipients,
+              },
+            ),
+          );
+          NudgeFailureMemory.instance.record(
+            widget.group.groupId,
+            nudgeResult.isFullFailure
+                ? NudgeErrorSeverity.full
+                : NudgeErrorSeverity.partial,
+            message,
+          );
+          _recordLastStatus(LastNudgeStatus.failed, message);
+          setState(() {
+            _message = message;
+            _messageIsError = true;
+            _messageIsWarning = false;
+            _messagePending = false;
+          });
+          _scheduleAutoDismiss();
+          return;
+        }
+      }
+      // Push (and unconfirmed ring/voice) — brief success, then 5s dismiss.
       final successMessage = expected.length == 1
           ? 'Nudge sent to ${expected.first.displayName.trim().split(RegExp(r'\s+')).first} \u2713'
           : 'Everyone received the nudge \u2713';
-      NudgeFailureMemory.instance.clearSuccessful(
-        expected.map((e) => e.userId),
-      );
+      NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
+      _recordLastStatus(LastNudgeStatus.sent, successMessage);
       setState(() {
         _message = successMessage;
         _messageIsError = false;
+        _messageIsWarning = false;
         _messagePending = false;
       });
       _scheduleAutoDismiss();
@@ -562,22 +725,38 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       final cancelled = error.toString().toLowerCase().contains('cancel');
       if (!cancelled) {
         unawaited(
-          CrashlyticsService.recordError(
-            error,
-            stack,
-            reason: 'nudge_send_failed',
+          CrashlyticsService.recordNudgeFailure(
+            error: error,
+            stack: stack,
+            failureReason: error is ApiException &&
+                    error.code == 'permission_denied'
+                ? NudgeFailureReason.permissionDeniedFirebase
+                : NudgeFailureReason.unknown,
+            senderId: widget.currentUserId,
+            groupId: widget.group.groupId,
           ),
         );
       }
       if (!mounted) return;
+      final rateLimited = error is ApiException && error.code == 'nudge_rate_limited';
       final message = error is NudgeDeliveryException
           ? error.message
-          : error is ApiException && error.code == 'nudge_rate_limited'
+          : rateLimited
           ? error.message
           : 'Couldn\u2019t send the nudge. Check your connection.';
+      // Rate limiting and user-initiated cancellation aren't delivery
+      // failures — don't persist those as a group error.
+      if (!cancelled && !rateLimited) {
+        NudgeFailureMemory.instance.record(
+          widget.group.groupId,
+          NudgeErrorSeverity.full,
+          message,
+        );
+      }
       setState(() {
         _message = message;
         _messageIsError = true;
+        _messageIsWarning = false;
         _busy = false;
       });
     }
@@ -593,6 +772,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           setState(() {
             _message = 'Microphone permission is required.';
             _messageIsError = true;
+            _messageIsWarning = false;
           });
         }
         return;
@@ -636,6 +816,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _elapsed = Duration.zero;
         _message = 'Recording… release to send';
         _messageIsError = false;
+        _messageIsWarning = false;
       });
       if (!_pointerHeld) {
         await _finishRecording(send: _sendAfterPointerEnd);
@@ -645,6 +826,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         setState(() {
           _message = _friendlyError(error);
           _messageIsError = true;
+          _messageIsWarning = false;
         });
       }
     } finally {
@@ -668,6 +850,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _sendingVoice = send;
         _message = send ? 'Sending voice nudge…' : null;
         _messageIsError = false;
+        _messageIsWarning = false;
       });
     }
 
@@ -682,6 +865,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           setState(() {
             _message = 'Hold a little longer to record.';
             _messageIsError = true;
+            _messageIsWarning = false;
           });
         }
         return;
@@ -701,6 +885,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         setState(() {
           _message = _friendlyError(error);
           _messageIsError = true;
+          _messageIsWarning = false;
         });
       }
     } finally {
@@ -727,14 +912,15 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           );
         } else if (sent) {
           final expected = _recipientsForTarget();
-          NudgeFailureMemory.instance.clearSuccessful(
-            expected.map((e) => e.userId),
-          );
+          final successMessage = expected.length == 1
+              ? 'Nudge sent to ${expected.first.displayName.trim().split(RegExp(r'\s+')).first} \u2713'
+              : 'Everyone received the nudge \u2713';
+          NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
+          _recordLastStatus(LastNudgeStatus.sent, successMessage);
           setState(() {
-            _message = expected.length == 1
-                ? 'Nudge sent to ${expected.first.displayName.trim().split(RegExp(r'\s+')).first} \u2713'
-                : 'Everyone received the nudge \u2713';
+            _message = successMessage;
             _messageIsError = false;
+            _messageIsWarning = false;
             _messagePending = false;
           });
           _scheduleAutoDismiss();
@@ -904,6 +1090,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                               avatar: Opacity(
                                 opacity: online ? 0.38 : 1,
                                 child: ProfileAvatar(
+                                  key: ValueKey(friend.userId),
                                   profilePhotoUrl: friend.profilePhotoUrl,
                                   profilePhotoBase64: friend.profilePhotoBase64,
                                   avatarAsset: friend.avatarAsset,
@@ -1205,6 +1392,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                       isError:
                           _friends.isEmpty ||
                           (_messageIsError && _message != null),
+                      isWarning: _messageIsWarning && _message != null,
                       isPending: _friends.isEmpty ? false : _messagePending,
                     ),
                   ),
@@ -1437,11 +1625,13 @@ class _NudgeStatus extends StatelessWidget {
   const _NudgeStatus({
     required this.message,
     required this.isError,
+    this.isWarning = false,
     this.isPending = false,
   });
 
   final String message;
   final bool isError;
+  final bool isWarning;
   final bool isPending;
 
   @override
@@ -1450,6 +1640,8 @@ class _NudgeStatus extends StatelessWidget {
         ? const Color(0xffe0a83c)
         : isError
         ? const Color(0xffff6b6f)
+        : isWarning
+        ? const Color(0xffe0a83c)
         : const Color(0xff9bdc28);
     return Container(
       padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 10.h),
@@ -1474,6 +1666,8 @@ class _NudgeStatus extends StatelessWidget {
             Icon(
               isError
                   ? Icons.error_outline_rounded
+                  : isWarning
+                  ? Icons.warning_amber_rounded
                   : Icons.check_circle_outline,
               color: color,
               size: 17.sp,

@@ -30,7 +30,9 @@ export async function sendPushToTokens(payload: PushPayload) {
     android: {
       priority: "high",
       notification: {
-        channelId: "walkie_alerts_v2"
+        channelId: "walkie_alerts_v2",
+        icon: "ic_notification_app",
+        color: "#F8BE03"
       }
     }
   }));

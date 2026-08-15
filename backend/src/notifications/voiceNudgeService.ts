@@ -259,6 +259,7 @@ async function dispatchVoiceNudgeFromContext(ctx: {
 
   const ackUrl = `${baseUrl}/v1/nudges/${ctx.eventId}/ack`;
   const senderPhotoUrl = await readProfilePhotoUrl(ctx.senderUserId);
+  const senderAvatarAsset = await readAvatarAsset(ctx.senderUserId);
   const pushResult = await sendAndroidDataPushes(
     ctx.recipientDevices.map((device) => ({
       token: device.fcmToken,
@@ -269,6 +270,7 @@ async function dispatchVoiceNudgeFromContext(ctx: {
         senderUserId: ctx.senderUserId,
         senderName: ctx.senderName,
         ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
+        ...(senderAvatarAsset ? { senderAvatarAsset } : {}),
         durationMs: String(ctx.durationMs),
         expiresAt: String(ctx.expiresAt),
         audioUrl: signedAudioUrl,
@@ -397,6 +399,7 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
 
   const ackUrl = `${baseUrl}/v1/nudges/${eventId}/ack`;
   const senderPhotoUrl = await readProfilePhotoUrl(input.senderUserId);
+  const senderAvatarAsset = await readAvatarAsset(input.senderUserId);
   const pushResult = await sendAndroidDataPushes(
     input.recipientDevices.map((device) => ({
       token: device.fcmToken,
@@ -407,6 +410,7 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
         senderUserId: input.senderUserId,
         senderName: input.senderName,
         ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
+        ...(senderAvatarAsset ? { senderAvatarAsset } : {}),
         durationMs: String(input.durationSeconds * 1000),
         responseUrl,
         ackUrl,
@@ -578,6 +582,25 @@ async function readProfilePhotoUrl(userId: string): Promise<string | undefined> 
       .get();
     const url = snapshot.val()?.toString()?.trim();
     return url || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readAvatarAsset(userId: string): Promise<string | undefined> {
+  try {
+    const snapshot = await getRealtimeDatabase()
+      .ref(`users/${userId}/avatarAsset`)
+      .get();
+    const value = snapshot.val()?.toString()?.trim();
+    if (!value) return undefined;
+    if (
+      !value.startsWith("assets/avatars/") &&
+      !value.startsWith("assets/avatars2/")
+    ) {
+      return undefined;
+    }
+    return value;
   } catch {
     return undefined;
   }

@@ -2,6 +2,8 @@ import 'package:flutter/foundation.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/firebase/firebase_analytics_service.dart';
+import '../../../core/logging/log_level.dart';
+import '../../../core/logging/log_manager.dart';
 import '../../../core/network/api_client.dart';
 
 class NudgeTarget {
@@ -45,6 +47,13 @@ class NudgeRepository {
       target.json,
     );
     final result = _requireAcceptedDelivery(response);
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Nudge sent kind=push targetScope=${target.targetScope} '
+      'eventId=${result['notificationEventId'] ?? '-'}',
+      groupId: groupId,
+    );
     await AnalyticsService.logNudgeSent(
       groupId: groupId,
       kind: 'push',
@@ -66,6 +75,14 @@ class NudgeRepository {
       {...target.json, 'durationSeconds': durationSeconds},
     );
     final result = _requireAcceptedDelivery(response);
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Nudge sent kind=ring durationSeconds=$durationSeconds '
+      'targetScope=${target.targetScope} '
+      'eventId=${result['notificationEventId'] ?? '-'}',
+      groupId: groupId,
+    );
     await AnalyticsService.logNudgeSent(
       groupId: groupId,
       kind: 'ring',
@@ -144,6 +161,13 @@ class NudgeRepository {
         'uploadMode=signed_write_url',
       );
       final result = _requireAcceptedDelivery(response);
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'Nudge sent kind=voice bytes=${audio.length} durationMs=$durationMs '
+        'eventId=${result['notificationEventId'] ?? eventId}',
+        groupId: groupId,
+      );
       await AnalyticsService.logNudgeSent(
         groupId: groupId,
         kind: 'voice',
@@ -161,11 +185,18 @@ class NudgeRepository {
         'audioBytes=${audio.length} elapsedMs=${stopwatch.elapsedMilliseconds} '
         '${error.runtimeType}: $error',
       );
-      await CrashlyticsService.recordError(
-        error,
-        stack,
-        reason: 'voice_nudge_upload_failed',
-        feature: 'nudge',
+      LogManager.log(
+        LogLevel.error,
+        'NudgeService',
+        'Nudge not delivered: network error. Voice send failed: $error',
+        groupId: groupId,
+      );
+      await CrashlyticsService.recordNudgeFailure(
+        error: error,
+        stack: stack,
+        failureReason: NudgeFailureReason.unknown,
+        groupId: groupId,
+        extras: {'checkpoint': 'voice_nudge_upload'},
       );
       rethrow;
     }
@@ -209,7 +240,7 @@ class NudgeRepository {
     }
     if (targetDevices == 0) {
       throw const NudgeDeliveryException(
-        'The recipient has no registered Android device. Ask them to open One One once.',
+        'The recipient has no registered Android device. Ask them to open Duo once.',
       );
     }
     if (sent == 0) {
@@ -228,6 +259,59 @@ class NudgeDeliveryException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// Per-send delivery outcome for a nudge, derived from the aggregate
+/// `sent`/`failed` device counts the backend returns.
+///
+/// The push/ring/voice send APIs only report aggregate counts, not which
+/// specific recipient(s) failed, so [successRecipientIds] /
+/// [failedRecipientIds] are only populated when every intended recipient
+/// landed on the same side (all succeeded, or all failed). For a genuine
+/// partial failure, callers should fall back to [failedCount] /
+/// [totalRecipients] rather than guessing identities.
+class NudgeResult {
+  const NudgeResult({
+    required this.totalRecipients,
+    required this.failedCount,
+    this.successRecipientIds = const [],
+    this.failedRecipientIds = const [],
+  });
+
+  factory NudgeResult.fromSendResponse(
+    Map<String, dynamic> response,
+    List<String> intendedRecipientIds,
+  ) {
+    final total = intendedRecipientIds.length;
+    final failedCount = _readCount(response['failed']).clamp(0, total);
+
+    if (failedCount == 0) {
+      return NudgeResult(
+        totalRecipients: total,
+        failedCount: 0,
+        successRecipientIds: intendedRecipientIds,
+      );
+    }
+    if (failedCount >= total) {
+      return NudgeResult(
+        totalRecipients: total,
+        failedCount: total,
+        failedRecipientIds: intendedRecipientIds,
+      );
+    }
+    return NudgeResult(totalRecipients: total, failedCount: failedCount);
+  }
+
+  final int totalRecipients;
+  final int failedCount;
+  final List<String> successRecipientIds;
+  final List<String> failedRecipientIds;
+
+  int get successCount => totalRecipients - failedCount;
+  bool get isFullSuccess => failedCount == 0;
+  bool get isFullFailure =>
+      totalRecipients > 0 && failedCount >= totalRecipients;
+  bool get isPartialFailure => failedCount > 0 && failedCount < totalRecipients;
 }
 
 int _readCount(Object? value) {

@@ -8,8 +8,11 @@ import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.content.Intent
-import android.util.Log
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Rational
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.google.firebase.FirebaseApp
 import com.google.firebase.installations.FirebaseInstallations
 import com.google.firebase.messaging.FirebaseMessaging
@@ -25,8 +28,43 @@ class MainActivity : FlutterFragmentActivity() {
     private var voiceSessionActive = false
     private var voiceSessionTalking = false
 
+    // Held true until Flutter reports real content is on screen (see the
+    // "app/splash" channel below). A generous failsafe timeout guarantees
+    // the splash can never get stuck forever if that signal is ever lost.
+    @Volatile private var isFlutterReady = false
+    private val splashFailsafeHandler = Handler(Looper.getMainLooper())
+    private val splashFailsafeRunnable = Runnable {
+        Log.w(
+            VoiceNudgeDiagnostics.tag,
+            "[SPLASH-01] flutterReady signal not received within failsafe window; releasing splash",
+        )
+        isFlutterReady = true
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // Must be called before super.onCreate() so the splash theme is
+        // installed before the window content view is set.
+        val splashScreen = installSplashScreen()
+        super.onCreate(savedInstanceState)
+        splashScreen.setKeepOnScreenCondition { !isFlutterReady }
+        splashFailsafeHandler.postDelayed(splashFailsafeRunnable, SPLASH_FAILSAFE_TIMEOUT_MS)
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "app/splash",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "flutterReady" -> {
+                    isFlutterReady = true
+                    splashFailsafeHandler.removeCallbacks(splashFailsafeRunnable)
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
         VoiceNudgeNotifications.ensureChannels(this)
         if (BuildConfig.DEBUG) logFirebaseRuntimeConfiguration()
         voiceNudgeChannel = MethodChannel(
@@ -35,6 +73,7 @@ class MainActivity : FlutterFragmentActivity() {
         )
         NudgeActionDispatcher.attach(voiceNudgeChannel)
         NudgeDeliveryResultDispatcher.attach(voiceNudgeChannel)
+        NudgeReceivedDispatcher.attach(voiceNudgeChannel)
         captureNudgeAction(intent)
         inviteLinkChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -46,6 +85,25 @@ class MainActivity : FlutterFragmentActivity() {
             VoicePipContract.flutterChannel,
         )
         VoicePipActionDispatcher.attach(voicePipChannel)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "app.oneone/device_log",
+        ).setMethodCallHandler { call, result ->
+            DeviceLog.init(this)
+            when (call.method) {
+                "setIdentity" -> {
+                    val arguments = call.arguments as? Map<*, *>
+                    DeviceLog.setIdentity(
+                        arguments?.get("userId")?.toString(),
+                        arguments?.get("groupId")?.toString(),
+                    )
+                    result.success(null)
+                }
+                "getDeviceMeta" -> result.success(DeviceLog.deviceMeta())
+                "getNetworkMeta" -> result.success(DeviceLog.networkMeta())
+                else -> result.notImplemented()
+            }
+        }
         voicePipChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "setSessionState" -> {
@@ -164,6 +222,14 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(null)
                 }
 
+                "clearChatPile" -> {
+                    val groupId = call.arguments?.toString()
+                    if (!groupId.isNullOrBlank()) {
+                        VoiceNudgeNotifications.cancelChatPile(this, groupId)
+                    }
+                    result.success(null)
+                }
+
                 else -> result.notImplemented()
             }
         }
@@ -188,10 +254,10 @@ class MainActivity : FlutterFragmentActivity() {
                     } else {
                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "Join my One One group")
+                            putExtra(Intent.EXTRA_SUBJECT, "Join my Duo group")
                             putExtra(
                                 Intent.EXTRA_TEXT,
-                                "Join my group on One One: $inviteUrl",
+                                "Join my group on Duo: $inviteUrl",
                             )
                         }
                         startActivity(Intent.createChooser(shareIntent, "Share group invite"))
@@ -236,6 +302,7 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun onDestroy() {
+        splashFailsafeHandler.removeCallbacks(splashFailsafeRunnable)
         if (isFinishing && voiceSessionActive) {
             VoiceSessionService.stop(this)
             voiceSessionActive = false
@@ -243,6 +310,7 @@ class MainActivity : FlutterFragmentActivity() {
         if (::voiceNudgeChannel.isInitialized) {
             NudgeActionDispatcher.detach(voiceNudgeChannel)
             NudgeDeliveryResultDispatcher.detach(voiceNudgeChannel)
+            NudgeReceivedDispatcher.detach(voiceNudgeChannel)
         }
         if (::voicePipChannel.isInitialized) {
             VoicePipActionDispatcher.detach(voicePipChannel)
@@ -404,5 +472,12 @@ class MainActivity : FlutterFragmentActivity() {
         return MessageDigest.getInstance("SHA-1")
             .digest(signature.toByteArray())
             .joinToString(":") { byte -> "%02X".format(byte) }
+    }
+
+    private companion object {
+        // Upper bound on how long the native splash can stay up waiting for
+        // Flutter — well beyond any realistic boot time, purely a safety
+        // net so a bug can never brick the launch screen.
+        const val SPLASH_FAILSAFE_TIMEOUT_MS = 8_000L
     }
 }

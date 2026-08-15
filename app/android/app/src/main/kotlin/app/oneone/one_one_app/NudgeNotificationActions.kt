@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import io.flutter.plugin.common.MethodChannel
 import java.net.HttpURLConnection
@@ -98,6 +97,33 @@ object NudgeDeliveryResultDispatcher {
     fun signal(result: Map<String, String?>) {
         Handler(Looper.getMainLooper()).post {
             channel?.invokeMethod("onNudgeDeliveryResult", result)
+        }
+    }
+}
+
+/**
+ * Signals Flutter that a nudge has *arrived* on this device (FCM received and
+ * native playback is starting), before the user has tapped accept. This lets
+ * the app prefetch/warm the LiveKit connection while the user is still
+ * deciding, so the accept -> connected latency is much lower. Only fires when
+ * the Flutter engine is attached; a killed app simply falls back to a normal
+ * cold connect.
+ */
+object NudgeReceivedDispatcher {
+    @Volatile
+    private var channel: MethodChannel? = null
+
+    fun attach(methodChannel: MethodChannel) {
+        channel = methodChannel
+    }
+
+    fun detach(methodChannel: MethodChannel) {
+        if (channel === methodChannel) channel = null
+    }
+
+    fun signal(groupId: String) {
+        Handler(Looper.getMainLooper()).post {
+            channel?.invokeMethod("onNudgeReceived", groupId)
         }
     }
 }

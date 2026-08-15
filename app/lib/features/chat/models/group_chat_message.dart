@@ -38,6 +38,26 @@ class GroupChatMessage {
     return remaining > 0 ? remaining : 0;
   }
 
+  /// Full opacity for the first 10 minutes after [createdAt], then a
+  /// progressive fade until [expiresAt].
+  double opacityAt([DateTime? now]) {
+    final nowSec = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
+    final fadeStart = createdAt + 10 * 60;
+    if (nowSec <= fadeStart) return 1;
+    final fadeEnd = expiresAt > fadeStart ? expiresAt : fadeStart + 2 * 60;
+    if (nowSec >= fadeEnd) return 0;
+    final span = fadeEnd - fadeStart;
+    if (span <= 0) return 0;
+    return ((fadeEnd - nowSec) / span).clamp(0.0, 1.0);
+  }
+
+  int get secondsUntilFadeStarts {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final fadeStart = createdAt + 10 * 60;
+    final remaining = fadeStart - now;
+    return remaining > 0 ? remaining : 0;
+  }
+
   static GroupChatMessage? tryParse(String messageId, Object? value) {
     if (value is! Map) return null;
 

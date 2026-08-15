@@ -11,8 +11,17 @@ class PresenceConfig {
   static const Duration disconnectGracePeriod = Duration(seconds: 60);
 
   /// How long the room stays open with no voice activity before it
-  /// auto-closes. Set short for testing (1 minute); raise for production.
-  static const Duration inactivityTimeout = Duration(minutes: 1);
+  /// auto-closes. Set short for testing; raise for production.
+  static const Duration inactivityTimeout = Duration(minutes: 5);
+
+  /// How long a user may remain the *sole* connected participant in a LiveKit
+  /// room before the app treats it as an invalid state: it reports a non-fatal
+  /// Crashlytics bug (with on-device logs) and auto-disconnects the user.
+  ///
+  /// Driven entirely by LiveKit room state (`room.remoteParticipants`) so it
+  /// needs no backend/DB presence round-trips. Applies in every connection
+  /// mode (walkie-talkie, call, any state).
+  static const Duration soloParticipantTimeout = Duration(minutes: 1);
 
   /// Maximum total online time per user per group per day. Beyond this,
   /// the app blocks further "go online" attempts until the next UTC day.

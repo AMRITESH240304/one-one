@@ -93,6 +93,9 @@ const voiceNudgeAckSchema = z.object({
 const nudgeAckSchema = z.object({
   status: z.enum(["played", "failed"]),
   reason: z.string().min(1).max(120).optional(),
+  // Audibility concern for an otherwise-successful playback
+  // (volume_muted / volume_low).
+  attention: z.string().min(1).max(120).optional(),
   health: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
 });
 
@@ -536,6 +539,7 @@ export function createNotificationRoutes() {
         ticket,
         status: body.status,
         reason: body.reason,
+        attention: body.attention,
         health: body.health
       });
       response.status(200).json(result);

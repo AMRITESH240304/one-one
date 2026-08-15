@@ -14,6 +14,9 @@ import 'startup_gate_screen.dart';
 import 'startup_performance.dart';
 import '../core/firebase/crashlytics_service.dart';
 import '../core/firebase/firebase_analytics_service.dart';
+import '../core/firebase/firebase_bootstrap.dart';
+import '../core/logging/log_level.dart';
+import '../core/logging/log_manager.dart';
 import '../features/service_status/service_status_gate.dart';
 
 class OneOneApp extends StatelessWidget {
@@ -46,7 +49,7 @@ class OneOneApp extends StatelessWidget {
     // element tree while screens are still mid setState/pop after save and
     // trips '_dependents.isEmpty'. Accent is applied via Theme in `builder`.
     return MaterialApp(
-      title: 'One One',
+      title: 'Duo',
       debugShowCheckedModeBanner: false,
       navigatorObservers: [AnalyticsService.observer],
       routes: {
@@ -103,9 +106,23 @@ class _AuthSessionLifecycleState extends State<_AuthSessionLifecycle>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      unawaited(AnalyticsService.logSessionStarted());
-      unawaited(_refreshFirebaseToken());
+    switch (state) {
+      case AppLifecycleState.resumed:
+        LogManager.log(LogLevel.info, 'AppLifecycle', 'App foregrounded');
+        unawaited(AnalyticsService.logSessionStarted());
+        unawaited(_refreshFirebaseToken());
+      case AppLifecycleState.inactive:
+        break;
+      case AppLifecycleState.hidden:
+        break;
+      case AppLifecycleState.paused:
+        LogManager.log(LogLevel.info, 'AppLifecycle', 'App backgrounded');
+      case AppLifecycleState.detached:
+        LogManager.log(
+          LogLevel.warn,
+          'AppLifecycle',
+          'App killed / detached (process teardown)',
+        );
     }
   }
 
@@ -133,11 +150,12 @@ class _FirebaseGateState extends State<_FirebaseGate> {
 
   Future<FirebaseApp> _initializeFirebase() async {
     final stopwatch = Stopwatch()..start();
-    // Firebase is initialized in main.dart before runApp so Crashlytics
-    // handlers are active from the first frame. Reuse that default app here.
-    final app = Firebase.apps.isEmpty
-        ? await Firebase.initializeApp()
-        : Firebase.app();
+    // main.dart kicks this off the instant runApp() returns, so by the time
+    // this screen is on-screen the init is usually already in flight (or
+    // done). Awaiting the shared future here — rather than calling
+    // Firebase.initializeApp() again — guarantees Firebase only ever
+    // initializes once.
+    final app = await FirebaseBootstrap.start();
     logStartupMilestone('Firebase ready', stopwatch);
     await CrashlyticsService.log('firebase_gate_ready');
     return app;
@@ -149,11 +167,9 @@ class _FirebaseGateState extends State<_FirebaseGate> {
       future: _firebaseInit,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          // Pixel-identical to GoogleAuthScreen's real layout (just with the
-          // button disabled) so there is zero visual shift — no jitter —
-          // once Firebase finishes initializing and the real screen swaps
-          // in underneath the StreamBuilder.
-          return const GoogleAuthScreen(initializing: true);
+          // Brand splash only — GoogleAuthScreen constructs IdentityRepository,
+          // which touches FirebaseAuth and must not run before init finishes.
+          return const BrandSplashScreen();
         }
 
         if (snapshot.hasError) {

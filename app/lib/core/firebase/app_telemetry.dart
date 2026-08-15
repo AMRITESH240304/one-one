@@ -34,6 +34,7 @@ class AppTelemetry {
     String? appVersion,
     String? deviceId,
     String? environment,
+    String? groupId,
   }) async {
     await Future.wait([
       AnalyticsService.setUserId(userId),
@@ -43,19 +44,24 @@ class AppTelemetry {
         if (environment != null) 'environment': environment,
         'platform': 'android',
       }),
-      if (appVersion != null || deviceId != null)
-        CrashlyticsService.setCustomKeys({
-          if (appVersion != null) 'app_version': appVersion,
-          if (deviceId != null) 'device_id': deviceId,
-          'user_id': userId,
-        }),
+      CrashlyticsService.setCustomKeys({
+        'user_id': userId,
+        if (appVersion != null) 'app_version': appVersion,
+        if (deviceId != null) 'device_id': deviceId,
+        if (groupId != null) 'group_id': groupId,
+      }),
     ]);
+  }
+
+  static Future<void> setActiveGroup(String? groupId) {
+    return CrashlyticsService.setCustomKey('group_id', groupId ?? '');
   }
 
   static Future<void> clearUser() async {
     await Future.wait([
       AnalyticsService.setUserId(null),
       CrashlyticsService.setUserIdentifier(null),
+      CrashlyticsService.setCustomKey('group_id', ''),
     ]);
   }
 }

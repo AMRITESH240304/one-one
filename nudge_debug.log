@@ -1,0 +1,6 @@
+--------- beginning of main
+08-14 23:23:16.157 I/OneOneFCM(24099): [FCM-07] Message received id=0:1786729995735873%6c66b22ef9fd7ecd keys=ackUrl,audioUrl,deliveryToken,durationMs,eventId,expiresAt,groupId,responseUrl,senderAvatarAsset,senderName,senderUserId,type
+08-14 23:23:16.159 I/OneOneFCM(24099): [FCM-09] Starting native playback kind=voice_nudge eventSuffix=cc11d9
+08-14 23:23:16.168 I/OneOneFCM(24099): [FCM-10] Playback service accepted kind=voice_nudge eventSuffix=cc11d9
+08-14 23:28:26.578 E/FirebaseMessaging(28178): Default FirebaseApp has not been initialized. Skip logging event to GA.
+08-14 23:28:26.578 I/FirebaseMessaging(28178): FirebaseApp has not being initialized. Device might be in direct boot mode. Skip exporting delivery metrics to Big Query

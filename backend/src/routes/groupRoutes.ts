@@ -38,7 +38,7 @@ export function createGroupRoutes() {
 
   // HTTPS invite links are Android App Links when domain verification is
   // configured. The redirect remains a fallback for devices that have not
-  // verified the domain yet but do have One One installed.
+  // verified the domain yet but do have Duo installed.
   router.get("/invite/:inviteCode", (request, response) => {
     const inviteCode = joinInviteSchema.shape.inviteCode.parse(
       request.params.inviteCode

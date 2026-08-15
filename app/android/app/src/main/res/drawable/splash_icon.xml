@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ draws the splash icon in a 240dp circle. Inset the logo so
+     it stays small and sharp instead of filling (and upscaling into) that
+     circle. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/splash_logo"
+    android:inset="64dp" />

@@ -3,9 +3,12 @@ import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-
 import '../../../app/accent_theme.dart';
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/logging/debug_logs_sheet.dart';
+import '../../groups/models/group_summary.dart';
+import '../../subscriptions/eleven_pro_paywall_screen.dart';
+import '../../subscriptions/subscription_management_sheet.dart';
 import '../data/avatar_assets.dart';
 import '../data/identity_repository.dart';
 import '../models/identity_session.dart';
@@ -19,22 +22,27 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.session,
     required this.identityRepository,
-    this.groupName,
+    this.manageableGroups = const [],
     this.onManageGroup,
   });
 
   final IdentitySession session;
   final IdentityRepository identityRepository;
-  final String? groupName;
-  final Future<bool> Function()? onManageGroup;
+
+  /// Groups this user created (owner). Empty when none are manageable.
+  final List<GroupSummary> manageableGroups;
+
+  /// Opens management for the chosen group. Returns true when the group
+  /// membership ended (left/deleted) so Settings can close if needed.
+  final Future<bool> Function(GroupSummary group)? onManageGroup;
 
   /// Opens settings drifting in from the left (settings control side).
   static Future<void> open(
     BuildContext context, {
     required IdentitySession session,
     required IdentityRepository identityRepository,
-    String? groupName,
-    Future<bool> Function()? onManageGroup,
+    List<GroupSummary> manageableGroups = const [],
+    Future<bool> Function(GroupSummary group)? onManageGroup,
   }) {
     return Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
@@ -50,7 +58,7 @@ class SettingsScreen extends StatefulWidget {
               child: SettingsScreen(
                 session: session,
                 identityRepository: identityRepository,
-                groupName: groupName,
+                manageableGroups: manageableGroups,
                 onManageGroup: onManageGroup,
               ),
             ),
@@ -396,7 +404,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _logOut() async {
     final confirmed = await _confirmAccountAction(
       title: 'Log out?',
-      message: 'You will need to sign in with Google to use One One again.',
+      message: 'You will need to sign in with Google to use Duo again.',
       actionLabel: 'Log out',
     );
     if (!confirmed || !mounted) return;
@@ -421,7 +429,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final confirmed = await _confirmAccountAction(
       title: 'Delete account permanently?',
       message:
-          'Your One One profile, device information, and preferences will be deleted. This cannot be undone.',
+          'Your Duo profile, device information, and preferences will be deleted. This cannot be undone.',
       actionLabel: 'Delete account',
       destructive: true,
     );
@@ -487,8 +495,113 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _openGroupManagement() async {
-    final groupEnded = await widget.onManageGroup?.call() ?? false;
+    final groups = widget.manageableGroups;
+    final onManage = widget.onManageGroup;
+    if (groups.isEmpty || onManage == null) return;
+
+    final selected = await showModalBottomSheet<GroupSummary>(
+      context: context,
+      backgroundColor: const Color(0xff1b1b1b),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 12, 8, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 14),
+                  child: Text(
+                    'Manage Group',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 14),
+                  child: Text(
+                    'Groups you created',
+                    style: TextStyle(color: Colors.white54, fontSize: 12.5),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: groups.length,
+                  separatorBuilder: (_, _) => Divider(
+                    height: 1,
+                    indent: 56,
+                    color: Colors.white.withValues(alpha: 0.09),
+                  ),
+                  itemBuilder: (context, index) {
+                    final group = groups[index];
+                    return ListTile(
+                      onTap: () => Navigator.of(sheetContext).pop(group),
+                      leading: const Icon(
+                        Icons.group_outlined,
+                        color: Colors.white70,
+                      ),
+                      title: Text(
+                        group.name,
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                      trailing: const Icon(
+                        Icons.chevron_right_rounded,
+                        color: Colors.white38,
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (selected == null || !mounted) return;
+
+    final groupEnded = await onManage(selected);
     if (groupEnded && mounted) Navigator.of(context).pop();
+  }
+
+  /// Opens the in-app Duo Pro paywall (branded UI + RevenueCat packages).
+  Future<void> _showPaywall() async {
+    try {
+      final purchased = await ElevenProPaywallScreen.open(context);
+      if (!mounted) return;
+      if (purchased) {
+        setState(() => _message = 'Welcome to Duo Pro!');
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _message = 'Could not open subscription options.');
+      debugPrint('Paywall error: $error');
+    }
+  }
+
+  /// Manage Subscription sheet: store Customer Center + Contact Team Duo.
+  Future<void> _showManageSubscription() {
+    return SubscriptionManagementSheet.show(context);
   }
 
   @override
@@ -569,7 +682,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onEditProfile: _openProfileEditor,
               ),
               const SizedBox(height: 28),
-              if (widget.groupName != null && widget.onManageGroup != null) ...[
+              if (widget.manageableGroups.isNotEmpty &&
+                  widget.onManageGroup != null) ...[
                 const _SectionTitle('Group'),
                 const SizedBox(height: 12),
                 _SettingsSurface(
@@ -577,7 +691,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   children: [
                     _NavigationRow(
                       icon: Icons.group_outlined,
-                      label: 'Manage ${widget.groupName}',
+                      label: 'Manage Group',
                       onTap: _openGroupManagement,
                     ),
                   ],
@@ -591,28 +705,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _PreferenceHeading(
                     icon: Icons.palette_outlined,
                     title: 'Accent color',
-                    subtitle: 'Choose the color used across One One.',
+                    subtitle: 'Choose the color used across Duo.',
                   ),
                   const SizedBox(height: 16),
-                  Wrap(
-                    spacing: 12,
-                    runSpacing: 12,
-                    children: [
-                      for (final option in accentOptions)
-                        _ColorSwatch(
-                          option: option,
-                          selected: _accentColorKey == option.key,
-                          enabled: !_saving,
-                          onSelected: () {
-                            setState(() {
-                              _accentColorKey = option.key;
-                              _hasUnsavedAccentPreview =
-                                  option.key != _persistedAccentColorKey;
-                            });
-                            AccentThemeController.setAccentKey(option.key);
-                          },
-                        ),
-                    ],
+                  // Two rows of six — 12 accents fill both runs on phone widths.
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      const columns = 6;
+                      const spacing = 12.0;
+                      final swatchSize =
+                          (constraints.maxWidth - spacing * (columns - 1)) /
+                          columns;
+                      return Wrap(
+                        spacing: spacing,
+                        runSpacing: spacing,
+                        children: [
+                          for (final option in accentOptions)
+                            SizedBox(
+                              width: swatchSize,
+                              height: swatchSize,
+                              child: _ColorSwatch(
+                                option: option,
+                                selected: _accentColorKey == option.key,
+                                enabled: !_saving,
+                                onSelected: () {
+                                  setState(() {
+                                    _accentColorKey = option.key;
+                                    _hasUnsavedAccentPreview =
+                                        option.key != _persistedAccentColorKey;
+                                  });
+                                  AccentThemeController.setAccentKey(
+                                    option.key,
+                                  );
+                                },
+                              ),
+                            ),
+                        ],
+                      );
+                    },
                   ),
                   const _SurfaceDivider(),
                   SwitchListTile.adaptive(
@@ -728,6 +858,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     icon: Icons.privacy_tip_outlined,
                     label: 'Privacy Policy',
                     onTap: () => _openLegalDocument(LegalDocument.privacy),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 28),
+              const _SectionTitle('Subscription', showBeta: true),
+              const SizedBox(height: 12),
+              _SettingsSurface(
+                padding: EdgeInsets.zero,
+                children: [
+                  _ElevenProSettingsCard(onTap: _showPaywall),
+                  const _SurfaceDivider(indent: 52),
+                  _NavigationRow(
+                    icon: Icons.manage_accounts_outlined,
+                    label: 'Manage Subscription',
+                    onTap: _showManageSubscription,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 28),
+              const _SectionTitle('Support'),
+              const SizedBox(height: 12),
+              _SettingsSurface(
+                padding: EdgeInsets.zero,
+                children: [
+                  _NavigationRow(
+                    icon: Icons.bug_report_outlined,
+                    label: 'Debug Logs',
+                    onTap: () => showDebugLogsSheet(context),
                   ),
                 ],
               ),
@@ -1483,18 +1641,102 @@ class _PhotoTabContent extends StatelessWidget {
 }
 
 class _SectionTitle extends StatelessWidget {
-  const _SectionTitle(this.label);
+  const _SectionTitle(this.label, {this.showBeta = false});
+
   final String label;
+  final bool showBeta;
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      label.toUpperCase(),
-      style: const TextStyle(
-        color: Colors.white54,
-        fontSize: 12,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 0,
+    return Row(
+      children: [
+        Text(
+          label.toUpperCase(),
+          style: const TextStyle(
+            color: Colors.white54,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0,
+          ),
+        ),
+        if (showBeta) ...[
+          const SizedBox(width: 8),
+          const _SettingsBetaBadge(),
+        ],
+      ],
+    );
+  }
+}
+
+class _ElevenProSettingsCard extends StatelessWidget {
+  const _ElevenProSettingsCard({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+      child: const Padding(
+        padding: EdgeInsets.fromLTRB(18, 14, 14, 14),
+        child: Row(
+          children: [
+            Icon(Icons.workspace_premium_outlined, color: Colors.white70),
+            SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Duo Pro',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  SizedBox(height: 2),
+                  Text(
+                    'View plans',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right_rounded, color: Colors.white38),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsBetaBadge extends StatelessWidget {
+  const _SettingsBetaBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: const Color(0xffffb020).withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: const Color(0xffffb020).withValues(alpha: 0.55),
+        ),
+      ),
+      child: const Text(
+        'BETA',
+        style: TextStyle(
+          color: Color(0xffffb020),
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.6,
+        ),
       ),
     );
   }
@@ -1578,33 +1820,37 @@ class _ColorSwatch extends StatelessWidget {
         button: true,
         selected: selected,
         label: '${option.label} accent',
-        child: SizedBox.square(
-          dimension: 48,
-          child: InkWell(
-            onTap: enabled ? onSelected : null,
-            customBorder: const CircleBorder(),
-            child: Center(
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: option.color,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: selected ? Colors.white : Colors.transparent,
-                    width: 3,
+        child: InkWell(
+          onTap: enabled ? onSelected : null,
+          customBorder: const CircleBorder(),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final side = constraints.biggest.shortestSide;
+              final circle = (side * 0.75).clamp(28.0, 40.0);
+              final checkSize = (circle * 0.53).clamp(14.0, 20.0);
+              return Center(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  width: circle,
+                  height: circle,
+                  decoration: BoxDecoration(
+                    color: option.color,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: selected ? Colors.white : Colors.transparent,
+                      width: 3,
+                    ),
                   ),
+                  child: selected
+                      ? Icon(
+                          Icons.check_rounded,
+                          color: Colors.black,
+                          size: checkSize,
+                        )
+                      : null,
                 ),
-                child: selected
-                    ? const Icon(
-                        Icons.check_rounded,
-                        color: Colors.black,
-                        size: 19,
-                      )
-                    : null,
-              ),
-            ),
+              );
+            },
           ),
         ),
       ),

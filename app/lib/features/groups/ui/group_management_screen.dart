@@ -293,6 +293,7 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
                               index++
                             ) ...[
                               _MemberRow(
+                                key: ValueKey(_members[index].userId),
                                 member: _members[index],
                                 isCurrentUser:
                                     _members[index].userId ==
@@ -379,6 +380,7 @@ class _GroupManagementScreenState extends State<GroupManagementScreen> {
 
 class _MemberRow extends StatelessWidget {
   const _MemberRow({
+    super.key,
     required this.member,
     required this.isCurrentUser,
     required this.removing,

@@ -9,6 +9,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
@@ -16,6 +17,7 @@ import '../../../core/firebase/app_database.dart';
 import '../../../core/firebase/app_telemetry.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/firebase/firebase_analytics_service.dart';
+import '../../../core/logging/log_manager.dart';
 import '../../../core/storage/profile_photo_storage.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../models/app_user_profile.dart';
@@ -218,6 +220,17 @@ class IdentityRepository {
       throw StateError('Cannot resolve setup before sign-in.');
     }
 
+    // Fast path: SharedPreferences is available locally on-device and was
+    // written by markSetupComplete() when the user finished onboarding.
+    // This avoids a blocking RTDB network round-trip on every cold launch.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final localFlag = prefs.getBool(_setupCompleteKey(user.uid));
+      if (localFlag == true) return true;
+    } catch (_) {
+      // SharedPreferences read failed — fall through to RTDB.
+    }
+
     final snapshot = await _requiredStartupStep(
       _database.ref('users/${user.uid}').get(),
       'profile lookup',
@@ -228,7 +241,14 @@ class IdentityRepository {
 
     final data = snapshot.value! as Map<Object?, Object?>;
     final profile = AppUserProfile.fromJson(user.uid, data);
-    if (profile.setupCompleted) return true;
+    if (profile.setupCompleted) {
+      // Backfill the local cache so the next launch is instant.
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(_setupCompleteKey(user.uid), true);
+      } catch (_) {}
+      return true;
+    }
 
     // Existing accounts predate the explicit flag. Completed onboarding
     // always produced both a chosen name and profile photo.
@@ -242,6 +262,9 @@ class IdentityRepository {
     return completedLegacySetup;
   }
 
+  static String _setupCompleteKey(String userId) =>
+      'one_one_setup_complete_$userId';
+
   Future<void> markSetupComplete() async {
     final user = _auth.currentUser;
     if (user == null) {
@@ -249,11 +272,19 @@ class IdentityRepository {
     }
 
     final now = _nowSeconds();
+    // Write to both RTDB and SharedPreferences so the next cold launch
+    // skips the RTDB round-trip via the fast path in hasCompletedSetup().
     await _database.ref('users/${user.uid}').update({
       'setupCompleted': true,
       'updatedAt': now,
       'lastSeenAt': now,
     });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_setupCompleteKey(user.uid), true);
+    } catch (_) {
+      // SharedPreferences write is a best-effort cache; RTDB is authoritative.
+    }
 
     final session = _cachedSession;
     if (session != null) {
@@ -760,6 +791,7 @@ class IdentityRepository {
         environment: kReleaseMode ? 'release' : 'debug',
       ),
     );
+    LogManager.setIdentity(userId: session.userId);
   }
 
   Future<void> _evictProfilePhoto(String? url) async {

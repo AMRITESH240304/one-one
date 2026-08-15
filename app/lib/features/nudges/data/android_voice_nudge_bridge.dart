@@ -14,6 +14,8 @@ class AndroidVoiceNudgeBridge {
       StreamController<void>.broadcast();
   static final StreamController<NudgeDeliveryResult> _deliveryResults =
       StreamController<NudgeDeliveryResult>.broadcast();
+  static final StreamController<String> _receivedSignals =
+      StreamController<String>.broadcast();
   static bool _handlerInstalled = false;
 
   static Stream<void> get actionSignals {
@@ -24,6 +26,14 @@ class AndroidVoiceNudgeBridge {
   static Stream<void> get registrationSignals {
     _installHandler();
     return _registrationSignals.stream;
+  }
+
+  /// Emits the `groupId` of a nudge the instant the native side receives it
+  /// (FCM arrived / playback starting), before the user taps accept. Used to
+  /// prefetch/warm LiveKit so accept is faster.
+  static Stream<String> get receivedSignals {
+    _installHandler();
+    return _receivedSignals.stream;
   }
 
   /// Real-time played/failed outcomes for ring + voice nudges this device
@@ -43,6 +53,9 @@ class AndroidVoiceNudgeBridge {
       } else if (call.method == 'onFcmRegistrationRenewed') {
         debugPrint('[OneOneFCM][DART-06] Native registration renewed');
         _registrationSignals.add(null);
+      } else if (call.method == 'onNudgeReceived') {
+        final groupId = call.arguments?.toString().trim() ?? '';
+        if (groupId.isNotEmpty) _receivedSignals.add(groupId);
       } else if (call.method == 'onNudgeDeliveryResult') {
         final raw = call.arguments;
         if (raw is Map) {
@@ -137,6 +150,15 @@ class AndroidVoiceNudgeBridge {
     }
   }
 
+  Future<void> clearChatPile(String groupId) async {
+    if (!Platform.isAndroid || groupId.isEmpty) return;
+    try {
+      await _channel.invokeMethod<void>('clearChatPile', groupId);
+    } catch (_) {
+      // Local notification cancel is best-effort.
+    }
+  }
+
   /// Shared instance so multiple widgets can call platform methods without
   /// re-creating the channel handler.
   static final AndroidVoiceNudgeBridge shared = AndroidVoiceNudgeBridge();
@@ -177,35 +199,66 @@ class NudgeDeliveryResult {
     required this.eventId,
     required this.status,
     this.reason,
+    this.attention,
     this.recipientName,
     this.recipientUserId,
-    this.ambientNoiseLevel,
   });
 
   final String eventId;
 
-  /// `played` or `failed`.
+  /// `played` or `failed`. Reflects whether playback genuinely started, NOT
+  /// whether the recipient could hear it.
   final String status;
 
-  /// Machine-readable reason code (e.g. `receiver_volume_muted`) when known.
+  /// Machine-readable reason code when playback genuinely failed (e.g.
+  /// `download_error`, `playback_error`, `timeout`).
   final String? reason;
+
+  /// Audibility concern for an otherwise-successful playback
+  /// (`volume_muted` or `volume_low`). This is a warning, never a failure.
+  final String? attention;
+
   final String? recipientName;
   final String? recipientUserId;
 
-  /// B7: `high`, `medium`, `low`, or null if not sampled.
-  final String? ambientNoiseLevel;
-
   bool get played => status == 'played';
 
-  /// Human-readable description of the ambient noise level for UI display.
-  String? get ambientNoiseLabel {
-    return switch (ambientNoiseLevel) {
-      'high' => '🔊 surroundings are loud',
-      'medium' => '🔉 moderate noise',
-      'low' => '🔈 quiet surroundings',
+  /// True when the nudge played but the recipient probably didn't hear it
+  /// (muted / very low volume).
+  bool get playedButNotAudible => played && attention != null;
+
+  /// Human-readable description of the audibility concern for UI display.
+  String? get attentionLabel {
+    return switch (attention) {
+      'volume_muted' => 'their volume was muted',
+      'volume_low' => 'their volume was too low',
       _ => null,
     };
   }
+
+  /// Classifies a failed nudge into where the fault lies:
+  /// - `duo`             -> a bug on Duo's end (reportable; prompt the sender)
+  /// - `receiver_device` -> the recipient's device/OS/permissions blocked it
+  /// - `unknown`         -> not enough signal to attribute the failure
+  String? get failureSource {
+    if (played) return null;
+    switch (reason) {
+      case 'permission_denied_foreground_service':
+        return 'receiver_device';
+      case 'playback_error':
+      case 'playback_service_start_error':
+      case 'download_error':
+      case 'timeout':
+        return 'duo';
+      default:
+        return 'unknown';
+    }
+  }
+
+  /// True when playback genuinely failed due to a Duo-side bug (as opposed to
+  /// a receiver-device condition like muted volume or a blocked FGS). These
+  /// are the cases worth prompting the sender to file a report.
+  bool get isDuoBug => failureSource == 'duo';
 
   static NudgeDeliveryResult? tryParse(Map<String, dynamic> raw) {
     final eventId = raw['eventId']?.toString().trim() ?? '';
@@ -219,6 +272,9 @@ class NudgeDeliveryResult {
       reason: raw['reason']?.toString().trim().isEmpty ?? true
           ? null
           : raw['reason'].toString().trim(),
+      attention: raw['attention']?.toString().trim().isEmpty ?? true
+          ? null
+          : raw['attention'].toString().trim(),
       recipientName: raw['recipientName']?.toString().trim().isEmpty ?? true
           ? null
           : raw['recipientName'].toString().trim(),
@@ -226,10 +282,6 @@ class NudgeDeliveryResult {
           raw['recipientUserId']?.toString().trim().isEmpty ?? true
           ? null
           : raw['recipientUserId'].toString().trim(),
-      ambientNoiseLevel:
-          raw['ambientNoiseLevel']?.toString().trim().isEmpty ?? true
-          ? null
-          : raw['ambientNoiseLevel'].toString().trim(),
     );
   }
 }

@@ -36,7 +36,7 @@ object VoiceNudgeNotifications {
                 VoiceNudgeContract.generalNotificationChannelName,
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "Nudges and activity from your One One groups"
+                description = "Nudges and activity from your Duo groups"
                 enableVibration(true)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
@@ -44,10 +44,13 @@ object VoiceNudgeNotifications {
         }
     }
 
-    /** Mic glyph — used only for ring / voice nudge notifications. */
+    /** Mic glyph — used only for ring / voice / push nudge notifications. */
     private val nudgeSmallIcon = R.drawable.ic_voice_nudge
 
-    /** One One mark — used for messages, friend-live, offline, responses, etc. */
+    /**
+     * Status-bar / title-row small icon. Android only draws the alpha of
+     * this asset (white silhouette), generated from [assets/logo.png].
+     */
     private val appSmallIcon = R.drawable.ic_notification_app
 
     fun build(
@@ -216,6 +219,7 @@ object VoiceNudgeNotifications {
         }
         return builder
             .setSmallIcon(appSmallIcon)
+            .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
             .setContentTitle("💬 $responderName answered your nudge")
             .setContentText(body)
             .setColor(Color.rgb(248, 190, 3))
@@ -253,6 +257,7 @@ object VoiceNudgeNotifications {
         if (groupId != null) builder.setGroup(groupKey(groupId))
         return builder
             .setSmallIcon(appSmallIcon)
+            .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
             .setContentTitle(title)
             .setContentText(body)
             .setColor(Color.rgb(248, 190, 3))
@@ -262,6 +267,59 @@ object VoiceNudgeNotifications {
             .setContentIntent(contentIntent)
             .setAutoCancel(true)
             .build()
+    }
+
+    /**
+     * WhatsApp-style pile: one notification per group that updates in place
+     * ("7 new messages") instead of a new alert per bubble.
+     */
+    fun buildChatPile(
+        context: Context,
+        groupId: String,
+        title: String,
+        body: String,
+        unreadCount: Int,
+    ): Notification {
+        ensureChannels(context)
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val contentIntent = PendingIntent.getActivity(
+            context,
+            requestCode("chat_$groupId", "open"),
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(context, VoiceNudgeContract.generalNotificationChannelId)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(context)
+        }
+        return builder
+            .setSmallIcon(appSmallIcon)
+            .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setNumber(unreadCount.coerceAtLeast(1))
+            .setOnlyAlertOnce(unreadCount > 1)
+            .setColor(Color.rgb(248, 190, 3))
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setPriority(Notification.PRIORITY_HIGH)
+            .setContentIntent(contentIntent)
+            .setGroup(groupKey(groupId))
+            .setAutoCancel(true)
+            .build()
+    }
+
+    fun chatPileId(groupId: String): Int = idFor("chat_pile_$groupId")
+
+    fun cancelChatPile(context: Context, groupId: String) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.cancel(chatPileId(groupId))
+        ChatPileStore.reset(context, groupId)
     }
 
     fun idFor(eventId: String): Int = eventId.hashCode() and 0x7fffffff
@@ -416,4 +474,29 @@ object VoiceNudgeNotifications {
 
     private fun requestCode(eventId: String, action: String): Int =
         "$eventId:$action".hashCode() and 0x7fffffff
+}
+
+object ChatPileStore {
+    private const val prefsName = "one_one_chat_pile"
+
+    fun resolveCount(context: Context, groupId: String, serverCount: Int?): Int {
+        if (serverCount != null && serverCount > 0) {
+            context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(groupId, serverCount)
+                .apply()
+            return serverCount
+        }
+        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val next = prefs.getInt(groupId, 0) + 1
+        prefs.edit().putInt(groupId, next).apply()
+        return next
+    }
+
+    fun reset(context: Context, groupId: String) {
+        context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            .edit()
+            .remove(groupId)
+            .apply()
+    }
 }

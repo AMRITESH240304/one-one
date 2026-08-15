@@ -1,19 +1,16 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 import '../core/firebase/crashlytics_service.dart';
 import '../features/identity/data/identity_repository.dart';
+import 'native_splash_bridge.dart';
 
 class GoogleAuthScreen extends StatefulWidget {
   const GoogleAuthScreen({super.key, this.initializing = false});
 
-  /// When true, renders the exact same layout as the interactive welcome
-  /// screen but with the button in a disabled "loading" state and taps
-  /// ignored. Used while Firebase is still initializing so the very first
-  /// frame is pixel-identical to the real welcome screen — nothing shifts
-  /// or jitters once initialization completes and the real screen swaps in.
+  /// When true, shows the brand splash (logo + pulse dots) only — never the
+  /// signed-out welcome CTA. Used while Firebase is still initializing so a
+  /// returning signed-in session never flashes "Welcome to Duo".
   final bool initializing;
 
   @override
@@ -21,13 +18,16 @@ class GoogleAuthScreen extends StatefulWidget {
 }
 
 class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
-  final IdentityRepository _identityRepository = IdentityRepository();
+  IdentityRepository? _identityRepository;
   bool _isSigningIn = false;
   String? _errorMessage;
 
+  IdentityRepository get _repo =>
+      _identityRepository ??= IdentityRepository();
+
   @override
   void dispose() {
-    _identityRepository.dispose();
+    _identityRepository?.dispose();
     super.dispose();
   }
 
@@ -43,7 +43,7 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
     });
 
     try {
-      await _identityRepository.signInWithGoogle();
+      await _repo.signInWithGoogle();
       // On success the root Firebase auth stream advances to onboarding.
       // Don't touch _isSigningIn – leave this screen in its splash state
       // until the StreamBuilder replaces it.
@@ -76,12 +76,18 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Once sign-in is in flight, show the splash / loading screen immediately.
-    // This matches the StartupGateScreen loading state so the transition is
-    // seamless when the StreamBuilder swaps widgets.
-    if (_isSigningIn) {
-      return const _SplashGate();
+    // Firebase still booting, or Google sign-in just started: brand splash only.
+    // Matches StartupGateScreen so cold starts never flash the welcome CTA at
+    // already-signed-in users.
+    if (widget.initializing || _isSigningIn) {
+      return const BrandSplashScreen();
     }
+
+    // The real welcome/sign-in CTA is about to be shown — the native splash
+    // (identical brand background) can come down now.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => NativeSplashBridge.markReady(),
+    );
 
     return Scaffold(
       backgroundColor: const Color(0xffF8BE03),
@@ -100,7 +106,7 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
               ),
               SizedBox(height: 36.h),
               Text(
-                'Welcome to One One',
+                'Welcome to Duo',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: const Color(0xff252a2e),
@@ -132,9 +138,9 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
                 SizedBox(height: 14.h),
               ],
               _GoogleSignInButton(
-                busy: widget.initializing,
-                busyLabel: widget.initializing ? 'Loading…' : 'Signing in…',
-                onTap: widget.initializing ? () {} : _continueWithGoogle,
+                busy: false,
+                busyLabel: 'Signing in…',
+                onTap: _continueWithGoogle,
               ),
               SizedBox(height: 22.h),
               Text(
@@ -153,11 +159,10 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
   }
 }
 
-/// Shown immediately when the user taps "Continue with Google", before the
-/// Firebase auth stream has had time to fire. Visually identical to the
-/// [StartupGateScreen] loading state so the transition is seamless.
-class _SplashGate extends StatelessWidget {
-  const _SplashGate();
+/// Brand splash with no Firebase access. Used while Firebase boots and
+/// immediately after tapping Continue with Google.
+class BrandSplashScreen extends StatelessWidget {
+  const BrandSplashScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -175,69 +180,11 @@ class _SplashGate extends StatelessWidget {
                   width: 190.w,
                   fit: BoxFit.contain,
                 ),
-                SizedBox(height: 28.h),
-                const _SplashPulseDots(color: Color(0xff384047)),
               ],
             ),
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Three softly breathing dots — same design used by StartupGateScreen so the
-/// splash-to-splash transition is invisible to the user.
-class _SplashPulseDots extends StatefulWidget {
-  const _SplashPulseDots({required this.color});
-
-  final Color color;
-
-  @override
-  State<_SplashPulseDots> createState() => _SplashPulseDotsState();
-}
-
-class _SplashPulseDotsState extends State<_SplashPulseDots>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1100),
-  )..repeat();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: List.generate(3, (index) {
-            final phase = (_controller.value - index * 0.2) % 1.0;
-            final scale =
-                0.55 + 0.45 * (0.5 - 0.5 * math.cos(phase * 2 * math.pi));
-            return Padding(
-              padding: EdgeInsets.symmetric(horizontal: 4.w),
-              child: Transform.scale(
-                scale: scale,
-                child: Container(
-                  width: 8.w,
-                  height: 8.w,
-                  decoration: BoxDecoration(
-                    color: widget.color,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-              ),
-            );
-          }),
-        );
-      },
     );
   }
 }

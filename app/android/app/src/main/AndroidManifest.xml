@@ -19,8 +19,8 @@
         android:required="false" />
 
     <application
-        android:label="One One"
-        android:name="${applicationName}"
+        android:label="Duo"
+        android:name=".OneOneApplication"
         android:icon="@mipmap/ic_launcher">
         <meta-data
             android:name="firebase_messaging_installation_id_enabled"
@@ -30,6 +30,12 @@
             android:value="walkie_alerts_v2" />
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification_app" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/notification_accent" />
+        <meta-data
+            android:name="app.oneone.notification_app_icon"
             android:resource="@drawable/ic_notification_app" />
         <!-- Debug-friendly Performance Monitoring logcat. Safe in release;
              collection still respects setPerformanceCollectionEnabled. -->

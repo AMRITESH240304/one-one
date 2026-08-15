@@ -1,16 +1,27 @@
 import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 
-/// Production Analytics wrapper for One One.
+/// Production Analytics wrapper for Duo.
 ///
 /// Event names follow Firebase conventions (snake_case, ≤40 chars).
 class AnalyticsService {
   AnalyticsService._();
 
-  static final FirebaseAnalytics _analytics = FirebaseAnalytics.instance;
+  static FirebaseAnalytics? _analyticsInstance;
 
-  static FirebaseAnalyticsObserver get observer =>
-      FirebaseAnalyticsObserver(analytics: _analytics);
+  // `FirebaseAnalytics.instance` throws `[core/no-app]` until
+  // `Firebase.initializeApp()` resolves, so this must stay lazy — accessing
+  // it eagerly (e.g. as a `static final` field) crashes the very first
+  // build of `OneOneApp`, which runs before Firebase finishes booting.
+  static FirebaseAnalytics get _analytics =>
+      _analyticsInstance ??= FirebaseAnalytics.instance;
+
+  // Handed straight to `MaterialApp(navigatorObservers: ...)` at the first
+  // build, so it cannot assume Firebase is ready yet — it resolves the real
+  // observer lazily the first time Firebase is actually initialized.
+  static NavigatorObserver get observer => _LazyAnalyticsObserver();
 
   static Future<void> initialize() async {
     await _analytics.setAnalyticsCollectionEnabled(true);
@@ -356,4 +367,42 @@ class AnalyticsService {
   static void _debug(String message) {
     if (kDebugMode) debugPrint('[Analytics] $message');
   }
+}
+
+/// Defers creating the real `FirebaseAnalyticsObserver` until Firebase has
+/// finished initializing, so navigation events before that are silently
+/// dropped instead of crashing the app on startup.
+class _LazyAnalyticsObserver extends NavigatorObserver {
+  FirebaseAnalyticsObserver? _delegate;
+
+  FirebaseAnalyticsObserver? get _resolved {
+    if (_delegate != null) return _delegate;
+    if (Firebase.apps.isEmpty) return null;
+    return _delegate = FirebaseAnalyticsObserver(
+      analytics: AnalyticsService._analytics,
+    );
+  }
+
+  @override
+  void didPush(Route route, Route? previousRoute) =>
+      _resolved?.didPush(route, previousRoute);
+
+  @override
+  void didPop(Route route, Route? previousRoute) =>
+      _resolved?.didPop(route, previousRoute);
+
+  @override
+  void didRemove(Route route, Route? previousRoute) =>
+      _resolved?.didRemove(route, previousRoute);
+
+  @override
+  void didReplace({Route? newRoute, Route? oldRoute}) =>
+      _resolved?.didReplace(newRoute: newRoute, oldRoute: oldRoute);
+
+  @override
+  void didStartUserGesture(Route route, Route? previousRoute) =>
+      _resolved?.didStartUserGesture(route, previousRoute);
+
+  @override
+  void didStopUserGesture() => _resolved?.didStopUserGesture();
 }

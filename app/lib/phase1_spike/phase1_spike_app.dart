@@ -14,7 +14,7 @@ class OneOnePhase1App extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'One One',
+      title: 'Duo',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -66,7 +66,7 @@ class _Phase1SpikeScreenState extends State<Phase1SpikeScreen> {
       androidNotificationOptions: AndroidNotificationOptions(
         channelId: 'walkie_service',
         channelName: 'Walkie online mode',
-        channelDescription: 'Persistent notification while One One is online.',
+        channelDescription: 'Persistent notification while Duo is online.',
         onlyAlertOnce: true,
         priority: NotificationPriority.LOW,
       ),
@@ -168,8 +168,12 @@ class _Phase1SpikeScreenState extends State<Phase1SpikeScreen> {
           : await FlutterForegroundTask.startService(
               serviceId: 101,
               serviceTypes: const [ForegroundServiceTypes.mediaPlayback],
-              notificationTitle: 'One One is online',
+              notificationTitle: 'Duo is online',
               notificationText: 'Connecting to LiveKit',
+              notificationIcon: const NotificationIcon(
+                metaDataName: 'app.oneone.notification_app_icon',
+                backgroundColor: Color(0xFFF8BE03),
+              ),
               notificationButtons: const [
                 NotificationButton(id: 'stop', text: 'Go away'),
               ],

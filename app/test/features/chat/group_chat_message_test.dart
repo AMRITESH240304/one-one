@@ -81,4 +81,47 @@ void main() {
       expect(message.secondsUntilExpiry, greaterThan(0));
     });
   });
+
+  group('GroupChatMessage.opacityAt', () {
+    test('is fully visible during the first 10 minutes', () {
+      final now = DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000);
+      final created = now.millisecondsSinceEpoch ~/ 1000;
+      final message = GroupChatMessage(
+        messageId: 'msg1',
+        groupId: 'group1',
+        senderUserId: 'user1',
+        senderDisplayName: 'Ada',
+        text: 'hi',
+        createdAt: created,
+        expiresAt: created + 12 * 60,
+      );
+
+      expect(message.opacityAt(now), 1);
+      expect(
+        message.opacityAt(now.add(const Duration(minutes: 9))),
+        1,
+      );
+    });
+
+    test('fades after 10 minutes until expiry', () {
+      final now = DateTime.fromMillisecondsSinceEpoch(1_700_000_000_000);
+      final created = now.millisecondsSinceEpoch ~/ 1000;
+      final message = GroupChatMessage(
+        messageId: 'msg1',
+        groupId: 'group1',
+        senderUserId: 'user1',
+        senderDisplayName: 'Ada',
+        text: 'hi',
+        createdAt: created,
+        expiresAt: created + 12 * 60,
+      );
+
+      final midFade = now.add(const Duration(minutes: 11));
+      expect(message.opacityAt(midFade), closeTo(0.5, 0.05));
+      expect(
+        message.opacityAt(now.add(const Duration(minutes: 12))),
+        0,
+      );
+    });
+  });
 }

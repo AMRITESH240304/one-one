@@ -9,7 +9,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:livekit_noise_filter/livekit_noise_filter.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -17,8 +16,12 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../../app/accent_theme.dart';
 import '../../../app/startup_performance.dart';
 import '../../../core/firebase/app_database.dart';
+import '../../../core/firebase/app_telemetry.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/firebase/firebase_analytics_service.dart';
+import '../../../core/logging/livekit_lifecycle_logger.dart';
+import '../../../core/logging/log_level.dart';
+import '../../../core/logging/log_manager.dart';
 import '../../../core/network/api_client.dart';
 import '../../chat/data/chat_message_repository.dart';
 import '../../chat/models/group_chat_message.dart';
@@ -32,13 +35,16 @@ import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
 import '../../groups/ui/group_management_screen.dart';
 import '../../online/data/online_repository.dart';
+import '../../online/livekit_connection_warmer.dart';
 import '../../online/livekit_status.dart';
 import '../../online/models/member_availability.dart';
 import '../../online/models/online_session.dart';
 import '../../online/presence_config.dart';
+import '../../online/solo_participant_guard.dart';
 import '../../online/voice_pip_bridge.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../../nudges/data/nudge_repository.dart';
+import '../../nudges/nudge_status_memory.dart';
 import '../../nudges/ui/nudge_screen.dart';
 import '../../talk/data/talk_repository.dart';
 import '../../talk/models/emoji_burst.dart';
@@ -47,11 +53,30 @@ import '../../talk/talk_feedback.dart';
 import '../../talk/ui/emoji_burst_overlay.dart';
 import '../data/identity_home_bootstrap.dart';
 import '../data/identity_repository.dart';
+import '../data/last_active_group_store.dart';
 import '../models/identity_session.dart';
 import 'group_action_screen.dart';
 import 'no_groups_screen.dart';
 import 'profile_avatar.dart';
 import 'settings_screen.dart';
+
+// [DEBUG] Go-live latency tracing helpers added Aug 12. Remove before
+// production release. Logs a numbered start/end pair for each major step of
+// the receiver's go-live flow (nudge accept -> LiveKit connected) so the
+// ~3-4s/~6-7s latency can be attributed to a specific step from device logs.
+int _goLiveStepStart(int step, String description) {
+  final timestamp = DateTime.now().millisecondsSinceEpoch;
+  debugPrint('[GO-LIVE STEP $step START] $description — timestamp: $timestamp');
+  return timestamp;
+}
+
+void _goLiveStepEnd(int step, String description, int startedAtMs) {
+  final timestamp = DateTime.now().millisecondsSinceEpoch;
+  final elapsed = timestamp - startedAtMs;
+  debugPrint(
+    '[GO-LIVE STEP $step END] $description — timestamp: $timestamp | elapsed: ${elapsed}ms',
+  );
+}
 
 class IdentityHomeScreen extends StatefulWidget {
   const IdentityHomeScreen({
@@ -108,6 +133,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Set<String>? _pendingUserGroupIds;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   StreamSubscription<void>? _nudgeActionSubscription;
+  StreamSubscription<String>? _nudgeReceivedSubscription;
   StreamSubscription<void>? _registrationRenewalSubscription;
   StreamSubscription<void>? _inviteLinkSubscription;
   StreamSubscription<VoicePipAction>? _voicePipActionSubscription;
@@ -116,8 +142,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   TalkSession? _talkSession;
   Room? _room;
   EventsListener<RoomEvent>? _roomListener;
+  SoloParticipantGuard? _soloGuard;
   Timer? _heartbeatTimer;
   List<EmojiBurst> _emojiBursts = const [];
+
+  // True when the current online session was entered by accepting (or
+  // connecting to) a nudge. Used to explain *why* a single-user-in-room bug
+  // occurred when the solo-participant timeout later fires.
+  bool _enteredViaNudge = false;
 
   // Automatic-offline-on-disconnect (with grace period) bookkeeping. See
   // _evaluatePeerPresenceForAutoOffline for the state machine.
@@ -136,6 +168,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Timer? _usagePersistTimer; // Flushes accumulated seconds to RTDB every 30 s.
 
   int _carouselIndex = 0;
+
+  // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+  // release. Tracks the timestamp LiveKit last finished connecting, and
+  // whether the first post-connect subscribe/audio events have already been
+  // logged, so those steps are only logged once per go-live (not on every
+  // later speaker change).
+  int? _goLiveConnectResolvedAtMs;
+  bool _goLiveFirstSubscribeLogged = false;
+  bool _goLiveFirstAudioLogged = false;
 
   bool _loadingGroups = true;
   bool _busy = false;
@@ -188,6 +229,18 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     ) {
       unawaited(_takePendingNudgeAction());
     });
+    _nudgeReceivedSubscription = AndroidVoiceNudgeBridge.receivedSignals.listen(
+      (groupId) {
+        LogManager.log(
+          LogLevel.info,
+          'NudgeService',
+          'FCM trigger received on Dart bridge groupId=$groupId',
+          userId: _session.userId,
+          groupId: groupId,
+        );
+        unawaited(_onNudgeReceived(groupId));
+      },
+    );
     _registrationRenewalSubscription = AndroidVoiceNudgeBridge
         .registrationSignals
         .listen((_) {
@@ -221,6 +274,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   void _applyBootstrap(IdentityHomeBootstrap bootstrap) {
     _groups = bootstrap.groups;
     _selectedGroup = bootstrap.selectedGroup;
+    LogManager.setIdentity(
+      userId: _session.userId,
+      groupId: bootstrap.selectedGroup?.groupId,
+    );
     _members = bootstrap.members;
     _membersByGroupId = bootstrap.membersByGroupId;
     _carouselIndex = bootstrap.carouselIndex;
@@ -234,6 +291,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     final selected = _selectedGroup;
     if (selected != null) {
+      unawaited(AppTelemetry.setActiveGroup(selected.groupId));
       _listenToMembers(selected.groupId);
       _listenToAvailability(selected.groupId);
       _listenToChatMessages(selected.groupId);
@@ -260,6 +318,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _memberProfileSubscriptions.clear();
     _connectivitySubscription?.cancel();
     _nudgeActionSubscription?.cancel();
+    _nudgeReceivedSubscription?.cancel();
     _registrationRenewalSubscription?.cancel();
     _inviteLinkSubscription?.cancel();
     _voicePipActionSubscription?.cancel();
@@ -598,6 +657,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Future<void> _takePendingNudgeAction() async {
     if (_nudgeActionInFlight) return;
     NudgeNotificationAction? action;
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release.
+    final step1StartedAt = _goLiveStepStart(
+      1,
+      'Nudge accepted by receiver (user action) — taking pending action from native bridge',
+    );
     try {
       action =
           _deferredNudgeAction ??
@@ -607,6 +672,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _deferredNudgeAction = action;
         return;
       }
+      _goLiveStepEnd(
+        1,
+        'Nudge accepted by receiver (user action) — action=${action.action} '
+        'eventId=${action.eventId} groupId=${action.groupId}',
+        step1StartedAt,
+      );
       _deferredNudgeAction = null;
       _nudgeActionInFlight = true;
       await _processNudgeAction(action);
@@ -620,7 +691,38 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
   }
 
+  /// Fired when this device receives a nudge (FCM arrived / playback starting),
+  /// before the user has tapped accept. Prefetches + warms the LiveKit
+  /// connection so the accept -> connected path skips the token round-trip and
+  /// the WebRTC/DNS/TLS warm-up.
+  Future<void> _onNudgeReceived(String groupId) async {
+    final group = _groups
+        .where((candidate) => candidate.groupId == groupId)
+        .firstOrNull;
+    if (group == null) return;
+    await _prefetchLiveKit(group: group);
+  }
+
+  /// Prefetches a LiveKit token and warms the local [Room]/DNS/TLS without
+  /// connecting. Best-effort: any failure here is ignored because the real
+  /// go-online path still performs a synchronous fallback.
+  Future<void> _prefetchLiveKit({required GroupSummary group}) async {
+    final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    await LiveKitConnectionWarmer.instance.prefetch(
+      repository: _onlineRepository,
+      identity: _session,
+      group: group,
+      speakerOn: speakerOn,
+    );
+  }
+
   Future<void> _processNudgeAction(NudgeNotificationAction action) async {
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release.
+    final step2StartedAt = _goLiveStepStart(
+      2,
+      'FCM/notification payload parsed — resolving target group locally',
+    );
     final index = _groups.indexWhere(
       (group) => group.groupId == action.groupId,
     );
@@ -628,6 +730,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() => _message = 'That nudge group is no longer available.');
       return;
     }
+    _goLiveStepEnd(
+      2,
+      'FCM/notification payload parsed — resolved groupId=${action.groupId} at carouselIndex=$index',
+      step2StartedAt,
+    );
 
     await _onGroupCarouselChanged(index);
     if (!mounted) return;
@@ -642,6 +749,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (!_isOnline) {
       throw StateError('Could not enter the nudge group.');
     }
+    // Entered (or is entering) via nudge — remember so a later
+    // single-user-in-room bug report can explain how it occurred.
+    _enteredViaNudge = true;
+    // The receiver accepted the nudge (or this device accepted one) — the
+    // last sent nudge is no longer the active pending state.
+    NudgeStatusMemory.instance.clear(action.groupId);
     if (action.action != 'accept') return;
     await _nudgeRepository.respond(
       groupId: action.groupId,
@@ -676,8 +789,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _listenToMemberProfiles(members);
   }
 
-  /// Friends' `/users/{id}` nodes are own-uid-only under RTDB rules; avatars
-  /// come from the group members API. This just clears any leftover subs.
+  /// Profile photos are loaded with members via RTDB. This just clears any
+  /// leftover per-user profile subscriptions from earlier builds.
   void _listenToMemberProfiles(List<GroupMemberSummary> members) {
     for (final sub in _memberProfileSubscriptions) {
       unawaited(sub.cancel());
@@ -775,6 +888,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// snapshot never shows more than the rolling window.
   void _listenToChatMessages(String groupId) {
     unawaited(_chatMessagesSubscription?.cancel());
+    unawaited(_clearChatPile(groupId));
     _chatMessagesSubscription = _chatMessageRepository
         .groupMessagesRef(groupId)
         .limitToLast(ChatMessageRepository.visibleLimit)
@@ -805,6 +919,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                   )
                 : messages;
             setState(() => _chatMessages = window);
+            unawaited(_clearChatPile(groupId));
           },
           onError: (Object error, StackTrace stackTrace) {
             // Don't leave the feed stuck empty after a transient deny/blip —
@@ -933,6 +1048,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _chatFeedOpacity = 1;
       _chatOnlineClearInFlight = false;
     });
+  }
+
+  Future<void> _clearChatPile(String groupId) async {
+    unawaited(
+      _chatMessageRepository.clearUnreadPile(
+        groupId: groupId,
+        userId: _session.userId,
+      ),
+    );
+    await _nudgeActionBridge.clearChatPile(groupId);
   }
 
   void _dismissExpiredChatMessage(String messageId) {
@@ -1282,6 +1407,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _prevAnyMemberOnline = null;
       _chatOnlineClearInFlight = false;
     });
+    unawaited(LastActiveGroupStore.write(_session.userId, group.groupId));
+    unawaited(AppTelemetry.setActiveGroup(group.groupId));
     if (cachedMembers == null) {
       await _loadMembers(group.groupId);
     }
@@ -1385,7 +1512,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 ),
                 SizedBox(height: 8.h),
                 Text(
-                  'Share this link. Your friend will open One One and join this group automatically.',
+                  'Share this link. Your friend will open Duo and join this group automatically.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Colors.white70, fontSize: 14.sp),
                 ),
@@ -1516,6 +1643,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _goOnline() async {
+    // Going online resets the nudge-origin marker; the nudge path re-asserts
+    // it after a successful connect so manual joins are never mislabeled.
+    _enteredViaNudge = false;
     final group = _selectedGroup;
     if (group == null) {
       setState(() => _message = 'Create or join a group first.');
@@ -1576,13 +1706,21 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         : MemberAvailability.walkieTalkieMode;
 
     OnlineSession? createdSession;
+    final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    final preparedToken = LiveKitConnectionWarmer.instance.takeToken(
+      group.groupId,
+    );
+    final preparedRoom = LiveKitConnectionWarmer.instance.takeWarmRoom(
+      speakerOn: speakerOn,
+    );
     try {
       createdSession = await _onlineRepository.goOnline(
         identity: _session,
         group: group,
         connectionMode: startingConnectionMode,
+        preparedToken: preparedToken,
       );
-      await _connectLiveKit(createdSession);
+      await _connectLiveKit(createdSession, preparedRoom: preparedRoom);
       if (startInCallMode) {
         await _setMicrophoneEnabled(true);
       }
@@ -1632,13 +1770,24 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       );
     } catch (error, stack) {
       unawaited(
-        CrashlyticsService.recordError(
-          error,
-          stack,
-          reason: 'livekit_go_online_failed',
-          feature: 'presence',
+        CrashlyticsService.recordNudgeFailure(
+          error: error,
+          stack: stack,
+          failureReason: NudgeFailureReason.livekitSessionFailed,
+          receiverId: _session.userId,
+          groupId: group.groupId,
+          livekitRoomState: _room?.connectionState.toString(),
+          extras: {
+            'feature': 'presence',
+            'connection_mode': startingConnectionMode,
+          },
         ),
       );
+      // If a warm room was taken but connect never claimed it (e.g. the
+      // permission check threw before connect), release it now.
+      if (preparedRoom != null && _room != preparedRoom) {
+        unawaited(preparedRoom.dispose());
+      }
       await _disconnectLiveKit();
       if (createdSession != null) {
         try {
@@ -1709,6 +1858,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         unawaited(_persistDailyUsage(groupId));
       }
       _peerWasLiveWithMe = false;
+      _enteredViaNudge = false;
       await _disconnectLiveKit();
       await _onlineRepository.goAway(session, reason: reason);
       unawaited(
@@ -1907,6 +2057,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _cancelCallModeTimeout();
       }
       _syncPipSessionState();
+      // A mode change (call ↔ walkie-talkie) is a LiveKit state signal; give
+      // the solo-participant countdown a fresh start off the latest state.
+      _soloGuard?.refreshCountdown();
       unawaited(
         AnalyticsService.logConnectionModeChanged(
           groupId: session.groupId,
@@ -1954,6 +2107,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() => _connectionMode = MemberAvailability.walkieTalkieMode);
       _cancelCallModeTimeout();
       _syncPipSessionState();
+      // Auto-exiting call mode flips the mic off (a LiveKit state signal).
+      // Re-base the solo-participant countdown for any remaining participant.
+      _soloGuard?.refreshCountdown();
       _showCallModeTimeoutSnackbar();
     } catch (_) {
       // Best-effort; leave local state as-is if the write fails so the user
@@ -2013,36 +2169,108 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
   }
 
-  Future<void> _connectLiveKit(OnlineSession session) async {
+  Future<void> _connectLiveKit(
+    OnlineSession session, {
+    Room? preparedRoom,
+  }) async {
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release. Reset once per connect attempt so the post-connect subscribe
+    // and first-audio steps below are only logged for THIS go-live.
+    _goLiveConnectResolvedAtMs = null;
+    _goLiveFirstSubscribeLogged = false;
+    _goLiveFirstAudioLogged = false;
+    final step3StartedAt = _goLiveStepStart(
+      3,
+      'LiveKit room initialization started',
+    );
+
     await _disconnectLiveKit();
     final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
-    // B9: Attach Krisp noise filter via capture options so it applies when
-    // the local mic track is created (walkie-talkie and call mode).
-    final noiseFilter = LiveKitNoiseFilter();
-    final room = Room(
-      roomOptions: RoomOptions(
-        adaptiveStream: false,
-        dynacast: false,
-        defaultAudioOutputOptions: AudioOutputOptions(speakerOn: speakerOn),
-        defaultAudioCaptureOptions: AudioCaptureOptions(processor: noiseFilter),
-      ),
-    );
+
+    // Reuse a pre-warmed Room (noise filter + audio route already built)
+    // when available; otherwise build one now. Neither path connects here —
+    // connect() happens below.
+    final Room room;
+    if (preparedRoom != null) {
+      room = preparedRoom;
+    } else {
+      // B9: Attach Krisp noise filter via capture options so it applies when
+      // the local mic track is created (walkie-talkie and call mode).
+      final noiseFilter = LiveKitNoiseFilter();
+      room = Room(
+        roomOptions: RoomOptions(
+          adaptiveStream: false,
+          dynacast: false,
+          defaultAudioOutputOptions: AudioOutputOptions(speakerOn: speakerOn),
+          defaultAudioCaptureOptions: AudioCaptureOptions(processor: noiseFilter),
+        ),
+      );
+    }
 
     _room = room;
     _attachRoomListener(room);
+    _soloGuard = SoloParticipantGuard(
+      userId: session.userId,
+      groupId: session.groupId,
+      onSoloTimeout: _handleSoloTimeout,
+    )..attach(room);
 
     setState(() {
       _state = 'connecting';
       _message = LiveKitStatus.connecting;
     });
+    _goLiveStepEnd(3, 'LiveKit room initialization started', step3StartedAt);
 
-    await room
-        .connect(
-          session.livekitServerUrl,
-          session.livekitToken,
-          connectOptions: const ConnectOptions(autoSubscribe: true),
-        )
-        .timeout(const Duration(seconds: 20));
+    final step4StartedAt = _goLiveStepStart(4, 'LiveKit room.connect() called');
+    LogManager.log(
+      LogLevel.info,
+      'LiveKitManager',
+      'Room connect attempt url=${session.livekitServerUrl} '
+      'room=${session.livekitRoomName}',
+      userId: session.userId,
+      groupId: session.groupId,
+    );
+    try {
+      await room
+          .connect(
+            session.livekitServerUrl,
+            session.livekitToken,
+            connectOptions: const ConnectOptions(autoSubscribe: true),
+          )
+          .timeout(const Duration(seconds: 20));
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordNudgeFailure(
+          error: error,
+          stack: stack,
+          failureReason: NudgeFailureReason.livekitSessionFailed,
+          receiverId: session.userId,
+          groupId: session.groupId,
+          livekitRoomState: room.connectionState.toString(),
+          extras: {'checkpoint': 'room.connect'},
+        ),
+      );
+      rethrow;
+    }
+    _goLiveConnectResolvedAtMs = DateTime.now().millisecondsSinceEpoch;
+    _goLiveStepEnd(
+      4,
+      'LiveKit room.connect() resolved (connected)',
+      step4StartedAt,
+    );
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release. Steps 6/7 are timed from this same moment (connect resolved)
+    // since that's the natural "waiting for the sender" starting point; their
+    // END markers are logged from the room event listener below once the
+    // corresponding event actually fires for the first time.
+    _goLiveStepStart(
+      6,
+      'Remote participant (sender) detected / subscribed — waiting for autoSubscribe',
+    );
+    _goLiveStepStart(
+      7,
+      'Audio track from sender is playing — waiting for first remote speaker',
+    );
 
     try {
       await room.setSpeakerOn(speakerOn);
@@ -2071,9 +2299,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     debugPrint('[LiveKit] Noise filter applied to local audio track.');
 
+    // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
+    // release.
+    final step5StartedAt = _goLiveStepStart(
+      5,
+      'Local tracks (mic) published — initializing local mic track',
+    );
     await localParticipant
         .setMicrophoneEnabled(false)
         .timeout(const Duration(seconds: 8));
+    _goLiveStepEnd(
+      5,
+      'Local tracks (mic) published — local mic track initialized (walkie mode starts muted)',
+      step5StartedAt,
+    );
   }
 
   Future<void> _applyPreferredAudioRoute() async {
@@ -2184,7 +2423,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   void _attachRoomListener(Room room) {
-    _roomListener = room.createListener()
+    _roomListener = attachLiveKitLifecycleLogs(
+      room.createListener(),
+      userId: _session.userId,
+      groupId: _selectedGroup?.groupId ?? _onlineSession?.groupId,
+    )
       ..on<RoomConnectedEvent>((_) {
         _syncConnectionQualities(room);
         _setMessage(LiveKitStatus.connected);
@@ -2227,8 +2470,24 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           event.connectionQuality,
         );
       })
-      ..on<TrackSubscribedEvent>((_) {
+      ..on<TrackSubscribedEvent>((event) {
         // Subscription is an implementation detail — keep UI status clean.
+        // [DEBUG] Go-live latency tracing added Aug 12. Remove before
+        // production release. Only log the FIRST subscribed remote audio
+        // track per go-live, measured from when room.connect() resolved.
+        if (!_goLiveFirstSubscribeLogged &&
+            event.publication.kind == TrackType.AUDIO) {
+          _goLiveFirstSubscribeLogged = true;
+          final startedAt = _goLiveConnectResolvedAtMs;
+          if (startedAt != null) {
+            _goLiveStepEnd(
+              6,
+              'Remote participant (sender) detected / subscribed — '
+              'identity=${event.participant.identity}',
+              startedAt,
+            );
+          }
+        }
       })
       ..on<ActiveSpeakersChangedEvent>((event) {
         final previousRemoteSpeakers = _speakingUserIds.where(
@@ -2246,6 +2505,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             .where((id) => id != _session.userId)
             .any((id) => !previousRemoteSpeakers.contains(id));
         final hasRemoteSpeaker = speaking.any((id) => id != _session.userId);
+        // [DEBUG] Go-live latency tracing added Aug 12. Remove before
+        // production release. Only log the FIRST remote-speaking moment per
+        // go-live, measured from when room.connect() resolved.
+        if (!_goLiveFirstAudioLogged && hasRemoteSpeaker) {
+          _goLiveFirstAudioLogged = true;
+          final startedAt = _goLiveConnectResolvedAtMs;
+          if (startedAt != null) {
+            _goLiveStepEnd(
+              7,
+              'Audio track from sender is playing — first remote speaker detected',
+              startedAt,
+            );
+          }
+        }
         if (hasRemoteSpeaker || speaking.contains(_session.userId)) {
           _recordVoiceActivity();
         }
@@ -2354,6 +2627,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _callModeTimeoutTimer = null;
     _usagePersistTimer?.cancel();
     _usagePersistTimer = null;
+    _enteredViaNudge = false;
     if (mounted) {
       setState(() {
         _onlineSession = null;
@@ -2394,11 +2668,42 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (mounted) _showPresenceSnackbar(message);
   }
 
+  /// Fired by [SoloParticipantGuard] after the local user has remained the
+  /// sole connected participant for [PresenceConfig.soloParticipantTimeout].
+  /// Reports the invalid state as a non-fatal bug (with on-device logs) and
+  /// takes the user offline so they never sit alone online indefinitely.
+  Future<void> _handleSoloTimeout(SoloSessionContext context) async {
+    final session = _onlineSession;
+    if (session == null || !mounted) return;
+
+    unawaited(
+      CrashlyticsService.recordSoloParticipant(
+        userId: _session.userId,
+        groupId: session.groupId,
+        roomName: context.roomName,
+        livekitConnectionState: context.connectionState,
+        remoteParticipantCount: context.remoteParticipantCount,
+        remoteCountAtConnect: context.remoteCountAtConnect,
+        remoteCountAtSoloStart: context.remoteCountAtSoloStart,
+        soloDurationSeconds: context.soloDuration.inSeconds,
+        entryReason: _enteredViaNudge ? 'nudge_accept' : 'manual_join',
+        connectionMode: _connectionMode,
+      ),
+    );
+
+    await _goAway(reason: 'solo_timeout');
+    _showPresenceSnackbar(
+      'You were the only one left online, so the room closed automatically.',
+    );
+  }
+
   Future<void> _disconnectLiveKit() async {
     final room = _room;
     _room = null;
     _roomListener?.dispose();
     _roomListener = null;
+    _soloGuard?.detach();
+    _soloGuard = null;
     _speakingUserIds = const {};
     _clearConnectionQualities();
 
@@ -2476,15 +2781,25 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     });
   }
 
-  Future<bool> _openGroupManagement() async {
-    final group = _selectedGroup;
-    if (group == null) return false;
+  List<GroupSummary> get _ownedGroups => _groups
+      .where((group) => group.ownerUserId == _session.userId)
+      .toList(growable: false);
+
+  Future<bool> _openGroupManagement(GroupSummary group) async {
+    // Only group creators can manage; ignore anything that slipped past UI.
+    if (group.ownerUserId != _session.userId) return false;
+
+    final initialMembers = group.groupId == _selectedGroup?.groupId
+        ? _members
+        : await _groupRepository.loadGroupMembers(group.groupId);
+    if (!mounted) return false;
+
     final outcome = await Navigator.of(context).push<GroupManagementOutcome>(
       MaterialPageRoute<GroupManagementOutcome>(
         builder: (_) => GroupManagementScreen(
           group: group,
           currentUserId: _session.userId,
-          initialMembers: _members,
+          initialMembers: initialMembers,
           onInvite: () => _createInviteForGroup(group),
         ),
       ),
@@ -2494,7 +2809,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     await _endRevokedVoiceSession(group.groupId);
     if (!mounted) return true;
     await _loadGroups();
-    if (mounted && _groups.isNotEmpty) {
+    if (mounted) {
       setState(() {
         _message = outcome == GroupManagementOutcome.groupDeleted
             ? '${group.name} was deleted.'
@@ -2505,14 +2820,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   void _openSettings() {
-    final group = _selectedGroup;
+    final ownedGroups = _ownedGroups;
     unawaited(
       SettingsScreen.open(
         context,
         session: _session,
         identityRepository: widget.identityRepository,
-        groupName: group?.name,
-        onManageGroup: group == null ? null : _openGroupManagement,
+        manageableGroups: ownedGroups,
+        onManageGroup:
+            ownedGroups.isEmpty ? null : _openGroupManagement,
       ),
     );
   }
@@ -2523,6 +2839,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (_session.settings.hapticsEnabled) {
       unawaited(HapticFeedback.selectionClick());
     }
+    // Sender-side warm: prefetch this device's LiveKit token now so that if
+    // the nudge is accepted and both sides go online, joining is instant.
+    unawaited(_prefetchLiveKit(group: group));
     final onlineUserIds = <String>{
       for (final entry in _availability.entries)
         if (entry.value.isLive || entry.value.isInVoiceSession) entry.key,
@@ -2749,6 +3068,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (_inPictureInPicture || MediaQuery.sizeOf(context).height < 480) {
       final member = _pictureInPictureMember;
       return _VoicePictureInPictureView(
+        key: ValueKey(member.userId),
         member: member,
         speaking:
             _speakingUserIds.contains(member.userId) ||
@@ -2874,11 +3194,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                         // Middle band: ephemeral bubbles sit here (own=right,
                         // others=left). Empty Expanded keeps layout stable so
                         // the feed doesn't jump the carousel when it appears.
+                        // Align to bottom so bubbles sit lower (near the status
+                        // hint) instead of floating mid-screen.
                         Expanded(
                           child: Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 16.w),
+                            padding: EdgeInsets.fromLTRB(16.w, 0, 16.w, 14.h),
                             child: Align(
-                              alignment: Alignment.center,
+                              alignment: Alignment.bottomCenter,
                               child: SingleChildScrollView(
                                 reverse: true,
                                 physics: const ClampingScrollPhysics(),
@@ -3001,6 +3323,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
 class _VoicePictureInPictureView extends StatelessWidget {
   const _VoicePictureInPictureView({
+    super.key,
     required this.member,
     required this.speaking,
     required this.talking,
@@ -3194,6 +3517,9 @@ class _BackdropMemberCollage extends StatelessWidget {
         ? '?'
         : member.displayName.trim().substring(0, 1).toUpperCase();
     return ProfileImage(
+      // Keyed by user ID so switching groups/members never reuses another
+      // user's ProfileImage state (and its sticky-photo cache) by position.
+      key: ValueKey(member.userId),
       profilePhotoUrl: member.profilePhotoUrl,
       profilePhotoBase64: member.profilePhotoBase64,
       avatarAsset: member.avatarAsset,
@@ -3375,21 +3701,21 @@ class _StatusToggle extends StatelessWidget {
             ? 'Tap to go away'
             : 'Go online when someone is already live, or send a nudge to go together',
         child: SizedBox(
-          width: 72.w,
-          height: 48,
+          width: 66.w,
+          height: 40,
           child: Material(
             color: Colors.transparent,
             child: InkWell(
               onTap: busy || !enabled ? null : onToggle,
-              borderRadius: BorderRadius.circular(24),
+              borderRadius: BorderRadius.circular(20),
               child: Center(
                 child: Container(
                   width: double.infinity,
-                  height: 30.h,
+                  height: 24.h,
                   padding: EdgeInsets.all(2.w),
                   decoration: BoxDecoration(
                     color: const Color.fromRGBO(255, 255, 255, 0.12),
-                    borderRadius: BorderRadius.circular(18.r),
+                    borderRadius: BorderRadius.circular(14.r),
                     border: Border.all(
                       color: const Color.fromRGBO(255, 255, 255, 0.22),
                     ),
@@ -3403,13 +3729,13 @@ class _StatusToggle extends StatelessWidget {
                             ? Alignment.centerRight
                             : Alignment.centerLeft,
                         child: Container(
-                          width: 34.w,
+                          width: 30.w,
                           height: double.infinity,
                           decoration: BoxDecoration(
                             color: online
                                 ? const Color(0xff7CFF6B)
                                 : Colors.white,
-                            borderRadius: BorderRadius.circular(14.r),
+                            borderRadius: BorderRadius.circular(11.r),
                           ),
                         ),
                       ),
@@ -3418,24 +3744,24 @@ class _StatusToggle extends StatelessWidget {
                           Expanded(
                             child: Center(
                               // Matches the profile-picture away moon badge
-                              // (Icons.dark_mode_rounded @ ~9.sp).
+                              // (Icons.dark_mode_rounded @ ~13.sp).
                               child: Icon(
                                 Icons.dark_mode_rounded,
                                 color: online
                                     ? Colors.white54
                                     : const Color(0xff2a2a2a),
-                                size: 9.sp,
+                                size: 13.sp,
                               ),
                             ),
                           ),
                           Expanded(
                             child: Center(
                               child: busy
-                                  ? Text('…', style: TextStyle(fontSize: 11.sp))
+                                  ? Text('…', style: TextStyle(fontSize: 10.sp))
                                   : online
                                   ? Text(
                                       '🟢',
-                                      style: TextStyle(fontSize: 11.sp),
+                                      style: TextStyle(fontSize: 10.sp),
                                     )
                                   : const SizedBox.shrink(),
                             ),
@@ -3546,6 +3872,7 @@ class _FriendsStrip extends StatelessWidget {
             children: [
               for (final friend in friends) ...[
                 _FriendChip(
+                  key: ValueKey(friend.userId),
                   name: friend.displayName,
                   profilePhotoUrl: friend.profilePhotoUrl,
                   profilePhotoBase64: friend.profilePhotoBase64,
@@ -3572,6 +3899,7 @@ class _FriendsStrip extends StatelessWidget {
 
 class _FriendChip extends StatelessWidget {
   const _FriendChip({
+    super.key,
     required this.name,
     required this.profilePhotoUrl,
     required this.profilePhotoBase64,
@@ -3647,8 +3975,7 @@ class _FriendChip extends StatelessWidget {
                 right: -4,
                 bottom: -2,
                 // Away state uses a Material "dark mode" glyph inside a
-                // small circular badge (subtle shadow) instead of the old
-                // 🌙 emoji, sized down noticeably from the previous glyph.
+                // circular badge (subtle shadow) instead of the old 🌙 emoji.
                 // NOTE: no HTML/CSS reference file was available in this
                 // session, so colors are mapped to existing app tokens
                 // (avatar-chip background + white70 icon) rather than the
@@ -3657,8 +3984,8 @@ class _FriendChip extends StatelessWidget {
                 child: live
                     ? Text('🟢', style: TextStyle(fontSize: 14.sp))
                     : Container(
-                        width: 15.w,
-                        height: 15.w,
+                        width: 20.w,
+                        height: 20.w,
                         alignment: Alignment.center,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
@@ -3674,7 +4001,7 @@ class _FriendChip extends StatelessWidget {
                         child: Icon(
                           Icons.dark_mode_rounded,
                           color: Colors.white70,
-                          size: 9.sp,
+                          size: 13.sp,
                         ),
                       ),
               ),
@@ -4854,7 +5181,7 @@ class _SleepZAnimationState extends State<_SleepZAnimation>
           scale: scale,
           child: Text(
             'Z',
-            style: GoogleFonts.nunito(
+            style: TextStyle(
               color: Colors.white.withValues(alpha: 0.92),
               fontSize: widget.size * (0.42 + i * 0.1),
               fontWeight: FontWeight.w800,
@@ -4921,6 +5248,9 @@ class _MemberPhotoCollage extends StatelessWidget {
           ? '?'
           : member.displayName.trim().substring(0, 1).toUpperCase();
       return ProfileImage(
+        // Keyed by user ID so switching groups never reuses another user's
+        // ProfileImage state (and its sticky-photo cache) by position.
+        key: ValueKey(member.userId),
         profilePhotoUrl: member.profilePhotoUrl,
         profilePhotoBase64: member.profilePhotoBase64,
         avatarAsset: member.avatarAsset,
