@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -13,7 +14,10 @@ class _StepVisual {
     required this.iconColor,
     required this.icon,
     required this.backgroundAsset,
-    this.boxColor,
+    required this.imageWidth,
+    required this.imageHeight,
+    this.boxTopColor,
+    this.boxBottomColor,
     this.shiftX = 0,
   });
 
@@ -21,10 +25,21 @@ class _StepVisual {
   final IconData icon;
   final String backgroundAsset;
 
-  /// Background color of the image's own artwork. When set, the image is
-  /// wrapped in a box container painted with this exact color so the
-  /// contained illustration blends seamlessly with the frame around it.
-  final Color? boxColor;
+  /// Intrinsic pixel size of the artwork. Used to compute how much of the
+  /// screen the contained image occupies so the gradient stops can be placed
+  /// exactly at the image's top and bottom edges.
+  final double imageWidth;
+  final double imageHeight;
+
+  /// Background color of the artwork at its very top edge. When both top and
+  /// bottom are set, the image is wrapped in a box painted with a vertical
+  /// gradient running from [boxTopColor] to [boxBottomColor], positioned so
+  /// the letterbox bands around the contained illustration blend seamlessly
+  /// with the artwork's own backdrop.
+  final Color? boxTopColor;
+
+  /// Background color of the artwork at its very bottom edge.
+  final Color? boxBottomColor;
 
   /// Horizontal offset (logical px) applied to the image. Used to nudge a
   /// step's artwork right by a fixed amount.
@@ -34,29 +49,39 @@ class _StepVisual {
 /// Icon colors are picked to match the dominant tone of each onboarding
 /// background image so the CTA card feels native to the artwork behind it.
 ///
-/// `boxColor` must match the background color of the artwork exactly. Screens
-/// 1 and 3 (Onboarding1/Onboarding3) use a box container painted with the
-/// image's own backdrop so the illustration doesn't look like it was
-/// over-enlarged to fill the screen.
+/// Screens 1 and 3 (Onboarding1/Onboarding3) wrap their artwork in a box
+/// painted with a vertical gradient that runs between the image's own top and
+/// bottom backdrop colors, so the contained illustration blends into the
+/// letterbox areas without looking over-enlarged to fill the screen.
 const Map<_SetupStep, _StepVisual> _stepVisuals = {
   _SetupStep.mic: _StepVisual(
     iconColor: Color(0xff8fa83e),
     icon: Icons.mic_rounded,
     backgroundAsset: 'assets/Onboarding1.png',
-    // Backdrop of Onboarding1.png is a solid lime green (mode rgb 140,162,77).
-    boxColor: Color(0xff8CA24D),
+    imageWidth: 848,
+    imageHeight: 1264,
+    // Onboarding1's backdrop is lime green at the top (rgb 136,161,80) and a
+    // light green-white at the bottom (rgb 198,208,180).
+    boxTopColor: Color(0xff88A150),
+    boxBottomColor: Color(0xffC6D0B4),
   ),
   _SetupStep.notification: _StepVisual(
     iconColor: Color(0xff7a4fc9),
     icon: Icons.notifications_rounded,
     backgroundAsset: 'assets/Onboarding3.png',
-    // Backdrop of Onboarding3.png is a solid purple (mode rgb 97,39,123).
-    boxColor: Color(0xff61277B),
+    imageWidth: 712,
+    imageHeight: 1264,
+    // Onboarding3's backdrop is purple at the top (rgb 93,39,120) and bottom
+    // (rgb 96,40,123).
+    boxTopColor: Color(0xff5D2778),
+    boxBottomColor: Color(0xff60287B),
   ),
   _SetupStep.background: _StepVisual(
     iconColor: Color(0xffdb8a1e),
     icon: Icons.battery_saver_rounded,
     backgroundAsset: 'assets/Onboarding2.png',
+    imageWidth: 816,
+    imageHeight: 1287,
     // Shift Onboarding2's artwork 20 logical px to the right. No box.
     shiftX: 20,
   ),
@@ -215,18 +240,21 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
 
   /// Renders the step's artwork.
   ///
-  /// Screens with a [boxColor] (Onboarding1/Onboarding3) are wrapped in a box
-  /// container painted with the image's own backdrop color and fitted with
-  /// `BoxFit.contain`, so the illustration is never enlarged to cover the
-  /// full screen — the matching background blends the letterbox areas in.
-  /// Screens without one keep the full-bleed `BoxFit.cover` and only apply a
-  /// horizontal [shiftX] offset.
+  /// Screens with a [boxTopColor]/[boxBottomColor] pair (Onboarding1/3) wrap
+  /// their artwork in a box painted with a vertical gradient between the
+  /// image's own top and bottom backdrop colors, fitted with `BoxFit.contain`.
+  /// The gradient stops are placed exactly at the contained image's top and
+  /// bottom edges, so the letterbox bands blend into the illustration instead
+  /// of showing a flat color that fails to match the artwork. Screens without
+  /// a box keep the full-bleed `BoxFit.cover` and only apply a horizontal
+  /// [shiftX] offset.
   Widget _buildStepBackground(_StepVisual visual) {
-    final boxColor = visual.boxColor;
+    final hasBox =
+        visual.boxTopColor != null && visual.boxBottomColor != null;
     Widget image = Image.asset(
       visual.backgroundAsset,
       key: ValueKey(visual.backgroundAsset),
-      fit: boxColor != null ? BoxFit.contain : BoxFit.cover,
+      fit: hasBox ? BoxFit.contain : BoxFit.cover,
       width: double.infinity,
       height: double.infinity,
       alignment: Alignment.center,
@@ -237,12 +265,35 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
         child: image,
       );
     }
-    if (boxColor != null) {
-      image = Container(
-        color: boxColor,
-        width: double.infinity,
-        height: double.infinity,
-        child: image,
+    if (hasBox) {
+      image = LayoutBuilder(
+        builder: (context, constraints) {
+          final scale = math.min(
+            constraints.maxWidth / visual.imageWidth,
+            constraints.maxHeight / visual.imageHeight,
+          );
+          final displayedHeight = visual.imageHeight * scale;
+          final topBand = (constraints.maxHeight - displayedHeight) / 2;
+          return Container(
+            width: double.infinity,
+            height: double.infinity,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  visual.boxTopColor!,
+                  visual.boxBottomColor!,
+                ],
+                stops: [
+                  topBand / constraints.maxHeight,
+                  (topBand + displayedHeight) / constraints.maxHeight,
+                ],
+              ),
+            ),
+            child: image,
+          );
+        },
       );
     }
     // The AnimatedSwitcher needs a stable, unique key on the widget it
