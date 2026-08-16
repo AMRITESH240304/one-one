@@ -18,6 +18,7 @@ import '../../../core/firebase/app_telemetry.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/firebase/firebase_analytics_service.dart';
 import '../../../core/logging/log_manager.dart';
+import '../../../core/network/api_client.dart';
 import '../../../core/storage/profile_photo_storage.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../models/app_user_profile.dart';
@@ -33,10 +34,12 @@ class IdentityRepository {
     FirebaseDatabase? database,
     DeviceIdentityStore? deviceIdentityStore,
     ProfilePhotoStorage? profilePhotoStorage,
+    ApiClient? apiClient,
   }) : _auth = auth ?? FirebaseAuth.instance,
        _database = database ?? AppDatabase.instance(),
        _deviceIdentityStore = deviceIdentityStore ?? DeviceIdentityStore(),
-       _profilePhotoStorage = profilePhotoStorage ?? ProfilePhotoStorage();
+       _profilePhotoStorage = profilePhotoStorage ?? ProfilePhotoStorage(),
+       _apiClient = apiClient ?? ApiClient();
 
   static const Duration _requiredStartupTimeout = Duration(seconds: 3);
   static const Duration _optionalStartupTimeout = Duration(seconds: 4);
@@ -45,6 +48,7 @@ class IdentityRepository {
   final FirebaseDatabase _database;
   final DeviceIdentityStore _deviceIdentityStore;
   final ProfilePhotoStorage _profilePhotoStorage;
+  final ApiClient _apiClient;
   IdentitySession? _cachedSession;
   Future<void>? _identityRefresh;
   final ValueNotifier<IdentitySession?> _sessionNotifier = ValueNotifier(null);
@@ -523,6 +527,25 @@ class IdentityRepository {
 
     final credential = await _googleCredential();
     await user.reauthenticateWithCredential(credential);
+
+    // Purge every per-group row (membership, presence, usage, unread piles,
+    // sessions) via the backend — client security rules forbid deleting
+    // groupMembers/userGroups directly. Without this, deleted users linger as
+    // ghost members in groups they belonged to.
+    try {
+      await _apiClient.deleteJson('/v1/account');
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'account_purge_backend_failed',
+          feature: 'account',
+        ),
+      );
+      // Fall through: still remove the local records and auth user so the
+      // deletion isn't blocked by a transient backend failure.
+    }
 
     await _database.ref().update({
       'users/${user.uid}': null,

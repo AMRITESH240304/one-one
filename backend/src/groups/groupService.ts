@@ -551,6 +551,111 @@ export async function deleteGroup(input: GroupMemberActionInput) {
   }
 }
 
+/**
+ * Fully purges a user's account: every per-group row the user has ever
+ * written (membership, presence, usage, unread piles, sessions, locks, talk
+ * state) plus the user's own records. Runs with admin privileges so it works
+ * regardless of the client-facing security rules, and covers groups created
+ * before the deletion path existed.
+ */
+export async function purgeUserAccount(userId: string) {
+  const db = getRealtimeDatabase();
+
+  const groupIds = new Set<string>();
+  const indexSnap = await db.ref(`userGroups/${userId}`).get();
+  if (isRecord(indexSnap.val())) {
+    for (const groupId of Object.keys(indexSnap.val() as Record<string, unknown>)) {
+      groupIds.add(groupId);
+    }
+  }
+
+  // Sweep groupMembers as an authoritative source too — catches groups whose
+  // inverse index is missing/stale for this legacy account.
+  const membersSnap = await db.ref("groupMembers").get();
+  if (isRecord(membersSnap.val())) {
+    for (const [groupId, rawMembers] of Object.entries(
+      membersSnap.val() as Record<string, unknown>
+    )) {
+      if (isRecord(rawMembers) && rawMembers[userId] != null) {
+        groupIds.add(groupId);
+      }
+    }
+  }
+
+  for (const groupId of groupIds) {
+    const memberRef = db.ref(`groupMembers/${groupId}/${userId}`);
+    const member = await memberRef.get();
+    const role = member.child("role").val()?.toString() ?? "member";
+    const groupSnap = await db.ref(`groups/${groupId}`).get();
+    const ownerUserId = groupSnap.child("ownerUserId").val()?.toString();
+
+    if (ownerUserId === userId || role === "owner") {
+      // The deleted user owns this group — tear the whole group down.
+      try {
+        await deleteGroup({ groupId, userId });
+        continue;
+      } catch (error) {
+        // deleteGroup enforces active-owner guards that may be stale on a
+        // deleted account; fall through to removing just this user's rows.
+        logger.warn(
+          {
+            checkpoint: "ACCOUNT-PURGE-W1",
+            groupId,
+            userId,
+            error: error instanceof Error ? error.message : String(error)
+          },
+          "owned group teardown failed during account purge; removing member rows only"
+        );
+      }
+    }
+
+    // Remove this member from the group but keep the group alive for the
+    // remaining members. cleanupMemberState handles sessions/locks/talk, and
+    // we additionally drop membership, availability, usage, and the unread
+    // pile rows the user owned.
+    const updates: Record<string, unknown> = {
+      [`groupMembers/${groupId}/${userId}`]: null,
+      [`memberAvailability/${groupId}/${userId}`]: null,
+      [`dailyUsage/${groupId}/${userId}`]: null,
+      [`chatUnread/${groupId}/${userId}`]: null,
+      [`userGroups/${userId}/${groupId}`]: null
+    };
+    await db.ref().update(updates);
+    await cleanupMemberState(groupId, userId, "account_deleted");
+  }
+
+  const finalUpdates: Record<string, unknown> = {
+    [`users/${userId}`]: null,
+    [`userDevices/${userId}`]: null,
+    [`userSettings/${userId}`]: null,
+    [`userGroups/${userId}`]: null,
+    [`userGroupIndexVersion/${userId}`]: null
+  };
+
+  // Purge any notification deliveries involving this user (best effort, so a
+  // missing doc never blocks the wipe).
+  const deliveriesSnap = await db.ref("notificationDeliveries").get();
+  if (isRecord(deliveriesSnap.val())) {
+    for (const [eventId, raw] of Object.entries(
+      deliveriesSnap.val() as Record<string, unknown>
+    )) {
+      if (
+        isRecord(raw) &&
+        (raw.senderUserId === userId || raw.recipientUserId === userId)
+      ) {
+        finalUpdates[`notificationDeliveries/${eventId}`] = null;
+      }
+    }
+  }
+
+  await db.ref().update(finalUpdates);
+  logger.info(
+    { checkpoint: "ACCOUNT-PURGE-01", userId, groupsTouched: groupIds.size },
+    "account fully purged"
+  );
+  return { purged: true, groupsTouched: groupIds.size };
+}
+
 export async function requireActiveUser(userId: string) {
   const ref = getRealtimeDatabase().ref(`users/${userId}`);
   const snapshot = await ref.get();
