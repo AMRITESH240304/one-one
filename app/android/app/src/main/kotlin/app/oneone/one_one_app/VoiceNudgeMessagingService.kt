@@ -435,12 +435,11 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         val groupName = message.data["groupName"]?.takeIf { it.isNotBlank() } ?: "your group"
         val serverCount = message.data["unreadCount"]?.toIntOrNull()
         val count = ChatPileStore.resolveCount(this, groupId, serverCount)
-        val title = message.data["title"]?.takeIf { it.isNotBlank() }
-            ?: if (count <= 1) {
-                "💬 New message in $groupName"
-            } else {
-                "💬 $count new messages"
-            }
+        val title = if (count <= 1) {
+            "💬 New message in $groupName"
+        } else {
+            "💬 $count new messages"
+        }
         val body = message.data["body"]?.takeIf { it.isNotBlank() }
             ?: "You can only check the last 5 messages, see them before they fade away"
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager

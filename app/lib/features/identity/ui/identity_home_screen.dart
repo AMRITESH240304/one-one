@@ -182,6 +182,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   bool _loadingGroups = true;
   bool _busy = false;
+  bool _audioOutputBusy = false;
   bool _talkBusy = false;
   bool _talkPressed = false;
   // Per-user connection style for the *local* user's own connection — never
@@ -264,6 +265,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         logStartupMilestone('Home data interactive');
         unawaited(_takePendingNudgeAction());
         unawaited(_takePendingInviteLink());
+        unawaited(_clearOpenedChatPiles());
       });
     } else {
       unawaited(_loadGroups());
@@ -353,10 +355,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       unawaited(_takePendingInviteLink());
       // The user is now actively looking at the app, so any pile that
       // accumulated while backgrounded should be cleared.
-      final selected = _selectedGroup;
-      if (selected != null) {
-        unawaited(_clearChatPile(selected.groupId));
-      }
+      unawaited(_clearOpenedChatPiles());
     }
   }
 
@@ -543,6 +542,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         logStartupMilestone('Home data interactive', stopwatch);
         unawaited(_takePendingNudgeAction());
         unawaited(_takePendingInviteLink());
+        unawaited(_clearOpenedChatPiles());
         final pendingGroupIds = _pendingUserGroupIds;
         _pendingUserGroupIds = null;
         if (pendingGroupIds != null) {
@@ -1059,12 +1059,25 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     });
   }
 
-  Future<void> _clearChatPile(String groupId) async {
+  Future<void> _clearOpenedChatPiles() async {
+    final tappedGroupId = await _nudgeActionBridge.takePendingChatPileOpen();
+    if (tappedGroupId != null && tappedGroupId.isNotEmpty) {
+      unawaited(_clearChatPile(tappedGroupId, force: true));
+    }
+    final selected = _selectedGroup;
+    if (selected != null && selected.groupId != tappedGroupId) {
+      unawaited(_clearChatPile(selected.groupId));
+    }
+  }
+
+  Future<void> _clearChatPile(String groupId, {bool force = false}) async {
     // Only the foreground app clears the pile. The RTDB listener keeps
     // firing in the background, and clearing there would cancel the pile
     // notification and reset the server unread count right after the FCM
     // service posts it — breaking the WhatsApp-style collapse.
-    if (_appLifecycle != AppLifecycleState.resumed) return;
+    // Tapping the notification is an explicit read, so [force] skips the
+    // lifecycle gate and zeros the count immediately.
+    if (!force && _appLifecycle != AppLifecycleState.resumed) return;
     unawaited(
       _chatMessageRepository.clearUnreadPile(
         groupId: groupId,
@@ -2346,6 +2359,58 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
   }
 
+  Future<void> _toggleAudioOutput() async {
+    if (_audioOutputBusy) return;
+    final current =
+        widget
+            .identityRepository
+            .currentSession
+            ?.settings
+            .audioOutputPreference ??
+        _session.settings.audioOutputPreference;
+    final next = current == 'earpiece' ? 'speaker' : 'earpiece';
+    _audioOutputBusy = true;
+    if (_liveHapticsEnabled) {
+      unawaited(HapticFeedback.selectionClick());
+    }
+    setState(() {
+      _session = IdentitySession(
+        user: _session.user,
+        device: _session.device,
+        settings: _session.settings.copyWith(audioOutputPreference: next),
+      );
+    });
+    try {
+      await _room?.setSpeakerOn(next != 'earpiece');
+      await widget.identityRepository.updateSettings(
+        accentColorKey: _session.settings.accentColorKey,
+        hapticsEnabled: _session.settings.hapticsEnabled,
+        audioOutputPreference: next,
+      );
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'audio_output_toggle_failed',
+        ),
+      );
+      if (!mounted) return;
+      setState(() {
+        _session = IdentitySession(
+          user: _session.user,
+          device: _session.device,
+          settings: _session.settings.copyWith(
+            audioOutputPreference: current,
+          ),
+        );
+      });
+      await _applyPreferredAudioRoute();
+    } finally {
+      _audioOutputBusy = false;
+    }
+  }
+
   bool get _liveHapticsEnabled {
     return widget.identityRepository.currentSession?.settings.hapticsEnabled ??
         _session.settings.hapticsEnabled;
@@ -3175,9 +3240,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           online: live,
                           enabled: _serviceReady,
                           onTogglePresence: _togglePresence,
-                          showNetworkStrength: _isOnline,
-                          localConnectionQuality:
-                              _effectiveLocalConnectionQuality,
+                          showAudioOutput: _isOnline,
+                          speakerOn:
+                              _session.settings.audioOutputPreference !=
+                              'earpiece',
+                          onToggleAudioOutput: _toggleAudioOutput,
                         ),
                         SizedBox(height: 8.h),
                         _FriendsStrip(
@@ -3189,6 +3256,25 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                               _remoteConnectionQualityByUserId,
                           onInvite: inviteAction,
                         ),
+                        if (_isOnline &&
+                            (_effectiveLocalConnectionQuality ==
+                                    ConnectionQuality.poor ||
+                                _effectiveLocalConnectionQuality ==
+                                    ConnectionQuality.lost)) ...[
+                          SizedBox(height: 8.h),
+                          Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 24.w),
+                            child: Text(
+                              'Your network connection is a bit low.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: const Color(0xffffb347),
+                                fontSize: 12.sp,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
                         if (_message != null) ...[
                           SizedBox(height: 10.h),
                           Padding(
@@ -3598,8 +3684,9 @@ class _TopChrome extends StatelessWidget {
     required this.online,
     required this.enabled,
     required this.onTogglePresence,
-    required this.showNetworkStrength,
-    required this.localConnectionQuality,
+    required this.showAudioOutput,
+    required this.speakerOn,
+    required this.onToggleAudioOutput,
   });
 
   final VoidCallback onSettings;
@@ -3609,8 +3696,9 @@ class _TopChrome extends StatelessWidget {
   final bool online;
   final bool enabled;
   final VoidCallback onTogglePresence;
-  final bool showNetworkStrength;
-  final ConnectionQuality localConnectionQuality;
+  final bool showAudioOutput;
+  final bool speakerOn;
+  final VoidCallback onToggleAudioOutput;
 
   @override
   Widget build(BuildContext context) {
@@ -3662,11 +3750,47 @@ class _TopChrome extends StatelessWidget {
                         ),
                     ],
                   ),
-                  if (showNetworkStrength) ...[
+                  if (showAudioOutput) ...[
                     SizedBox(width: 6.w),
-                    _NetworkStrengthIndicator(
-                      quality: localConnectionQuality,
-                      tooltip: 'Your network',
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        _GlassIconButton(
+                          tooltip: speakerOn
+                              ? 'Speaker — tap to switch to phone'
+                              : 'Phone — tap to switch to speaker',
+                          onPressed: onToggleAudioOutput,
+                          child: _AudioOutputSwitchIcon(speakerOn: speakerOn),
+                        ),
+                        Positioned(
+                          right: -2,
+                          bottom: -2,
+                          child: IgnorePointer(
+                            child: Container(
+                              width: 16.w,
+                              height: 16.w,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: const Color(0xff1c1c1c),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: const Color.fromRGBO(
+                                    255,
+                                    255,
+                                    255,
+                                    0.45,
+                                  ),
+                                ),
+                              ),
+                              child: Icon(
+                                Icons.sync_alt_rounded,
+                                size: 10.sp,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ],
@@ -3797,13 +3921,15 @@ class _StatusToggle extends StatelessWidget {
 class _GlassIconButton extends StatelessWidget {
   const _GlassIconButton({
     required this.tooltip,
-    required this.icon,
+    this.icon,
+    this.child,
     required this.onPressed,
     this.onLongPress,
   });
 
   final String tooltip;
-  final IconData icon;
+  final IconData? icon;
+  final Widget? child;
   final VoidCallback? onPressed;
   final VoidCallback? onLongPress;
 
@@ -3829,11 +3955,13 @@ class _GlassIconButton extends StatelessWidget {
               color: const Color.fromRGBO(255, 255, 255, 0.18),
             ),
           ),
-          child: Icon(
-            icon,
-            color: onPressed == null ? Colors.white38 : Colors.white,
-            size: 22.sp,
-          ),
+          child:
+              child ??
+              Icon(
+                icon,
+                color: onPressed == null ? Colors.white38 : Colors.white,
+                size: 22.sp,
+              ),
         ),
       ),
     );
@@ -4109,57 +4237,41 @@ class _TalkingPulseRingState extends State<_TalkingPulseRing>
   }
 }
 
-class _NetworkStrengthIndicator extends StatelessWidget {
-  const _NetworkStrengthIndicator({
-    required this.quality,
-    required this.tooltip,
-  });
+class _AudioOutputSwitchIcon extends StatelessWidget {
+  const _AudioOutputSwitchIcon({required this.speakerOn});
 
-  final ConnectionQuality quality;
-  final String tooltip;
+  final bool speakerOn;
 
   @override
   Widget build(BuildContext context) {
-    final activeBars = switch (quality) {
-      ConnectionQuality.excellent => 4,
-      ConnectionQuality.good => 3,
-      ConnectionQuality.poor => 1,
-      ConnectionQuality.lost => 0,
-      ConnectionQuality.unknown => 0,
-    };
-    final color = switch (quality) {
-      ConnectionQuality.excellent => const Color(0xff7CFF6B),
-      ConnectionQuality.good => Colors.white,
-      ConnectionQuality.poor => const Color(0xffffb347),
-      ConnectionQuality.lost => const Color(0xffff5a5f),
-      ConnectionQuality.unknown => Colors.white38,
-    };
-
-    return Tooltip(
-      message: tooltip,
-      child: SizedBox(
-        width: 26.w,
-        height: 30.w,
-        child: Center(
-          child: quality == ConnectionQuality.lost
-              ? Icon(Icons.signal_cellular_off, color: color, size: 18.sp)
-              : Row(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    for (var bar = 0; bar < 4; bar++)
-                      Container(
-                        width: 3.w,
-                        height: (6 + bar * 3).h,
-                        margin: EdgeInsets.only(right: bar == 3 ? 0 : 1.5.w),
-                        decoration: BoxDecoration(
-                          color: bar < activeBars ? color : Colors.white24,
-                          borderRadius: BorderRadius.circular(1.r),
-                        ),
-                      ),
-                  ],
-                ),
-        ),
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 280),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      transitionBuilder: (child, animation) {
+        final rotated = Tween<double>(
+          begin: math.pi / 2,
+          end: 0,
+        ).animate(animation);
+        return AnimatedBuilder(
+          animation: rotated,
+          child: child,
+          builder: (context, child) {
+            return Transform(
+              alignment: Alignment.center,
+              transform: Matrix4.identity()
+                ..setEntry(3, 2, 0.001)
+                ..rotateY(rotated.value),
+              child: child,
+            );
+          },
+        );
+      },
+      child: Icon(
+        speakerOn ? Icons.volume_up_rounded : Icons.phone_in_talk_rounded,
+        key: ValueKey(speakerOn),
+        color: Colors.white,
+        size: 22.sp,
       ),
     );
   }

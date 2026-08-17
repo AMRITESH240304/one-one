@@ -159,6 +159,21 @@ class AndroidVoiceNudgeBridge {
     }
   }
 
+  /// Group whose chat-pile notification the user just tapped, if any.
+  Future<String?> takePendingChatPileOpen() async {
+    if (!Platform.isAndroid) return null;
+    _installHandler();
+    try {
+      final groupId = await _channel.invokeMethod<String>(
+        'takePendingChatPileOpen',
+      );
+      final trimmed = groupId?.trim();
+      return trimmed == null || trimmed.isEmpty ? null : trimmed;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Shared instance so multiple widgets can call platform methods without
   /// re-creating the channel handler.
   static final AndroidVoiceNudgeBridge shared = AndroidVoiceNudgeBridge();

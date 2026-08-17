@@ -66,6 +66,7 @@ class MainActivity : FlutterFragmentActivity() {
             }
         }
         VoiceNudgeNotifications.ensureChannels(this)
+        VoiceNudgeNotifications.cancelStaleChatPiles(this)
         if (BuildConfig.DEBUG) logFirebaseRuntimeConfiguration()
         voiceNudgeChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -75,6 +76,7 @@ class MainActivity : FlutterFragmentActivity() {
         NudgeDeliveryResultDispatcher.attach(voiceNudgeChannel)
         NudgeReceivedDispatcher.attach(voiceNudgeChannel)
         captureNudgeAction(intent)
+        captureChatPileOpen(intent)
         inviteLinkChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             InviteLinkContract.flutterChannel,
@@ -187,6 +189,10 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(NudgeActionStore.take(this)?.toMap())
                 }
 
+                "takePendingChatPileOpen" -> {
+                    result.success(ChatPileStore.takeOpened(this))
+                }
+
                 // B5: Sender schedules a 10-min expiry alarm for a nudge they
                 // just sent. Called from Flutter after the backend accepts the
                 // send. Cancelled automatically when a delivery result or
@@ -273,6 +279,7 @@ class MainActivity : FlutterFragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         captureNudgeAction(intent)
+        captureChatPileOpen(intent)
         captureInviteLink(intent)
     }
 
@@ -355,6 +362,17 @@ class MainActivity : FlutterFragmentActivity() {
             requestCode,
             Intent(this, VoicePipActionReceiver::class.java).setAction(action),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun captureChatPileOpen(intent: Intent?) {
+        if (intent?.action != VoiceNudgeContract.actionOpenChatPile) return
+        val groupId = intent.getStringExtra(VoiceNudgeContract.extraGroupId) ?: return
+        VoiceNudgeNotifications.cancelChatPile(this, groupId)
+        ChatPileStore.markOpened(this, groupId)
+        Log.i(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-09] Chat pile opened groupSuffix=${groupId.takeLast(6)}",
         )
     }
 

@@ -271,7 +271,7 @@ object VoiceNudgeNotifications {
 
     /**
      * WhatsApp-style pile: one notification per group that updates in place
-     * ("7 new messages") instead of a new alert per bubble.
+     * ("5 new messages") instead of a new alert per bubble.
      */
     fun buildChatPile(
         context: Context,
@@ -282,7 +282,9 @@ object VoiceNudgeNotifications {
     ): Notification {
         ensureChannels(context)
         val openIntent = Intent(context, MainActivity::class.java).apply {
+            action = VoiceNudgeContract.actionOpenChatPile
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(VoiceNudgeContract.extraGroupId, groupId)
         }
         val contentIntent = PendingIntent.getActivity(
             context,
@@ -296,7 +298,7 @@ object VoiceNudgeNotifications {
             @Suppress("DEPRECATION")
             Notification.Builder(context)
         }
-        return builder
+        val configured = builder
             .setSmallIcon(appSmallIcon)
             .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
             .setContentTitle(title)
@@ -311,7 +313,12 @@ object VoiceNudgeNotifications {
             .setContentIntent(contentIntent)
             .setGroup(groupKey(groupId))
             .setAutoCancel(true)
-            .build()
+        // Drop the shade notification once bubbles have vanished (10 min
+        // lifetime + 2 min fade). Updating the pile resets this window.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            configured.setTimeoutAfter(ChatPileStore.ttlMs)
+        }
+        return configured.build()
     }
 
     fun chatPileId(groupId: String): Int = idFor("chat_pile_$groupId")
@@ -320,6 +327,13 @@ object VoiceNudgeNotifications {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.cancel(chatPileId(groupId))
         ChatPileStore.reset(context, groupId)
+    }
+
+    /** Drops shade piles whose bubbles have already vanished. */
+    fun cancelStaleChatPiles(context: Context) {
+        for (groupId in ChatPileStore.staleGroupIds(context)) {
+            cancelChatPile(context, groupId)
+        }
     }
 
     fun idFor(eventId: String): Int = eventId.hashCode() and 0x7fffffff
@@ -478,25 +492,64 @@ object VoiceNudgeNotifications {
 
 object ChatPileStore {
     private const val prefsName = "one_one_chat_pile"
+    private const val openedPrefsName = "one_one_chat_pile_opened"
+    private const val openedGroupIdKey = "group_id"
+    private const val atSuffix = "_at"
+
+    /** Matches Flutter `ChatMessageRepository.visibleLimit`. */
+    const val maxCount = 5
+
+    /** Matches Flutter lifetime + fade (10 + 2 minutes). */
+    const val ttlMs = 12 * 60 * 1000L
 
     fun resolveCount(context: Context, groupId: String, serverCount: Int?): Int {
-        if (serverCount != null && serverCount > 0) {
-            context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-                .edit()
-                .putInt(groupId, serverCount)
-                .apply()
-            return serverCount
-        }
         val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        val next = prefs.getInt(groupId, 0) + 1
-        prefs.edit().putInt(groupId, next).apply()
-        return next
+        val now = System.currentTimeMillis()
+        val lastAt = prefs.getLong(groupId + atSuffix, 0L)
+        val stale = lastAt <= 0L || now - lastAt >= ttlMs
+        val resolved = when {
+            serverCount != null && serverCount > 0 -> serverCount
+            stale -> 1
+            else -> prefs.getInt(groupId, 0) + 1
+        }.coerceIn(1, maxCount)
+        prefs.edit()
+            .putInt(groupId, resolved)
+            .putLong(groupId + atSuffix, now)
+            .apply()
+        return resolved
     }
 
     fun reset(context: Context, groupId: String) {
         context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             .edit()
             .remove(groupId)
+            .remove(groupId + atSuffix)
             .apply()
+    }
+
+    fun staleGroupIds(context: Context): List<String> {
+        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val groupIds = prefs.all.keys.map { key ->
+            if (key.endsWith(atSuffix)) key.removeSuffix(atSuffix) else key
+        }.filter { it.isNotBlank() }.toSet()
+        return groupIds.filter { groupId ->
+            val lastAt = prefs.getLong(groupId + atSuffix, 0L)
+            lastAt <= 0L || now - lastAt >= ttlMs
+        }
+    }
+
+    fun markOpened(context: Context, groupId: String) {
+        context.getSharedPreferences(openedPrefsName, Context.MODE_PRIVATE)
+            .edit()
+            .putString(openedGroupIdKey, groupId)
+            .apply()
+    }
+
+    fun takeOpened(context: Context): String? {
+        val prefs = context.getSharedPreferences(openedPrefsName, Context.MODE_PRIVATE)
+        val groupId = prefs.getString(openedGroupIdKey, null)?.takeIf { it.isNotBlank() }
+        if (groupId != null) prefs.edit().remove(openedGroupIdKey).apply()
+        return groupId
     }
 }

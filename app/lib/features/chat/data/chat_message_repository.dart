@@ -116,7 +116,10 @@ class ChatMessageRepository {
     required String userId,
   }) async {
     try {
-      await _database.ref('chatUnread/$groupId/$userId/count').set(0);
+      await _database.ref('chatUnread/$groupId/$userId').update({
+        'count': 0,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      });
     } catch (_) {
       // Best-effort — the local notification cancel still runs.
     }

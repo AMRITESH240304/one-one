@@ -13,6 +13,7 @@ import {
 } from "../groups/groupService.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
+import { chatUnreadTtlSeconds, nextChatUnread } from "./chatUnread.js";
 import { enforceNudgeRateLimits } from "./nudgeRateLimiter.js";
 
 export type FriendLiveInput = {
@@ -333,7 +334,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
   };
 }
 
-const chatMessageTtlMs = 12 * 60 * 1000;
+const chatMessageTtlMs = chatUnreadTtlSeconds * 1000;
 const chatPileHint =
   "You can only check the last 5 messages, see them before they fade away";
 
@@ -407,13 +408,14 @@ export async function sendChatMessageNotification(input: ChatMessageInput) {
 }
 
 async function bumpChatUnread(groupId: string, userId: string) {
-  const ref = getRealtimeDatabase().ref(`chatUnread/${groupId}/${userId}/count`);
-  const result = await ref.transaction((current: unknown) => {
-    const n = typeof current === "number" ? current : 0;
-    return n + 1;
-  });
+  const ref = getRealtimeDatabase().ref(`chatUnread/${groupId}/${userId}`);
+  const now = nowSeconds();
+  const result = await ref.transaction((current: unknown) => nextChatUnread(current, now));
   const value = result.snapshot.val();
-  return typeof value === "number" && value > 0 ? value : 1;
+  if (isRecord(value) && typeof value.count === "number" && value.count > 0) {
+    return value.count;
+  }
+  return 1;
 }
 
 async function activeRecipientUserIds(groupId: string, senderUserId: string) {
