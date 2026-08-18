@@ -518,6 +518,7 @@ export async function deleteGroup(input: GroupMemberActionInput) {
       [`groupMembers/${input.groupId}`]: null,
       [`livekitRooms/${input.groupId}`]: null,
       [`memberAvailability/${input.groupId}`]: null,
+      [`mediaVolume/${input.groupId}`]: null,
       [`groupMessages/${input.groupId}`]: null,
       [`talkLocks/${input.groupId}`]: null,
       [`talkSessions/${input.groupId}`]: null,
@@ -616,6 +617,7 @@ export async function purgeUserAccount(userId: string) {
     const updates: Record<string, unknown> = {
       [`groupMembers/${groupId}/${userId}`]: null,
       [`memberAvailability/${groupId}/${userId}`]: null,
+      [`mediaVolume/${groupId}/${userId}`]: null,
       [`dailyUsage/${groupId}/${userId}`]: null,
       [`chatUnread/${groupId}/${userId}`]: null,
       [`userGroups/${userId}/${groupId}`]: null
@@ -898,6 +900,7 @@ async function cleanupMemberState(groupId: string, userId: string, reason: strin
   const updates: Record<string, unknown> = {
     [`userGroups/${userId}/${groupId}`]: null,
     [`memberAvailability/${groupId}/${userId}`]: null,
+    [`mediaVolume/${groupId}/${userId}`]: null,
     [`dailyUsage/${groupId}/${userId}`]: null
   };
 

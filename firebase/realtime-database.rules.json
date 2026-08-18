@@ -67,6 +67,14 @@
         }
       }
     },
+    "mediaVolume": {
+      "$groupId": {
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
+        "$userId": {
+          ".write": "auth != null && auth.uid == $userId && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'"
+        }
+      }
+    },
     "chatUnread": {
       "$groupId": {
         "$userId": {
