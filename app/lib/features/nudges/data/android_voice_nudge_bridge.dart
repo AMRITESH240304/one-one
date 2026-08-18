@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
+import '../models/active_nudge.dart';
 
 class AndroidVoiceNudgeBridge {
   static const MethodChannel _channel = MethodChannel('app.oneone/voice_nudge');
@@ -16,6 +17,11 @@ class AndroidVoiceNudgeBridge {
       StreamController<NudgeDeliveryResult>.broadcast();
   static final StreamController<String> _receivedSignals =
       StreamController<String>.broadcast();
+  static final StreamController<ActiveNudge> _incomingSignals =
+      StreamController<ActiveNudge>.broadcast();
+  static final StreamController<IncomingNudgeStatusUpdate>
+  _incomingStatusSignals =
+      StreamController<IncomingNudgeStatusUpdate>.broadcast();
   static bool _handlerInstalled = false;
 
   static Stream<void> get actionSignals {
@@ -26,6 +32,19 @@ class AndroidVoiceNudgeBridge {
   static Stream<void> get registrationSignals {
     _installHandler();
     return _registrationSignals.stream;
+  }
+
+  /// Full incoming-nudge payloads (FCM received while Flutter is alive).
+  static Stream<ActiveNudge> get incomingSignals {
+    _installHandler();
+    return _incomingSignals.stream;
+  }
+
+  /// Native accept/decline/snooze that happened outside Flutter (notification
+  /// actions) so the in-app prompt can drop that event immediately.
+  static Stream<IncomingNudgeStatusUpdate> get incomingStatusSignals {
+    _installHandler();
+    return _incomingStatusSignals.stream;
   }
 
   /// Emits the `groupId` of a nudge the instant the native side receives it
@@ -48,24 +67,81 @@ class AndroidVoiceNudgeBridge {
     if (_handlerInstalled || !Platform.isAndroid) return;
     _handlerInstalled = true;
     _channel.setMethodCallHandler((call) async {
-      if (call.method == 'onNudgeActionAvailable') {
-        _actionSignals.add(null);
-      } else if (call.method == 'onFcmRegistrationRenewed') {
-        debugPrint('[OneOneFCM][DART-06] Native registration renewed');
-        _registrationSignals.add(null);
-      } else if (call.method == 'onNudgeReceived') {
-        final groupId = call.arguments?.toString().trim() ?? '';
-        if (groupId.isNotEmpty) _receivedSignals.add(groupId);
-      } else if (call.method == 'onNudgeDeliveryResult') {
+      try {
+        await _handleNativeCall(call);
+      } catch (error, stack) {
+        debugPrint(
+          '[OneOneFCM][DART-FCM-W2] Native FCM bridge handler failed '
+          'method=${call.method} ${error.runtimeType}: $error',
+        );
         final raw = call.arguments;
-        if (raw is Map) {
-          final result = NudgeDeliveryResult.tryParse(
-            raw.map((key, value) => MapEntry(key.toString(), value)),
-          );
-          if (result != null) _deliveryResults.add(result);
-        }
+        final map = raw is Map
+            ? raw.map((key, value) => MapEntry(key.toString(), value))
+            : const <String, dynamic>{};
+        unawaited(
+          CrashlyticsService.recordFcmNotificationHandlingFailure(
+            error: error,
+            stack: stack,
+            worker: 'DART-FCM-W2',
+            groupId: map['groupId']?.toString(),
+            eventId: map['eventId']?.toString() ?? map['nudgeId']?.toString(),
+            kind: map['type']?.toString() ?? map['kind']?.toString(),
+          ),
+        );
       }
     });
+  }
+
+  static Future<void> _handleNativeCall(MethodCall call) async {
+    if (call.method == 'onNudgeActionAvailable') {
+      _actionSignals.add(null);
+    } else if (call.method == 'onFcmRegistrationRenewed') {
+      debugPrint('[OneOneFCM][DART-06] Native registration renewed');
+      _registrationSignals.add(null);
+    } else if (call.method == 'onNudgeReceived') {
+      final groupId = call.arguments?.toString().trim() ?? '';
+      if (groupId.isNotEmpty) _receivedSignals.add(groupId);
+    } else if (call.method == 'onIncomingNudge') {
+      final raw = call.arguments;
+      if (raw is Map) {
+        final map = raw.map((key, value) => MapEntry(key.toString(), value));
+        final nudge = parseIncomingNudge(map);
+        if (nudge != null) {
+          _incomingSignals.add(nudge);
+        } else {
+          debugPrint(
+            '[OneOneFCM][DART-FCM-W1] Incoming nudge payload missing fields',
+          );
+          unawaited(
+            CrashlyticsService.recordFcmNotificationHandlingFailure(
+              error: StateError(
+                'Incoming FCM nudge payload missing required fields',
+              ),
+              worker: 'DART-FCM-W1',
+              groupId: map['groupId']?.toString(),
+              eventId: map['eventId']?.toString() ?? map['nudgeId']?.toString(),
+              kind: map['type']?.toString() ?? map['kind']?.toString(),
+            ),
+          );
+        }
+      }
+    } else if (call.method == 'onIncomingNudgeStatus') {
+      final raw = call.arguments;
+      if (raw is Map) {
+        final update = IncomingNudgeStatusUpdate.tryParse(
+          raw.map((key, value) => MapEntry(key.toString(), value)),
+        );
+        if (update != null) _incomingStatusSignals.add(update);
+      }
+    } else if (call.method == 'onNudgeDeliveryResult') {
+      final raw = call.arguments;
+      if (raw is Map) {
+        final result = NudgeDeliveryResult.tryParse(
+          raw.map((key, value) => MapEntry(key.toString(), value)),
+        );
+        if (result != null) _deliveryResults.add(result);
+      }
+    }
   }
 
   Future<String?> getFcmToken() async {
@@ -118,6 +194,39 @@ class AndroidVoiceNudgeBridge {
     );
     if (raw == null) return null;
     return NudgeNotificationAction.tryParse(raw);
+  }
+
+  /// Cached incoming nudges recorded by the native FCM receiver, including
+  /// locally declined/accepted statuses from notification actions.
+  Future<List<ActiveNudge>> listIncomingNudges() async {
+    if (!Platform.isAndroid) return const [];
+    _installHandler();
+    try {
+      final raw = await _channel.invokeMethod<List<dynamic>>(
+        'listIncomingNudges',
+      );
+      if (raw == null) return const [];
+      return raw
+          .whereType<Map>()
+          .map(
+            (item) => parseIncomingNudge(
+              item.map((key, value) => MapEntry(key.toString(), value)),
+            ),
+          )
+          .whereType<ActiveNudge>()
+          .toList(growable: false);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> dismissIncomingNudge(String eventId) async {
+    if (!Platform.isAndroid || eventId.isEmpty) return;
+    try {
+      await _channel.invokeMethod<void>('dismissIncomingNudge', eventId);
+    } catch (_) {
+      // Local notification cancel is best-effort.
+    }
   }
 
   /// B5: Schedule a 10-minute expiry alarm on the sender's device after a
@@ -174,6 +283,19 @@ class AndroidVoiceNudgeBridge {
     }
   }
 
+  /// Local STREAM_MUSIC level as 0–100. Null on non-Android or if native
+  /// read fails. Another device's volume cannot be read from here.
+  Future<int?> getMediaVolumePercent() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final raw = await _channel.invokeMethod<int>('getMediaVolumePercent');
+      if (raw == null) return null;
+      return raw.clamp(0, 100);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Shared instance so multiple widgets can call platform methods without
   /// re-creating the channel handler.
   static final AndroidVoiceNudgeBridge shared = AndroidVoiceNudgeBridge();
@@ -184,27 +306,107 @@ class NudgeNotificationAction {
     required this.action,
     required this.eventId,
     required this.groupId,
+    this.senderUserId,
   });
 
+  /// `accept` and `connect` auto-join live (Case 1 / sender connect).
+  /// `open` is a notification-body tap — show the in-app prompt (Case 2).
   final String action;
   final String eventId;
   final String groupId;
+  final String? senderUserId;
+
+  bool get isOpenOnly => action == 'open';
+  bool get isAutoJoin => action == 'accept' || action == 'connect';
 
   static NudgeNotificationAction? tryParse(Map<String, dynamic> raw) {
     final action = raw['action']?.toString().trim() ?? '';
     final eventId = raw['eventId']?.toString().trim() ?? '';
     final groupId = raw['groupId']?.toString().trim() ?? '';
-    if (!const {'accept', 'connect'}.contains(action) ||
+    if (!const {'accept', 'connect', 'open'}.contains(action) ||
         eventId.isEmpty ||
         groupId.isEmpty) {
       return null;
     }
+    final senderUserId = raw['senderUserId']?.toString().trim();
     return NudgeNotificationAction(
       action: action,
       eventId: eventId,
       groupId: groupId,
+      senderUserId: senderUserId == null || senderUserId.isEmpty
+          ? null
+          : senderUserId,
     );
   }
+}
+
+class IncomingNudgeStatusUpdate {
+  const IncomingNudgeStatusUpdate({
+    required this.nudgeId,
+    required this.status,
+    this.snoozedUntil,
+  });
+
+  final String nudgeId;
+  final ActiveNudgeStatus status;
+  final DateTime? snoozedUntil;
+
+  static IncomingNudgeStatusUpdate? tryParse(Map<String, dynamic> raw) {
+    final nudgeId =
+        raw['eventId']?.toString().trim() ??
+        raw['nudgeId']?.toString().trim() ??
+        '';
+    if (nudgeId.isEmpty) return null;
+    final statusName = raw['status']?.toString().trim() ?? '';
+    final status = ActiveNudgeStatus.values
+        .where((value) => value.name == statusName)
+        .firstOrNull;
+    if (status == null) return null;
+    final snoozedUntilMs = int.tryParse(
+      raw['snoozedUntilMs']?.toString() ?? '',
+    );
+    return IncomingNudgeStatusUpdate(
+      nudgeId: nudgeId,
+      status: status,
+      snoozedUntil: snoozedUntilMs == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(snoozedUntilMs),
+    );
+  }
+}
+
+ActiveNudge? parseIncomingNudge(Map<String, dynamic> raw) {
+  final nudgeId =
+      raw['eventId']?.toString().trim() ??
+      raw['nudgeId']?.toString().trim() ??
+      '';
+  final groupId = raw['groupId']?.toString().trim() ?? '';
+  final senderId =
+      raw['senderUserId']?.toString().trim() ??
+      raw['senderId']?.toString().trim() ??
+      '';
+  if (nudgeId.isEmpty || groupId.isEmpty) return null;
+  final arrivedAtMs = int.tryParse(raw['arrivedAtMs']?.toString() ?? '');
+  final sentAt = arrivedAtMs != null
+      ? DateTime.fromMillisecondsSinceEpoch(arrivedAtMs)
+      : DateTime.now();
+  final statusName = raw['status']?.toString().trim();
+  final status = ActiveNudgeStatus.values
+      .where((value) => value.name == statusName)
+      .firstOrNull;
+  final snoozedUntilMs = int.tryParse(raw['snoozedUntilMs']?.toString() ?? '');
+  final senderName = raw['senderName']?.toString().trim();
+  return ActiveNudge(
+    nudgeId: nudgeId,
+    groupId: groupId,
+    senderId: senderId,
+    sentAt: sentAt,
+    status: status ?? ActiveNudgeStatus.pending,
+    senderName: senderName == null || senderName.isEmpty ? null : senderName,
+    snoozedUntil: snoozedUntilMs == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(snoozedUntilMs),
+  );
 }
 
 /// Outcome of a ring/voice nudge this device sent, reported once the
@@ -230,7 +432,8 @@ class NudgeDeliveryResult {
   final String? reason;
 
   /// Audibility concern for an otherwise-successful playback
-  /// (`volume_muted` or `volume_low`). This is a warning, never a failure.
+  /// (`volume_muted`, `volume_very_low`, or `volume_low`). This is a
+  /// warning, never a failure.
   final String? attention;
 
   final String? recipientName;
@@ -246,6 +449,7 @@ class NudgeDeliveryResult {
   String? get attentionLabel {
     return switch (attention) {
       'volume_muted' => 'their volume was muted',
+      'volume_very_low' => 'their volume was very low',
       'volume_low' => 'their volume was too low',
       _ => null,
     };
@@ -293,8 +497,7 @@ class NudgeDeliveryResult {
       recipientName: raw['recipientName']?.toString().trim().isEmpty ?? true
           ? null
           : raw['recipientName'].toString().trim(),
-      recipientUserId:
-          raw['recipientUserId']?.toString().trim().isEmpty ?? true
+      recipientUserId: raw['recipientUserId']?.toString().trim().isEmpty ?? true
           ? null
           : raw['recipientUserId'].toString().trim(),
     );

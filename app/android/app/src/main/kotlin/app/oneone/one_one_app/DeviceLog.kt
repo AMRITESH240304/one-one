@@ -129,6 +129,8 @@ object DeviceLog {
 
     fun currentAppVersion(): String = appVersion
 
+    fun currentUserId(): String? = userId.takeIf { it.isNotBlank() && it != "-" }
+
     fun wasAppInBackground(): Boolean {
         val info = ActivityManager.RunningAppProcessInfo()
         ActivityManager.getMyMemoryState(info)

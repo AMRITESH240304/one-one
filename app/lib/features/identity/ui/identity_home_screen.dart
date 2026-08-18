@@ -22,6 +22,7 @@ import '../../../core/firebase/firebase_analytics_service.dart';
 import '../../../core/logging/livekit_lifecycle_logger.dart';
 import '../../../core/logging/log_level.dart';
 import '../../../core/logging/log_manager.dart';
+import '../../../core/logging/user_facing_copy.dart';
 import '../../../core/network/api_client.dart';
 import '../../chat/data/chat_message_repository.dart';
 import '../../chat/models/group_chat_message.dart';
@@ -41,10 +42,16 @@ import '../../online/models/member_availability.dart';
 import '../../online/models/online_session.dart';
 import '../../online/presence_config.dart';
 import '../../online/solo_participant_guard.dart';
+import '../../online/voice_overlay_bridge.dart';
 import '../../online/voice_pip_bridge.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
+import '../../nudges/data/active_nudge_inbox.dart';
+import '../../nudges/data/active_nudge_sync.dart';
+import '../../nudges/data/media_volume_store.dart';
 import '../../nudges/data/nudge_repository.dart';
+import '../../nudges/models/active_nudge.dart';
 import '../../nudges/nudge_status_memory.dart';
+import '../../nudges/ui/incoming_nudge_prompt.dart';
 import '../../nudges/ui/nudge_screen.dart';
 import '../../talk/data/talk_repository.dart';
 import '../../talk/models/emoji_burst.dart';
@@ -116,13 +123,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   List<GroupChatMessage> _chatMessages = const [];
   StreamSubscription<DatabaseEvent>? _chatMessagesSubscription;
   StreamSubscription<Map<String, dynamic>>? _emojiBurstSubscription;
+
   /// Opacity of the middle chat feed (for go-online fade-out).
   double _chatFeedOpacity = 1;
+
   /// When non-zero, ignore RTDB rows with `createdAt` before this (unix sec).
   /// Raised when the group goes online so offline coordination bubbles clear.
   int _chatVisibleAfterCreatedAt = 0;
   bool? _prevAnyMemberOnline;
   bool _chatOnlineClearInFlight = false;
+
   /// App is assumed foreground at startup; lifecycle callbacks keep it current.
   AppLifecycleState _appLifecycle = AppLifecycleState.resumed;
   GroupSummary? _selectedGroup;
@@ -136,6 +146,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   StreamSubscription<void>? _nudgeActionSubscription;
   StreamSubscription<String>? _nudgeReceivedSubscription;
+  StreamSubscription<ActiveNudge>? _incomingNudgeSubscription;
+  StreamSubscription<IncomingNudgeStatusUpdate>?
+  _incomingNudgeStatusSubscription;
   StreamSubscription<void>? _registrationRenewalSubscription;
   StreamSubscription<void>? _inviteLinkSubscription;
   StreamSubscription<VoicePipAction>? _voicePipActionSubscription;
@@ -152,6 +165,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   // connecting to) a nudge. Used to explain *why* a single-user-in-room bug
   // occurred when the solo-participant timeout later fires.
   bool _enteredViaNudge = false;
+
+  // Set only when the user taps Join or accepts/connects a nudge. Room
+  // connect is refused without this, so a later foreground cannot resurrect
+  // a session the user already left.
+  bool _explicitJoinIntent = false;
+
+  // True when a LiveKit session was active at the last backgrounding.
+  // Resume may keep that session; it must not start a new one.
+  bool _liveSessionActiveOnBackground = false;
+
+  final Set<String> _processedNudgeEventIds = {};
 
   // Automatic-offline-on-disconnect (with grace period) bookkeeping. See
   // _evaluatePeerPresenceForAutoOffline for the state machine.
@@ -202,6 +226,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   DateTime? _lastRegistrationRefreshAt;
   NudgeNotificationAction? _deferredNudgeAction;
   bool _nudgeActionInFlight = false;
+  final ActiveNudgeInbox _nudgeInbox = ActiveNudgeInbox.instance;
+  final ActiveNudgeSync _nudgeSync = ActiveNudgeSync();
+  ActiveNudge? _incomingPromptNudge;
+  String? _promptRestoreGroupId;
+  bool _incomingPromptBusy = false;
+  bool _incomingHydrateInFlight = false;
+  Timer? _incomingExpiryTimer;
   bool _inviteJoinInFlight = false;
   bool _connectionCleanupInFlight = false;
   bool _hasAvailabilitySnapshot = false;
@@ -220,7 +251,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     widget.identityRepository.sessionListenable.addListener(
       _onIdentitySessionChanged,
     );
-    AccentThemeController.setAccentKey(_session.settings.accentColorKey);
+    // Defer: this screen is first inserted during StartupGateScreen.build,
+    // and notifying the root accent ValueListenableBuilder in the same frame
+    // fatals with setState-during-build.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      AccentThemeController.setAccentKey(_session.settings.accentColorKey);
+    });
     unawaited(
       AnalyticsService.logScreenView(
         screenName: 'identity_home',
@@ -244,6 +281,26 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         unawaited(_onNudgeReceived(groupId));
       },
     );
+    _incomingNudgeSubscription = AndroidVoiceNudgeBridge.incomingSignals.listen(
+      (nudge) {
+        _nudgeInbox.upsert(nudge);
+        if (_appLifecycle == AppLifecycleState.resumed) {
+          unawaited(_presentIncomingNudgePrompt());
+        }
+      },
+    );
+    _incomingNudgeStatusSubscription = AndroidVoiceNudgeBridge
+        .incomingStatusSignals
+        .listen((update) {
+          unawaited(
+            _nudgeInbox.mark(
+              nudgeId: update.nudgeId,
+              status: update.status,
+              snoozedUntil: update.snoozedUntil,
+            ),
+          );
+          unawaited(_presentIncomingNudgePrompt());
+        });
     _registrationRenewalSubscription = AndroidVoiceNudgeBridge
         .registrationSignals
         .listen((_) {
@@ -302,6 +359,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _listenToEmojiBursts(selected.groupId);
       _listenToMemberProfiles(_members);
     }
+    unawaited(_reportMediaVolume());
   }
 
   @override
@@ -323,6 +381,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _connectivitySubscription?.cancel();
     _nudgeActionSubscription?.cancel();
     _nudgeReceivedSubscription?.cancel();
+    _incomingNudgeSubscription?.cancel();
+    _incomingNudgeStatusSubscription?.cancel();
     _registrationRenewalSubscription?.cancel();
     _inviteLinkSubscription?.cancel();
     _voicePipActionSubscription?.cancel();
@@ -334,6 +394,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _inactivityTimer?.cancel();
     _callModeTimeoutTimer?.cancel();
     _usagePersistTimer?.cancel();
+    _incomingExpiryTimer?.cancel();
     // Persist final usage before disposal.
     if (_todayOnlineSeconds > 0 && _onlineSession != null) {
       unawaited(_persistDailyUsage(_onlineSession!.groupId));
@@ -349,13 +410,32 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _appLifecycle = state;
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _liveSessionActiveOnBackground = _isOnline && _room != null;
+      return;
+    }
     if (state == AppLifecycleState.resumed) {
       unawaited(_refreshDeviceRegistration());
+      unawaited(_reportMediaVolume());
+      // Notification Accept/Connect taps are queued natively and consumed
+      // here. Opening the app by itself must not start a LiveKit session —
+      // `_goOnline` still requires `_explicitJoinIntent`.
       unawaited(_takePendingNudgeAction());
       unawaited(_takePendingInviteLink());
       // The user is now actively looking at the app, so any pile that
       // accumulated while backgrounded should be cleared.
       unawaited(_clearOpenedChatPiles());
+      if (!_liveSessionActiveOnBackground && !_explicitJoinIntent) {
+        LogManager.log(
+          LogLevel.info,
+          'LiveKitManager',
+          'Foreground with no active session and no join intent — '
+              'skipping room connect',
+          userId: _session.userId,
+          groupId: _selectedGroup?.groupId,
+        );
+      }
     }
   }
 
@@ -364,6 +444,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     setState(() {
       _inPictureInPicture = _voicePipBridge.isInPictureInPicture.value;
     });
+  }
+
+  /// One-shot STREAM_MUSIC self-report for every group this user is in.
+  /// Android cannot expose another device's volume; this is the receiver
+  /// half of the sender's post-send warning.
+  Future<void> _reportMediaVolume() {
+    return MediaVolumeStore.instance.reportForGroups(
+      userId: _session.userId,
+      groupIds: _groups.map((group) => group.groupId),
+    );
   }
 
   Future<void> _handlePipAction(VoicePipAction action) async {
@@ -521,9 +611,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             membersByGroupId[selected.groupId] ?? const [],
           ),
         );
-        _listenToMemberProfiles(
-          membersByGroupId[selected.groupId] ?? const [],
-        );
+        _listenToMemberProfiles(membersByGroupId[selected.groupId] ?? const []);
       }
       _syncCarouselToSelectedGroup();
 
@@ -533,6 +621,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _listenToChatMessages(selected.groupId);
         _listenToEmojiBursts(selected.groupId);
       }
+      unawaited(_reportMediaVolume());
     } catch (error) {
       if (!mounted) return;
       setState(() => _message = LiveKitStatus.sanitizeError(error));
@@ -608,6 +697,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _state = 'away';
       _connectionMode = MemberAvailability.walkieTalkieMode;
     });
+    _explicitJoinIntent = false;
+    _deferredNudgeAction = null;
+    _liveSessionActiveOnBackground = false;
     _syncPipSessionState();
   }
 
@@ -676,7 +768,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       action =
           _deferredNudgeAction ??
           await _nudgeActionBridge.takePendingNudgeAction();
-      if (action == null || !mounted) return;
+      if (!mounted) return;
+      if (action == null) {
+        unawaited(_hydrateIncomingNudges());
+        return;
+      }
       if (_loadingGroups) {
         _deferredNudgeAction = action;
         return;
@@ -688,10 +784,29 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         step1StartedAt,
       );
       _deferredNudgeAction = null;
+      if (action.isOpenOnly) {
+        _nudgeInbox.upsert(
+          ActiveNudge(
+            nudgeId: action.eventId,
+            groupId: action.groupId,
+            senderId: action.senderUserId ?? '',
+            sentAt: DateTime.now(),
+          ),
+        );
+        await _hydrateIncomingNudges(
+          preferGroupId: action.groupId,
+          preferNudgeId: action.eventId,
+        );
+        return;
+      }
       _nudgeActionInFlight = true;
       await _processNudgeAction(action);
     } catch (error) {
-      if (action != null) _deferredNudgeAction = action;
+      // Only defer while home data is still loading. Re-queuing after a
+      // later failure would auto-connect on every subsequent foreground.
+      if (action != null && _loadingGroups) {
+        _deferredNudgeAction = action;
+      }
       if (mounted) {
         setState(() => _message = 'Couldn’t process the nudge action.');
       }
@@ -726,6 +841,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _processNudgeAction(NudgeNotificationAction action) async {
+    if (_processedNudgeEventIds.contains(action.eventId)) {
+      LogManager.log(
+        LogLevel.info,
+        'LiveKitManager',
+        'Ignoring already-processed nudge action=${action.action} '
+            'eventId=${action.eventId}',
+        userId: _session.userId,
+        groupId: action.groupId,
+      );
+      return;
+    }
     // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
     // release.
     final step2StartedAt = _goLiveStepStart(
@@ -747,17 +873,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     await _onGroupCarouselChanged(index);
     if (!mounted) return;
+    _explicitJoinIntent = true;
     if (!_isViewingActiveGroup) {
       if (_isOnline) {
         await _switchVoiceGroup();
       } else {
-        await _goOnline();
+        await _goOnline(userIntent: true);
       }
     }
     if (!mounted) return;
     if (!_isOnline) {
+      _explicitJoinIntent = false;
       throw StateError('Could not enter the nudge group.');
     }
+    _processedNudgeEventIds.add(action.eventId);
     // Entered (or is entering) via nudge — remember so a later
     // single-user-in-room bug report can explain how it occurred.
     _enteredViaNudge = true;
@@ -770,11 +899,218 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       eventId: action.eventId,
       action: 'accept',
     );
+    unawaited(_nudgeActionBridge.dismissIncomingNudge(action.eventId));
+    await _nudgeInbox.mark(
+      nudgeId: action.eventId,
+      status: ActiveNudgeStatus.accepted,
+    );
     debugPrint(
       '[OneOneFCM][DART-07] Accepted nudge and entered group '
       'eventSuffix=${action.eventId.length <= 6 ? action.eventId : action.eventId.substring(action.eventId.length - 6)}',
     );
-    setState(() => _message = 'Nudge accepted — you’re now online together.');
+    _promptRestoreGroupId = null;
+    _incomingExpiryTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _incomingPromptNudge = null;
+        _incomingPromptBusy = false;
+        _message = 'Nudge accepted — you’re now online together.';
+      });
+    }
+    unawaited(
+      _acceptSiblingNudges(action.groupId, exceptNudgeId: action.eventId),
+    );
+  }
+
+  /// After the receiver is already live, accept any other still-pending
+  /// senders in the same group so both LiveKit tokens connect.
+  Future<void> _acceptSiblingNudges(
+    String groupId, {
+    required String exceptNudgeId,
+  }) async {
+    await _hydrateIncomingNudges(present: false);
+    final extras = _nudgeInbox
+        .activeInGroup(groupId)
+        .where((nudge) => nudge.nudgeId != exceptNudgeId)
+        .toList(growable: false);
+    for (final extra in extras) {
+      _processedNudgeEventIds.add(extra.nudgeId);
+      unawaited(
+        _nudgeRepository.respond(
+          groupId: extra.groupId,
+          eventId: extra.nudgeId,
+          action: 'accept',
+        ),
+      );
+      unawaited(_nudgeActionBridge.dismissIncomingNudge(extra.nudgeId));
+    }
+    await _nudgeInbox.markAllInGroup(
+      groupId: groupId,
+      status: ActiveNudgeStatus.accepted,
+    );
+    if (mounted) {
+      await _presentIncomingNudgePrompt(ignoreInFlight: true);
+    }
+  }
+
+  Future<void> _hydrateIncomingNudges({
+    String? preferGroupId,
+    String? preferNudgeId,
+    bool present = true,
+  }) async {
+    if (_loadingGroups || !mounted) return;
+    if (_incomingHydrateInFlight) {
+      for (var i = 0; i < 50 && _incomingHydrateInFlight; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        if (!mounted) return;
+      }
+      if (present) {
+        await _presentIncomingNudgePrompt(
+          preferGroupId: preferGroupId,
+          preferNudgeId: preferNudgeId,
+        );
+      }
+      return;
+    }
+    _incomingHydrateInFlight = true;
+    try {
+      await _nudgeInbox.bindUser(_session.userId);
+      final native = await _nudgeActionBridge.listIncomingNudges();
+      for (final nudge in native) {
+        if (nudge.senderId == _session.userId) continue;
+        _nudgeInbox.upsert(nudge);
+        if (nudge.status != ActiveNudgeStatus.pending) {
+          await _nudgeInbox.mark(
+            nudgeId: nudge.nudgeId,
+            status: nudge.status,
+            snoozedUntil: nudge.snoozedUntil,
+          );
+        }
+      }
+      final remote = await _nudgeSync.loadForGroups(
+        groupIds: _groups.map((group) => group.groupId),
+        currentUserId: _session.userId,
+      );
+      _nudgeInbox.upsertAll(remote);
+      if (present) {
+        await _presentIncomingNudgePrompt(
+          preferGroupId: preferGroupId,
+          preferNudgeId: preferNudgeId,
+        );
+      }
+    } finally {
+      _incomingHydrateInFlight = false;
+    }
+  }
+
+  Future<void> _presentIncomingNudgePrompt({
+    String? preferGroupId,
+    String? preferNudgeId,
+    bool ignoreInFlight = false,
+  }) async {
+    if (!mounted || _inPictureInPicture || _loadingGroups) return;
+    if (!ignoreInFlight && _nudgeActionInFlight) return;
+    final queue = _nudgeInbox
+        .presentationQueue(
+          preferGroupId: preferGroupId ?? _incomingPromptNudge?.groupId,
+          preferNudgeId: preferNudgeId,
+        )
+        .where(
+          (nudge) => _groups.any((group) => group.groupId == nudge.groupId),
+        )
+        .toList();
+    if (queue.isEmpty) {
+      await _dismissIncomingPrompt(restoreGroup: _incomingPromptNudge != null);
+      return;
+    }
+    final next = queue.first;
+    _promptRestoreGroupId ??= _selectedGroup?.groupId;
+    await _focusGroupForIncomingNudge(next);
+    if (!mounted) return;
+    setState(() => _incomingPromptNudge = next);
+    _scheduleIncomingExpiryWatch();
+  }
+
+  Future<void> _focusGroupForIncomingNudge(ActiveNudge nudge) async {
+    final index = _groups.indexWhere((group) => group.groupId == nudge.groupId);
+    if (index < 0) return;
+    unawaited(_prefetchLiveKit(group: _groups[index]));
+    await _onGroupCarouselChanged(index);
+  }
+
+  Future<void> _dismissIncomingPrompt({required bool restoreGroup}) async {
+    _incomingExpiryTimer?.cancel();
+    final restoreId = _promptRestoreGroupId;
+    _promptRestoreGroupId = null;
+    if (!mounted) return;
+    setState(() {
+      _incomingPromptNudge = null;
+      _incomingPromptBusy = false;
+    });
+    if (!restoreGroup || restoreId == null) return;
+    final index = _groups.indexWhere((group) => group.groupId == restoreId);
+    if (index >= 0) await _onGroupCarouselChanged(index);
+  }
+
+  void _scheduleIncomingExpiryWatch() {
+    _incomingExpiryTimer?.cancel();
+    _incomingExpiryTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!mounted || _incomingPromptNudge == null) {
+        _incomingExpiryTimer?.cancel();
+        return;
+      }
+      unawaited(_presentIncomingNudgePrompt());
+    });
+  }
+
+  Future<void> _acceptIncomingNudge(ActiveNudge nudge) async {
+    if (_incomingPromptBusy) return;
+    setState(() => _incomingPromptBusy = true);
+    try {
+      await _processNudgeAction(
+        NudgeNotificationAction(
+          action: 'accept',
+          eventId: nudge.nudgeId,
+          groupId: nudge.groupId,
+          senderUserId: nudge.senderId,
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _incomingPromptBusy = false;
+        _message = 'Couldn’t join this group. Check your connection.';
+      });
+    } finally {
+      if (mounted && _incomingPromptBusy) {
+        setState(() => _incomingPromptBusy = false);
+        unawaited(_presentIncomingNudgePrompt());
+      }
+    }
+  }
+
+  Future<void> _declineIncomingNudge(ActiveNudge nudge) async {
+    if (_incomingPromptBusy) return;
+    setState(() => _incomingPromptBusy = true);
+    final pending = _nudgeInbox.activeInGroup(nudge.groupId);
+    for (final event in pending) {
+      _processedNudgeEventIds.add(event.nudgeId);
+      unawaited(
+        _nudgeRepository.respond(
+          groupId: event.groupId,
+          eventId: event.nudgeId,
+          action: 'decline',
+        ),
+      );
+      unawaited(_nudgeActionBridge.dismissIncomingNudge(event.nudgeId));
+    }
+    await _nudgeInbox.markAllInGroup(
+      groupId: nudge.groupId,
+      status: ActiveNudgeStatus.declined,
+    );
+    if (!mounted) return;
+    setState(() => _incomingPromptBusy = false);
+    await _presentIncomingNudgePrompt();
   }
 
   Future<void> _replaceWithNoGroups() async {
@@ -968,11 +1304,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             setState(() {
               _emojiBursts = [
                 ..._emojiBursts.where((item) => item.id != id),
-                EmojiBurst(
-                  id: id,
-                  emoji: emoji,
-                  senderName: senderName,
-                ),
+                EmojiBurst(id: id, emoji: emoji, senderName: senderName),
               ];
               if (_emojiBursts.length > 2) {
                 _emojiBursts = _emojiBursts.sublist(_emojiBursts.length - 2);
@@ -1111,9 +1443,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       );
     } catch (error) {
       if (!mounted) rethrow;
-      setState(
-        () => _message = 'Couldn’t send message. Try again.',
-      );
+      setState(() => _message = 'Couldn’t send message. Try again.');
       rethrow;
     }
   }
@@ -1346,9 +1676,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// visually consistent with the app's dark glass surfaces rather than
   /// the default Material Snackbar look.
   void _showPresenceSnackbar(String message) {
-    if (!mounted) return;
-    try {
-      ScaffoldMessenger.of(context)
+    _presentSnackbar((messenger) {
+      messenger
         ..clearSnackBars()
         ..showSnackBar(
           SnackBar(
@@ -1378,14 +1707,31 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             ),
           ),
         );
-    } on FlutterError catch (error) {
-      // ScaffoldMessenger throws if no Scaffold ancestor exists — e.g. the
-      // widget tree is transitioning during dispose or navigation. Log and
-      // silently drop the snackbar rather than crashing.
-      debugPrint(
-        '[OneOneUI] Could not show presence snackbar: $error — '
-        'message=$message',
-      );
+    }, debugLabel: 'presence snackbar message=$message');
+  }
+
+  /// True when a SnackBar can actually be presented: the widget is mounted,
+  /// the app is foregrounded, and a ScaffoldMessenger is in the tree.
+  /// Backgrounded Flutter views unregister Scaffolds, so showSnackBar
+  /// asserts `_scaffolds.isNotEmpty` even while `mounted` is still true.
+  bool get _canPresentSnackbar {
+    if (!mounted) return false;
+    if (_appLifecycle != AppLifecycleState.resumed) return false;
+    if (_inPictureInPicture) return false;
+    return ScaffoldMessenger.maybeOf(context) != null;
+  }
+
+  void _presentSnackbar(
+    void Function(ScaffoldMessengerState messenger) present, {
+    required String debugLabel,
+  }) {
+    if (!_canPresentSnackbar) return;
+    try {
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      if (messenger == null) return;
+      present(messenger);
+    } catch (error) {
+      debugPrint('[OneOneUI] Could not show $debugLabel: $error');
     }
   }
 
@@ -1652,7 +1998,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // If someone else is already online in this group, let the user join
     // directly — no nudge required since the room is already active.
     if (_anyPeerOnline) {
-      unawaited(_goOnline());
+      unawaited(_goOnline(userIntent: true));
       return;
     }
     // Nobody is online yet — the room doesn't exist. Prompt the user to
@@ -1669,12 +2015,24 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
   }
 
-  Future<void> _goOnline() async {
+  Future<void> _goOnline({bool userIntent = false}) async {
+    if (!userIntent && !_explicitJoinIntent) {
+      LogManager.log(
+        LogLevel.warn,
+        'LiveKitManager',
+        'Blocked room connect without explicit join intent',
+        userId: _session.userId,
+        groupId: _selectedGroup?.groupId,
+      );
+      return;
+    }
+    _explicitJoinIntent = true;
     // Going online resets the nudge-origin marker; the nudge path re-asserts
     // it after a successful connect so manual joins are never mislabeled.
     _enteredViaNudge = false;
     final group = _selectedGroup;
     if (group == null) {
+      _explicitJoinIntent = false;
       setState(() => _message = 'Create or join a group first.');
       return;
     }
@@ -1683,6 +2041,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
     if (!_serviceReady) {
+      _explicitJoinIntent = false;
       setState(() => _message = 'Invite a friend to enable voice service.');
       return;
     }
@@ -1704,6 +2063,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _todayOnlineSeconds = loadedSeconds;
     }
     if (_todayOnlineSeconds >= PresenceConfig.dailyUsageCap.inSeconds) {
+      _explicitJoinIntent = false;
       if (!mounted) return;
       unawaited(
         AnalyticsService.logDailyUsageCapReached(groupId: group.groupId),
@@ -1816,6 +2176,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         unawaited(preparedRoom.dispose());
       }
       await _disconnectLiveKit();
+      _explicitJoinIntent = false;
       if (createdSession != null) {
         try {
           await _onlineRepository.goAway(createdSession);
@@ -1847,7 +2208,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         .firstOrNull;
     await _goAway();
     if (!mounted || _onlineSession != null) return;
-    await _goOnline();
+    await _goOnline(userIntent: true);
     if (!mounted || _onlineSession?.groupId != nextGroup.groupId) return;
     _showPresenceSnackbar(
       'You joined ${nextGroup.name}. '
@@ -1856,6 +2217,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _goAway({String reason = 'user_away'}) async {
+    _explicitJoinIntent = false;
+    _deferredNudgeAction = null;
+    _liveSessionActiveOnBackground = false;
     final session = _onlineSession;
     if (session == null) {
       setState(() => _state = 'away');
@@ -2105,6 +2469,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// [_exitCallModeDueToTimeout] after [PresenceConfig.callModeTimeout].
   void _scheduleCallModeTimeout() {
     _callModeTimeoutTimer?.cancel();
+    unawaited(VoiceOverlayBridge.warmup());
     _callModeTimeoutTimer = Timer(PresenceConfig.callModeTimeout, () {
       _callModeTimeoutTimer = null;
       unawaited(_exitCallModeDueToTimeout());
@@ -2125,6 +2490,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     setState(() => _connectionModeBusy = true);
     try {
+      // Concurrent with the mic/mode cutover so the switch is not delayed
+      // by TTS. Native side no-ops when media volume is muted.
+      unawaited(VoiceOverlayBridge.announceCallModeTimeout());
       await _setMicrophoneEnabled(false);
       await _onlineRepository.setConnectionMode(
         session,
@@ -2149,9 +2517,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   void _showCallModeTimeoutSnackbar() {
-    if (!mounted) return;
-    try {
-      ScaffoldMessenger.of(context)
+    _presentSnackbar((messenger) {
+      messenger
         ..clearSnackBars()
         ..showSnackBar(
           SnackBar(
@@ -2189,17 +2556,24 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             ),
           ),
         );
-    } on FlutterError catch (error) {
-      debugPrint(
-        '[OneOneUI] Could not show call-mode timeout snackbar: $error',
-      );
-    }
+    }, debugLabel: 'call-mode timeout snackbar');
   }
 
   Future<void> _connectLiveKit(
     OnlineSession session, {
     Room? preparedRoom,
   }) async {
+    if (!_explicitJoinIntent) {
+      LogManager.log(
+        LogLevel.warn,
+        'LiveKitManager',
+        'Blocked room.connect without explicit join intent '
+            'room=${session.livekitRoomName}',
+        userId: session.userId,
+        groupId: session.groupId,
+      );
+      throw StateError('LiveKit connect refused without explicit join intent.');
+    }
     // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
     // release. Reset once per connect attempt so the post-connect subscribe
     // and first-audio steps below are only logged for THIS go-live.
@@ -2229,7 +2603,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           adaptiveStream: false,
           dynacast: false,
           defaultAudioOutputOptions: AudioOutputOptions(speakerOn: speakerOn),
-          defaultAudioCaptureOptions: AudioCaptureOptions(processor: noiseFilter),
+          defaultAudioCaptureOptions: AudioCaptureOptions(
+            processor: noiseFilter,
+          ),
         ),
       );
     }
@@ -2253,7 +2629,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       LogLevel.info,
       'LiveKitManager',
       'Room connect attempt url=${session.livekitServerUrl} '
-      'room=${session.livekitRoomName}',
+          'room=${session.livekitRoomName}',
       userId: session.userId,
       groupId: session.groupId,
     );
@@ -2400,9 +2776,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _session = IdentitySession(
           user: _session.user,
           device: _session.device,
-          settings: _session.settings.copyWith(
-            audioOutputPreference: current,
-          ),
+          settings: _session.settings.copyWith(audioOutputPreference: current),
         );
       });
       await _applyPreferredAudioRoute();
@@ -2502,119 +2876,124 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   void _attachRoomListener(Room room) {
-    _roomListener = attachLiveKitLifecycleLogs(
-      room.createListener(),
-      userId: _session.userId,
-      groupId: _selectedGroup?.groupId ?? _onlineSession?.groupId,
-    )
-      ..on<RoomConnectedEvent>((_) {
-        _syncConnectionQualities(room);
-        _setMessage(LiveKitStatus.connected);
-        _logLocalParticipantPermissions(room);
-      })
-      ..on<RoomReconnectingEvent>((_) {
-        _setStateAndMessage('reconnecting', LiveKitStatus.reconnecting);
-      })
-      ..on<RoomReconnectedEvent>((_) {
-        _syncConnectionQualities(room);
-        _logLocalParticipantPermissions(room);
-        // Reconnection can drop the local audio track — restore it based on
-        // the current talk/call state so the participant never silently
-        // becomes subscriber-only.
-        unawaited(_restoreMicrophoneAfterReconnect());
-        _setStateAndMessage('live', LiveKitStatus.connected);
-      })
-      ..on<RoomDisconnectedEvent>((event) {
-        unawaited(
-          _handleConnectionLoss(
-            LiveKitStatus.fromDisconnectReason(event.reason),
-          ),
-        );
-      })
-      ..on<ParticipantConnectedEvent>((event) {
-        _updateParticipantConnectionQuality(
-          event.participant,
-          event.participant.connectionQuality,
-        );
-      })
-      ..on<ParticipantDisconnectedEvent>((event) {
-        final userId = _participantUserIdFromIdentity(
-          event.participant.identity,
-        );
-        if (userId != null) _showPeerLostConnection(userId);
-      })
-      ..on<ParticipantConnectionQualityUpdatedEvent>((event) {
-        _updateParticipantConnectionQuality(
-          event.participant,
-          event.connectionQuality,
-        );
-      })
-      ..on<TrackSubscribedEvent>((event) {
-        // Subscription is an implementation detail — keep UI status clean.
-        // [DEBUG] Go-live latency tracing added Aug 12. Remove before
-        // production release. Only log the FIRST subscribed remote audio
-        // track per go-live, measured from when room.connect() resolved.
-        if (!_goLiveFirstSubscribeLogged &&
-            event.publication.kind == TrackType.AUDIO) {
-          _goLiveFirstSubscribeLogged = true;
-          final startedAt = _goLiveConnectResolvedAtMs;
-          if (startedAt != null) {
-            _goLiveStepEnd(
-              6,
-              'Remote participant (sender) detected / subscribed — '
-              'identity=${event.participant.identity}',
-              startedAt,
+    _roomListener =
+        attachLiveKitLifecycleLogs(
+            room.createListener(),
+            userId: _session.userId,
+            groupId: _selectedGroup?.groupId ?? _onlineSession?.groupId,
+          )
+          ..on<RoomConnectedEvent>((_) {
+            _syncConnectionQualities(room);
+            _setMessage(LiveKitStatus.connected);
+            _logLocalParticipantPermissions(room);
+          })
+          ..on<RoomReconnectingEvent>((_) {
+            _setStateAndMessage('reconnecting', LiveKitStatus.reconnecting);
+          })
+          ..on<RoomReconnectedEvent>((_) {
+            _syncConnectionQualities(room);
+            _logLocalParticipantPermissions(room);
+            // Reconnection can drop the local audio track — restore it based on
+            // the current talk/call state so the participant never silently
+            // becomes subscriber-only.
+            unawaited(_restoreMicrophoneAfterReconnect());
+            _setStateAndMessage('live', LiveKitStatus.connected);
+          })
+          ..on<RoomDisconnectedEvent>((event) {
+            unawaited(
+              _handleConnectionLoss(
+                LiveKitStatus.fromDisconnectReason(event.reason),
+              ),
             );
-          }
-        }
-      })
-      ..on<ActiveSpeakersChangedEvent>((event) {
-        final previousRemoteSpeakers = _speakingUserIds.where(
-          (id) => id != _session.userId,
-        );
-        final speaking = <String>{};
-        for (final speaker in event.speakers) {
-          final userId =
-              LiveKitStatus.userIdFromIdentity(speaker.identity) ??
-              _participantUserIdFromIdentity(speaker.identity);
-          if (userId != null) speaking.add(userId);
-        }
-        if (!mounted) return;
-        final newlySpeakingRemote = speaking
-            .where((id) => id != _session.userId)
-            .any((id) => !previousRemoteSpeakers.contains(id));
-        final hasRemoteSpeaker = speaking.any((id) => id != _session.userId);
-        // [DEBUG] Go-live latency tracing added Aug 12. Remove before
-        // production release. Only log the FIRST remote-speaking moment per
-        // go-live, measured from when room.connect() resolved.
-        if (!_goLiveFirstAudioLogged && hasRemoteSpeaker) {
-          _goLiveFirstAudioLogged = true;
-          final startedAt = _goLiveConnectResolvedAtMs;
-          if (startedAt != null) {
-            _goLiveStepEnd(
-              7,
-              'Audio track from sender is playing — first remote speaker detected',
-              startedAt,
+          })
+          ..on<ParticipantConnectedEvent>((event) {
+            _updateParticipantConnectionQuality(
+              event.participant,
+              event.participant.connectionQuality,
             );
-          }
-        }
-        if (hasRemoteSpeaker || speaking.contains(_session.userId)) {
-          _recordVoiceActivity();
-        }
-        if (newlySpeakingRemote && _talkSession != null) {
-          unawaited(_handleRemoteSpeakerStarted());
-        } else if (speaking.any((id) => id != _session.userId)) {
-          // Never let active-speaker auto-routing override the stored choice.
-          unawaited(_applyPreferredAudioRoute());
-        }
-        setState(() {
-          _speakingUserIds = speaking;
-          final remoteSpeaking = speaking.any((id) => id != _session.userId);
-          if (remoteSpeaking && _talkSession == null) {
-            _message = LiveKitStatus.receivingVoice;
-          }
-        });
-      });
+          })
+          ..on<ParticipantDisconnectedEvent>((event) {
+            final userId = _participantUserIdFromIdentity(
+              event.participant.identity,
+            );
+            if (userId != null) _showPeerLostConnection(userId);
+          })
+          ..on<ParticipantConnectionQualityUpdatedEvent>((event) {
+            _updateParticipantConnectionQuality(
+              event.participant,
+              event.connectionQuality,
+            );
+          })
+          ..on<TrackSubscribedEvent>((event) {
+            // Subscription is an implementation detail — keep UI status clean.
+            // [DEBUG] Go-live latency tracing added Aug 12. Remove before
+            // production release. Only log the FIRST subscribed remote audio
+            // track per go-live, measured from when room.connect() resolved.
+            if (!_goLiveFirstSubscribeLogged &&
+                event.publication.kind == TrackType.AUDIO) {
+              _goLiveFirstSubscribeLogged = true;
+              final startedAt = _goLiveConnectResolvedAtMs;
+              if (startedAt != null) {
+                _goLiveStepEnd(
+                  6,
+                  'Remote participant (sender) detected / subscribed — '
+                  'identity=${event.participant.identity}',
+                  startedAt,
+                );
+              }
+            }
+          })
+          ..on<ActiveSpeakersChangedEvent>((event) {
+            final previousRemoteSpeakers = _speakingUserIds.where(
+              (id) => id != _session.userId,
+            );
+            final speaking = <String>{};
+            for (final speaker in event.speakers) {
+              final userId =
+                  LiveKitStatus.userIdFromIdentity(speaker.identity) ??
+                  _participantUserIdFromIdentity(speaker.identity);
+              if (userId != null) speaking.add(userId);
+            }
+            if (!mounted) return;
+            final newlySpeakingRemote = speaking
+                .where((id) => id != _session.userId)
+                .any((id) => !previousRemoteSpeakers.contains(id));
+            final hasRemoteSpeaker = speaking.any(
+              (id) => id != _session.userId,
+            );
+            // [DEBUG] Go-live latency tracing added Aug 12. Remove before
+            // production release. Only log the FIRST remote-speaking moment per
+            // go-live, measured from when room.connect() resolved.
+            if (!_goLiveFirstAudioLogged && hasRemoteSpeaker) {
+              _goLiveFirstAudioLogged = true;
+              final startedAt = _goLiveConnectResolvedAtMs;
+              if (startedAt != null) {
+                _goLiveStepEnd(
+                  7,
+                  'Audio track from sender is playing — first remote speaker detected',
+                  startedAt,
+                );
+              }
+            }
+            if (hasRemoteSpeaker || speaking.contains(_session.userId)) {
+              _recordVoiceActivity();
+            }
+            if (newlySpeakingRemote && _talkSession != null) {
+              unawaited(_handleRemoteSpeakerStarted());
+            } else if (speaking.any((id) => id != _session.userId)) {
+              // Never let active-speaker auto-routing override the stored choice.
+              unawaited(_applyPreferredAudioRoute());
+            }
+            setState(() {
+              _speakingUserIds = speaking;
+              final remoteSpeaking = speaking.any(
+                (id) => id != _session.userId,
+              );
+              if (remoteSpeaking && _talkSession == null) {
+                _message = LiveKitStatus.receivingVoice;
+              }
+            });
+          });
   }
 
   /// Logs the local participant's publishing/subscribing permissions and
@@ -2622,7 +3001,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   void _logLocalParticipantPermissions(Room room) {
     final participant = room.localParticipant;
     if (participant == null) {
-      debugPrint('[LiveKit] No local participant available for permission check.');
+      debugPrint(
+        '[LiveKit] No local participant available for permission check.',
+      );
       return;
     }
     debugPrint(
@@ -2707,6 +3088,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _usagePersistTimer?.cancel();
     _usagePersistTimer = null;
     _enteredViaNudge = false;
+    _explicitJoinIntent = false;
+    _deferredNudgeAction = null;
+    _liveSessionActiveOnBackground = false;
     if (mounted) {
       setState(() {
         _onlineSession = null;
@@ -2751,6 +3135,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// sole connected participant for [PresenceConfig.soloParticipantTimeout].
   /// Reports the invalid state as a non-fatal bug (with on-device logs) and
   /// takes the user offline so they never sit alone online indefinitely.
+  /// SnackBars are only shown while the app is foregrounded with a Scaffold.
   Future<void> _handleSoloTimeout(SoloSessionContext context) async {
     final session = _onlineSession;
     if (session == null || !mounted) return;
@@ -2906,13 +3291,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         session: _session,
         identityRepository: widget.identityRepository,
         manageableGroups: ownedGroups,
-        onManageGroup:
-            ownedGroups.isEmpty ? null : _openGroupManagement,
+        onManageGroup: ownedGroups.isEmpty ? null : _openGroupManagement,
       ),
     );
   }
 
   void _openNudges() {
+    if (_incomingPromptNudge != null) return;
     final group = _selectedGroup;
     if (group == null) return;
     if (_session.settings.hapticsEnabled) {
@@ -2981,32 +3366,40 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       );
     }
     if (!_session.device.micPermissionGranted && _onlineSession == null) {
-      warnings.add(_SetupWarning(
-        text: 'Microphone permission has not been confirmed.',
-        accent: accent,
-        onTap: () => _requestMicPermissionFromSetup(),
-      ));
+      warnings.add(
+        _SetupWarning(
+          text: 'Microphone permission has not been confirmed.',
+          accent: accent,
+          onTap: () => _requestMicPermissionFromSetup(),
+        ),
+      );
     }
     if (!_session.device.notificationPermissionGranted) {
-      warnings.add(_SetupWarning(
-        text: 'Notification permission is required for closed-app nudges.',
-        accent: accent,
-        onTap: () => _requestNotificationPermissionFromSetup(),
-      ));
+      warnings.add(
+        _SetupWarning(
+          text: 'Notification permission is required for closed-app nudges.',
+          accent: accent,
+          onTap: () => _requestNotificationPermissionFromSetup(),
+        ),
+      );
     }
     if (_session.device.fcmToken == null) {
-      warnings.add(_SetupWarning(
-        text: 'Push registration is not ready. Reopen the app while online.',
-        accent: accent,
-        onTap: null, // Needs app restart — informational only.
-      ));
+      warnings.add(
+        _SetupWarning(
+          text: 'Push registration is not ready. Reopen the app while online.',
+          accent: accent,
+          onTap: null, // Needs app restart — informational only.
+        ),
+      );
     }
     if (!_session.device.batteryOptimizationIgnored) {
-      warnings.add(_SetupWarning(
-        text: 'Battery optimization may interrupt background mode.',
-        accent: accent,
-        onTap: () => _requestBatteryOptimizationFromSetup(),
-      ));
+      warnings.add(
+        _SetupWarning(
+          text: 'Battery optimization may interrupt background mode.',
+          accent: accent,
+          onTap: () => _requestBatteryOptimizationFromSetup(),
+        ),
+      );
     }
     return warnings;
   }
@@ -3039,7 +3432,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
     if (!mounted) return;
     setState(
-      () => _message = 'Battery optimization request sent. Check your device settings.',
+      () => _message =
+          'Battery optimization request sent. Check your device settings.',
     );
   }
 
@@ -3280,7 +3674,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           Padding(
                             padding: EdgeInsets.symmetric(horizontal: 24.w),
                             child: Text(
-                              _message!,
+                              UserFacingCopy.sanitize(_message!),
                               textAlign: TextAlign.center,
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
@@ -3414,6 +3808,38 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             EmojiBurstOverlay(
               bursts: _emojiBursts,
               onBurstFinished: _onEmojiBurstFinished,
+            ),
+          if (_incomingPromptNudge != null)
+            IncomingNudgeDialogue(
+              item: IncomingNudgePromptItem(
+                nudge: _incomingPromptNudge!,
+                groupName:
+                    _groups
+                        .where(
+                          (group) =>
+                              group.groupId == _incomingPromptNudge!.groupId,
+                        )
+                        .firstOrNull
+                        ?.name ??
+                    'Group',
+                remainingOtherCount:
+                    (_nudgeInbox
+                                .presentationQueue()
+                                .where(
+                                  (nudge) => _groups.any(
+                                    (group) => group.groupId == nudge.groupId,
+                                  ),
+                                )
+                                .length -
+                            1)
+                        .clamp(0, 99),
+              ),
+              accent: accent,
+              busy: _incomingPromptBusy,
+              onAccept: () =>
+                  unawaited(_acceptIncomingNudge(_incomingPromptNudge!)),
+              onDecline: () =>
+                  unawaited(_declineIncomingNudge(_incomingPromptNudge!)),
             ),
         ],
       ),
@@ -4077,113 +4503,113 @@ class _FriendChip extends StatelessWidget {
 
     return Column(
       children: [
-          Stack(
-            clipBehavior: Clip.none,
-            alignment: Alignment.center,
-            children: [
-              if (isSpeaking)
-                const _TalkingPulseRing(color: Color(0xff7CFF6B), size: 60),
-              Container(
-                width: 52.w,
-                height: 52.w,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: const Color(0xff2a2a2a),
-                  border: Border.all(
-                    color: ringColor,
-                    width: isSpeaking ? 2.5 : 2,
-                  ),
+        Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
+          children: [
+            if (isSpeaking)
+              const _TalkingPulseRing(color: Color(0xff7CFF6B), size: 60),
+            Container(
+              width: 52.w,
+              height: 52.w,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xff2a2a2a),
+                border: Border.all(
+                  color: ringColor,
+                  width: isSpeaking ? 2.5 : 2,
                 ),
-                child: ClipOval(
-                  child: ProfileAvatar(
-                    profilePhotoUrl: profilePhotoUrl,
-                    profilePhotoBase64: profilePhotoBase64,
-                    avatarAsset: avatarAsset,
-                    radius: 26.w,
-                    backgroundColor: const Color(0xff2a2a2a),
-                    fallback: Text(
-                      initial,
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 18.sp,
-                        fontWeight: FontWeight.w700,
-                      ),
+              ),
+              child: ClipOval(
+                child: ProfileAvatar(
+                  profilePhotoUrl: profilePhotoUrl,
+                  profilePhotoBase64: profilePhotoBase64,
+                  avatarAsset: avatarAsset,
+                  radius: 26.w,
+                  backgroundColor: const Color(0xff2a2a2a),
+                  fallback: Text(
+                    initial,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18.sp,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
                 ),
               ),
-              Positioned(
-                right: -4,
-                bottom: -2,
-                // Away state uses a Material "dark mode" glyph inside a
-                // circular badge (subtle shadow) instead of the old 🌙 emoji.
-                // NOTE: no HTML/CSS reference file was available in this
-                // session, so colors are mapped to existing app tokens
-                // (avatar-chip background + white70 icon) rather than the
-                // exact reference values — adjust here if the reference
-                // surfaces later.
-                child: live
-                    ? Text('🟢', style: TextStyle(fontSize: 14.sp))
-                    : Container(
-                        width: 20.w,
-                        height: 20.w,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: const Color(0xff2a2a2a),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Colors.black45,
-                              blurRadius: 3,
-                              offset: Offset(0, 1),
-                            ),
-                          ],
-                        ),
-                        child: Icon(
-                          Icons.dark_mode_rounded,
-                          color: Colors.white70,
-                          size: 13.sp,
-                        ),
+            ),
+            Positioned(
+              right: -4,
+              bottom: -2,
+              // Away state uses a Material "dark mode" glyph inside a
+              // circular badge (subtle shadow) instead of the old 🌙 emoji.
+              // NOTE: no HTML/CSS reference file was available in this
+              // session, so colors are mapped to existing app tokens
+              // (avatar-chip background + white70 icon) rather than the
+              // exact reference values — adjust here if the reference
+              // surfaces later.
+              child: live
+                  ? Text('🟢', style: TextStyle(fontSize: 14.sp))
+                  : Container(
+                      width: 20.w,
+                      height: 20.w,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xff2a2a2a),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Colors.black45,
+                            blurRadius: 3,
+                            offset: Offset(0, 1),
+                          ),
+                        ],
                       ),
-              ),
-            ],
+                      child: Icon(
+                        Icons.dark_mode_rounded,
+                        color: Colors.white70,
+                        size: 13.sp,
+                      ),
+                    ),
+            ),
+          ],
+        ),
+        SizedBox(height: 4.h),
+        SizedBox(
+          width: 72.w,
+          child: Text(
+            isSpeaking ? '🗣️ talking' : name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: isSpeaking ? const Color(0xff7CFF6B) : Colors.white70,
+              fontSize: 10.sp,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-          SizedBox(height: 4.h),
+        ),
+        if (degradedNetwork && !isSpeaking) ...[
+          SizedBox(height: 2.h),
           SizedBox(
             width: 72.w,
             child: Text(
-              isSpeaking ? '🗣️ talking' : name,
-              maxLines: 1,
+              "${shortName.isEmpty ? 'Their' : shortName}'s network is low",
+              maxLines: 2,
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.center,
               style: TextStyle(
-                color: isSpeaking ? const Color(0xff7CFF6B) : Colors.white70,
-                fontSize: 10.sp,
+                color: const Color(0xffffb347),
+                fontSize: 8.sp,
                 fontWeight: FontWeight.w600,
+                height: 1.1,
               ),
             ),
           ),
-          if (degradedNetwork && !isSpeaking) ...[
-            SizedBox(height: 2.h),
-            SizedBox(
-              width: 72.w,
-              child: Text(
-                "${shortName.isEmpty ? 'Their' : shortName}'s network is low",
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: const Color(0xffffb347),
-                  fontSize: 8.sp,
-                  fontWeight: FontWeight.w600,
-                  height: 1.1,
-                ),
-              ),
-            ),
-          ],
         ],
-      );
+      ],
+    );
   }
 }
 
@@ -5658,11 +6084,7 @@ class _SetupLine extends StatelessWidget {
 /// A setup warning with an optional tap action (e.g. request the missing
 /// permission directly from the setup modal).
 class _SetupWarning {
-  const _SetupWarning({
-    required this.text,
-    required this.accent,
-    this.onTap,
-  });
+  const _SetupWarning({required this.text, required this.accent, this.onTap});
 
   final String text;
   final Color accent;
@@ -5694,7 +6116,10 @@ class _TappableSetupLine extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(8),
         child: Padding(
-          padding: EdgeInsets.symmetric(vertical: 4.h, horizontal: tappable ? 6.w : 0),
+          padding: EdgeInsets.symmetric(
+            vertical: 4.h,
+            horizontal: tappable ? 6.w : 0,
+          ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -5713,7 +6138,11 @@ class _TappableSetupLine extends StatelessWidget {
                 ),
               ),
               if (tappable)
-                Icon(Icons.arrow_forward_rounded, size: 16, color: colors.onSurface.withValues(alpha: 0.3)),
+                Icon(
+                  Icons.arrow_forward_rounded,
+                  size: 16,
+                  color: colors.onSurface.withValues(alpha: 0.3),
+                ),
             ],
           ),
         ),

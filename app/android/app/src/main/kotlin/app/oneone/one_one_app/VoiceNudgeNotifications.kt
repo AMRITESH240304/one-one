@@ -64,14 +64,19 @@ object VoiceNudgeNotifications {
         cachedAudioAvailable: Boolean = false,
         isPlaying: Boolean = false,
         largeIcon: Bitmap? = null,
+        senderUserId: String? = null,
     ): Notification {
         ensureChannels(context)
-        val openIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
+        val openIntent = openNudgeIntent(
+            context,
+            eventId,
+            groupId,
+            senderUserId,
+            VoiceNudgeNotifications.idFor(eventId),
+        )
         val contentIntent = PendingIntent.getActivity(
             context,
-            7001,
+            requestCode(eventId, "open"),
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -84,7 +89,9 @@ object VoiceNudgeNotifications {
         val configured = builder
             .setSmallIcon(nudgeSmallIcon)
             .setContentTitle("🎙️ $senderName nudged you")
-            .setContentText(status)
+            .setContentText(
+                sanitizeNotificationCopy(status, FCM_USER_DELIVERY_FAILURE),
+            )
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -138,12 +145,17 @@ object VoiceNudgeNotifications {
         title: String,
         body: String,
         largeIcon: Bitmap? = null,
+        senderUserId: String? = null,
     ): Notification {
         ensureChannels(context)
         val notificationId = idFor(eventId)
-        val openIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
+        val openIntent = openNudgeIntent(
+            context,
+            eventId,
+            groupId,
+            senderUserId,
+            notificationId,
+        )
         val contentIntent = PendingIntent.getActivity(
             context,
             requestCode(eventId, "open"),
@@ -158,8 +170,10 @@ object VoiceNudgeNotifications {
         }
         val configured = builder
             .setSmallIcon(nudgeSmallIcon)
-            .setContentTitle(title)
-            .setContentText(body)
+            .setContentTitle(sanitizeNotificationCopy(title, "Duo"))
+            .setContentText(
+                sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
+            )
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -258,8 +272,10 @@ object VoiceNudgeNotifications {
         return builder
             .setSmallIcon(appSmallIcon)
             .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
-            .setContentTitle(title)
-            .setContentText(body)
+            .setContentTitle(sanitizeNotificationCopy(title, "Duo"))
+            .setContentText(
+                sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
+            )
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_SOCIAL)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -301,9 +317,15 @@ object VoiceNudgeNotifications {
         val configured = builder
             .setSmallIcon(appSmallIcon)
             .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
-            .setContentTitle(title)
-            .setContentText(body)
-            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setContentTitle(sanitizeNotificationCopy(title, "Duo"))
+            .setContentText(
+                sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
+            )
+            .setStyle(
+                Notification.BigTextStyle().bigText(
+                    sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
+                ),
+            )
             .setNumber(unreadCount.coerceAtLeast(1))
             .setOnlyAlertOnce(unreadCount > 1)
             .setColor(Color.rgb(248, 190, 3))
@@ -414,6 +436,23 @@ object VoiceNudgeNotifications {
         putExtra(VoiceNudgeContract.extraEventId, eventId)
         putExtra(VoiceNudgeContract.extraGroupId, groupId)
         putExtra(VoiceNudgeContract.extraNotificationId, notificationId)
+    }
+
+    private fun openNudgeIntent(
+        context: Context,
+        eventId: String,
+        groupId: String,
+        senderUserId: String?,
+        notificationId: Int,
+    ) = Intent(context, MainActivity::class.java).apply {
+        action = VoiceNudgeContract.actionOpenNudge
+        flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        putExtra(VoiceNudgeContract.extraEventId, eventId)
+        putExtra(VoiceNudgeContract.extraGroupId, groupId)
+        putExtra(VoiceNudgeContract.extraNotificationId, notificationId)
+        if (!senderUserId.isNullOrBlank()) {
+            putExtra(VoiceNudgeContract.extraSenderUserId, senderUserId)
+        }
     }
 
     private fun responseIntent(

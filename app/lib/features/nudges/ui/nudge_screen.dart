@@ -8,12 +8,15 @@ import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:record/record.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/logging/user_facing_copy.dart';
 import '../../../core/network/api_client.dart';
 import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
 import '../../identity/ui/profile_avatar.dart';
 import '../data/android_voice_nudge_bridge.dart';
+import '../data/media_volume_store.dart';
 import '../data/nudge_repository.dart';
+import '../models/media_volume_reading.dart';
 import '../nudge_cooldowns.dart';
 import '../nudge_failure_memory.dart';
 import '../nudge_status_memory.dart';
@@ -98,6 +101,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   Timer? _deliveryTimeoutTimer;
   final Map<String, _PendingRecipient> _expectedRecipients = {};
   final Map<String, NudgeDeliveryResult> _resultsByUserId = {};
+  MediaVolumeFeedback _rtdbVolumeFeedback = MediaVolumeFeedback.none;
 
   static const _deliveryConfirmationTimeout = Duration(seconds: 12);
 
@@ -120,10 +124,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   /// previous nudge (until success or [NudgeFailureMemory.timeout]).
   /// B5: Schedules a 10-minute expiry alarm on the sender's device so the
   /// sender gets a local notification if the receiver doesn't accept in time.
-  void _scheduleSenderExpiry(
-    String eventId,
-    List<_PendingRecipient> expected,
-  ) {
+  void _scheduleSenderExpiry(String eventId, List<_PendingRecipient> expected) {
     if (!Platform.isAndroid) return;
     final first = expected.firstOrNull;
     if (first == null) return;
@@ -237,14 +238,117 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       final friend = _friends.where((f) => f.userId == id).firstOrNull;
       if (friend == null || _isOnline(friend.userId)) return const [];
       return [
-        _PendingRecipient(userId: friend.userId, displayName: friend.displayName),
+        _PendingRecipient(
+          userId: friend.userId,
+          displayName: friend.displayName,
+        ),
       ];
     }
     return _nudgeableFriends
         .map(
-          (f) => _PendingRecipient(userId: f.userId, displayName: f.displayName),
+          (f) =>
+              _PendingRecipient(userId: f.userId, displayName: f.displayName),
         )
         .toList(growable: false);
+  }
+
+  List<MediaVolumeRecipient> _volumeRecipients(
+    List<_PendingRecipient> expected,
+  ) => [
+    for (final recipient in expected)
+      MediaVolumeRecipient(
+        userId: recipient.userId,
+        displayName: recipient.displayName,
+      ),
+  ];
+
+  Future<MediaVolumeFeedback> _loadVolumeFeedback(
+    List<_PendingRecipient> expected,
+  ) async {
+    try {
+      return await MediaVolumeStore.instance
+          .feedbackFor(
+            groupId: widget.group.groupId,
+            recipients: _volumeRecipients(expected),
+          )
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {
+      return MediaVolumeFeedback.none;
+    }
+  }
+
+  Future<void> _prepareDeliveryWait({
+    required String eventId,
+    required List<_PendingRecipient> expected,
+    required String waitingMessage,
+  }) async {
+    final feedback = await _loadVolumeFeedback(expected);
+    if (!mounted) return;
+    _rtdbVolumeFeedback = feedback;
+    _beginAwaitingDeliveryConfirmation(
+      eventId,
+      waitingMessage: waitingMessage,
+      expected: expected,
+    );
+    if (!feedback.hasWarnings) return;
+    setState(() {
+      _message = feedback.joinedWarnings;
+      _messageIsError = false;
+      _messageIsWarning = true;
+      _messagePending = true;
+    });
+  }
+
+  Future<void> _showImmediateSendOutcome(
+    List<_PendingRecipient> expected,
+  ) async {
+    if (mounted) {
+      setState(() {
+        _message = 'Sent\u2026';
+        _messageIsError = false;
+        _messageIsWarning = false;
+        _messagePending = true;
+      });
+    }
+    final feedback = await _loadVolumeFeedback(expected);
+    if (!mounted) return;
+    _rtdbVolumeFeedback = feedback;
+    if (feedback.hasWarnings) {
+      NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
+      _recordLastStatus(
+        _statusForVolumeWarnings(feedback),
+        feedback.joinedWarnings,
+      );
+      setState(() {
+        _message = feedback.joinedWarnings;
+        _messageIsError = false;
+        _messageIsWarning = true;
+        _messagePending = false;
+      });
+    } else {
+      final successMessage = MediaVolumeFeedback.successMessage(
+        recipientCount: expected.length,
+        singleFirstName: expected.length == 1
+            ? mediaVolumeFirstName(expected.first.displayName)
+            : null,
+      );
+      NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
+      _recordLastStatus(LastNudgeStatus.sent, successMessage);
+      setState(() {
+        _message = successMessage;
+        _messageIsError = false;
+        _messageIsWarning = false;
+        _messagePending = false;
+      });
+    }
+    _scheduleAutoDismiss();
+  }
+
+  LastNudgeStatus _statusForVolumeWarnings(MediaVolumeFeedback feedback) {
+    final anyMuted = feedback.bandsByUserId.values.any(
+      (band) => band == MediaVolumeBand.muted,
+    );
+    return anyMuted ? LastNudgeStatus.volumeMuted : LastNudgeStatus.volumeLow;
   }
 
   void _scheduleAutoDismiss() {
@@ -301,11 +405,13 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       }
     }
     // Single expected recipient fallback (unique friend target).
-    matchedId ??=
-        _expectedRecipients.length == 1 ? _expectedRecipients.keys.first : null;
+    matchedId ??= _expectedRecipients.length == 1
+        ? _expectedRecipients.keys.first
+        : null;
     if (matchedId == null || matchedId.isEmpty) {
       // Still useful when the map is empty (legacy path).
-      matchedId = result.recipientUserId ??
+      matchedId =
+          result.recipientUserId ??
           result.recipientName ??
           'unknown_${_resultsByUserId.length}';
     }
@@ -323,7 +429,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _message = _buildDeliveryMessage(partial: true);
         _messageIsError = _resultsByUserId.values.any((r) => !r.played);
-        _messageIsWarning = !_messageIsError &&
+        _messageIsWarning =
+            !_messageIsError &&
             _resultsByUserId.values.any((r) => r.playedButNotAudible);
         _messagePending = true;
       });
@@ -364,10 +471,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     // is surfaced as a warning instead of a "did not receive" error.
     final failed = <NudgeDeliveryResult>[];
     final failedNames = <String>[];
-    final hasAttention = _resultsByUserId.values.any((r) => r.playedButNotAudible);
     for (final entry in _resultsByUserId.entries) {
       final result = entry.value;
-      final name = result.recipientName ??
+      final name =
+          result.recipientName ??
           _expectedRecipients[entry.key]?.displayName ??
           'them';
       if (!result.played) {
@@ -375,6 +482,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         failedNames.add(name.trim().split(RegExp(r'\s+')).first);
       }
     }
+    final volumeWarnings = _mergedVolumeWarnings();
     final totalRecipients = _resultsByUserId.length;
     if (failed.isEmpty) {
       NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
@@ -400,10 +508,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     final summaryMessage = _buildDeliveryMessage(partial: false);
     if (failed.isNotEmpty) {
       _recordLastStatus(LastNudgeStatus.failed, summaryMessage);
-    } else if (hasAttention) {
-      final allMuted = _resultsByUserId.values
-          .where((r) => r.playedButNotAudible)
-          .every((r) => r.attention == 'volume_muted');
+    } else if (volumeWarnings.isNotEmpty) {
+      final allMuted = volumeWarnings.every(
+        (line) => line.contains(' is muted'),
+      );
       _recordLastStatus(
         allMuted ? LastNudgeStatus.volumeMuted : LastNudgeStatus.volumeLow,
         summaryMessage,
@@ -417,7 +525,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _messagePending = false;
       _message = summaryMessage;
       _messageIsError = failed.isNotEmpty;
-      _messageIsWarning = failed.isEmpty && hasAttention;
+      _messageIsWarning = failed.isEmpty && volumeWarnings.isNotEmpty;
     });
     _scheduleAutoDismiss();
   }
@@ -426,7 +534,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     final expected = _expectedRecipients;
     final results = _resultsByUserId.values.toList(growable: false);
     if (results.isEmpty) {
-      return partial ? 'Confirming delivery\u2026' : 'Nudge wasn\u2019t played, try again.';
+      return partial
+          ? 'Confirming delivery\u2026'
+          : 'Nudge wasn\u2019t played, try again.';
     }
 
     final failed = results.where((r) => !r.played).toList(growable: false);
@@ -465,20 +575,17 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       return '$named did not receive the nudge \u2014 everyone else did.';
     }
 
-    // 2) Played, but likely inaudible (muted / very low volume).
-    if (attention.isNotEmpty) {
-      if (attention.length == 1 && results.length == 1) {
-        return _attentionMessage(nameOf(attention.first), attention.first);
-      }
-      final names = attention.map(nameOf).toList(growable: false);
-      final named = _joinNames(names);
-      return 'Nudge played, but $named may not have heard it \u2014 check '
-          'their volume.';
+    // 2) Played, but likely inaudible (muted / low volume) — playback
+    // health wins per recipient; RTDB fills in anyone without a live reading.
+    final volumeWarnings = _mergedVolumeWarnings();
+    if (volumeWarnings.isNotEmpty) {
+      return volumeWarnings.join('\n');
     }
 
     // 3) Clean success.
     if (expected.length <= 1 && results.length == 1) {
-      final name = results.first.recipientName ??
+      final name =
+          results.first.recipientName ??
           expected.values.firstOrNull?.displayName;
       if (name == null) {
         return 'Everyone received the nudge \u2713';
@@ -486,6 +593,47 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       return 'Nudge successfully playing on $name\u2019s device';
     }
     return 'Everyone received the nudge \u2713';
+  }
+
+  /// Per-recipient volume warnings after a send.
+  ///
+  /// Playback `attention` is ground truth at play time. Recipients with no
+  /// playback result (timeout / push) fall back to a fresh RTDB self-report.
+  /// Stale or missing reports are omitted — never a false warning, and never
+  /// used to claim "all OK".
+  List<String> _mergedVolumeWarnings() {
+    final warnings = <String>[];
+    final covered = <String>{};
+
+    void addWarning(String userId, String displayName, MediaVolumeBand? band) {
+      if (band == null || !band.isWarning) return;
+      if (!covered.add(userId)) return;
+      warnings.add(band.warningMessage(mediaVolumeFirstName(displayName))!);
+    }
+
+    for (final entry in _resultsByUserId.entries) {
+      final result = entry.value;
+      if (!result.played) {
+        covered.add(entry.key);
+        continue;
+      }
+      final pending = _expectedRecipients[entry.key];
+      final name = result.recipientName ?? pending?.displayName ?? 'They';
+      addWarning(
+        entry.key,
+        name,
+        MediaVolumeBandX.fromAttention(result.attention),
+      );
+      // Played with no attention = live volume is OK; don't overlay RTDB.
+      covered.add(entry.key);
+    }
+
+    for (final entry in _expectedRecipients.entries) {
+      if (covered.contains(entry.key)) continue;
+      final band = _rtdbVolumeFeedback.bandsByUserId[entry.key];
+      addWarning(entry.key, entry.value.displayName, band);
+    }
+    return warnings;
   }
 
   String _joinNames(List<String> names) {
@@ -513,21 +661,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
             'Duo\u2019s end.';
       default:
         return 'Nudge did not reach $name.';
-    }
-  }
-
-  /// Builds the non-error warning shown when a nudge played but the recipient
-  /// likely didn't hear it (muted / very low volume). Low volume is surfaced
-  /// as the standalone warning "Volume is too low" rather than a "did not
-  /// receive" error.
-  String _attentionMessage(String name, NudgeDeliveryResult r) {
-    switch (r.attention) {
-      case 'volume_low':
-        return 'Volume is too low \u2014 the nudge may not be audible.';
-      case 'volume_muted':
-        return 'Their volume was muted \u2014 the nudge may not be audible.';
-      default:
-        return 'Nudge played on $name\u2019s device, but they may not have heard it.';
     }
   }
 
@@ -639,6 +772,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _messageIsWarning = false;
       _messagePending = false;
     });
+    _rtdbVolumeFeedback = MediaVolumeFeedback.none;
     try {
       final result = await action();
       _cooldowns.record(kind);
@@ -649,10 +783,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         if (eventId != null && eventId.isNotEmpty) {
           // B5: Schedule sender-side 10-minute expiry alarm.
           _scheduleSenderExpiry(eventId, expected);
-          _beginAwaitingDeliveryConfirmation(
-            eventId,
-            waitingMessage: waitingMessage,
+          await _prepareDeliveryWait(
+            eventId: eventId,
             expected: expected,
+            waitingMessage: waitingMessage,
           );
           return;
         }
@@ -708,28 +842,20 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           return;
         }
       }
-      // Push (and unconfirmed ring/voice) — brief success, then 5s dismiss.
-      final successMessage = expected.length == 1
-          ? 'Nudge sent to ${expected.first.displayName.trim().split(RegExp(r'\s+')).first} \u2713'
-          : 'Everyone received the nudge \u2713';
-      NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
-      _recordLastStatus(LastNudgeStatus.sent, successMessage);
-      setState(() {
-        _message = successMessage;
-        _messageIsError = false;
-        _messageIsWarning = false;
-        _messagePending = false;
-      });
-      _scheduleAutoDismiss();
+      // Push (and unconfirmed ring/voice) — fetch receiver-reported volume
+      // before claiming everyone heard it. Stale/missing readings omit the
+      // warning rather than inventing one.
+      await _showImmediateSendOutcome(expected);
     } catch (error, stack) {
       final cancelled = error.toString().toLowerCase().contains('cancel');
-      if (!cancelled) {
+      final expectedDelivery = error is NudgeDeliveryException;
+      if (!cancelled && !expectedDelivery) {
         unawaited(
           CrashlyticsService.recordNudgeFailure(
             error: error,
             stack: stack,
-            failureReason: error is ApiException &&
-                    error.code == 'permission_denied'
+            failureReason:
+                error is ApiException && error.code == 'permission_denied'
                 ? NudgeFailureReason.permissionDeniedFirebase
                 : NudgeFailureReason.unknown,
             senderId: widget.currentUserId,
@@ -738,12 +864,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         );
       }
       if (!mounted) return;
-      final rateLimited = error is ApiException && error.code == 'nudge_rate_limited';
-      final message = error is NudgeDeliveryException
-          ? error.message
-          : rateLimited
-          ? error.message
-          : 'Couldn\u2019t send the nudge. Check your connection.';
+      final rateLimited =
+          error is ApiException && error.code == 'nudge_rate_limited';
+      final message = rateLimited ? error.message : _friendlyError(error);
       // Rate limiting and user-initiated cancellation aren't delivery
       // failures — don't persist those as a group error.
       if (!cancelled && !rateLimited) {
@@ -905,36 +1028,29 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           _elapsed = Duration.zero;
         });
         if (sent && voiceEventId != null && voiceEventId.isNotEmpty) {
-          _beginAwaitingDeliveryConfirmation(
-            voiceEventId,
-            waitingMessage: 'Sent\u2026 confirming it played',
+          await _prepareDeliveryWait(
+            eventId: voiceEventId,
             expected: _recipientsForTarget(),
+            waitingMessage: 'Sent\u2026 confirming it played',
           );
         } else if (sent) {
-          final expected = _recipientsForTarget();
-          final successMessage = expected.length == 1
-              ? 'Nudge sent to ${expected.first.displayName.trim().split(RegExp(r'\s+')).first} \u2713'
-              : 'Everyone received the nudge \u2713';
-          NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
-          _recordLastStatus(LastNudgeStatus.sent, successMessage);
-          setState(() {
-            _message = successMessage;
-            _messageIsError = false;
-            _messageIsWarning = false;
-            _messagePending = false;
-          });
-          _scheduleAutoDismiss();
+          await _showImmediateSendOutcome(_recipientsForTarget());
         }
       }
     }
   }
 
   String _friendlyError(Object error) {
-    if (error is NudgeDeliveryException) return error.message;
     if (error is ApiException && error.code == 'nudge_rate_limited') {
       return error.message;
     }
+    if (error is NudgeDeliveryException) {
+      return UserFacingCopy.sanitize(error.message);
+    }
     final text = error.toString();
+    if (UserFacingCopy.containsInternalIdentifier(text)) {
+      return UserFacingCopy.notificationDeliveryFailure;
+    }
     if (text.contains('nudge_rate_limited')) {
       return 'Nudge limit reached. Please wait before trying again.';
     }
@@ -1099,7 +1215,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                                     friend.displayName.trim().isEmpty
                                         ? '?'
                                         : String.fromCharCode(
-                                            friend.displayName.trim().runes.first,
+                                            friend.displayName
+                                                .trim()
+                                                .runes
+                                                .first,
                                           ).toUpperCase(),
                                     style: TextStyle(
                                       color: Colors.white,
@@ -1388,7 +1507,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                           ? 'Invite a friend before sending a nudge.'
                           : _nudgeableFriends.isEmpty && _message == null
                           ? 'Everyone is already online — no nudge needed.'
-                          : _message!,
+                          : UserFacingCopy.sanitize(
+                              _message!,
+                              fallback:
+                                  UserFacingCopy.notificationDeliveryFailure,
+                            ),
                       isError:
                           _friends.isEmpty ||
                           (_messageIsError && _message != null),
@@ -1676,7 +1799,7 @@ class _NudgeStatus extends StatelessWidget {
           Expanded(
             child: Text(
               message,
-              maxLines: 4,
+              maxLines: 6,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: Colors.white70,

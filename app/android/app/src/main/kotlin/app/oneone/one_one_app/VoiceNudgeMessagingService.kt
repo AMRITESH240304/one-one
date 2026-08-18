@@ -154,11 +154,28 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             "[FCM-07] Message received id=${message.messageId ?: "none"} " +
                 "keys=${data.keys.sorted().joinToString(",")}",
         )
+        try {
+            dispatchMessage(message)
+        } catch (error: Exception) {
+            VoiceNudgeDiagnostics.logFailure("[FCM-E1] Message handling", error)
+            VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                worker = "FCM-E1",
+                error = error,
+                kind = data["type"],
+                eventId = data["eventId"],
+                groupId = data["groupId"],
+            )
+        }
+    }
+
+    private fun dispatchMessage(message: RemoteMessage) {
+        val data = message.data
         val kind = data["type"]
         if (kind == VoiceNudgeContract.kindVoice ||
             kind == VoiceNudgeContract.kindRing ||
             kind == VoiceNudgeContract.kindPush
         ) {
+            MediaVolume.report(this, data["groupId"])
             DeviceLog.info(
                 "NudgeService",
                 "FCM trigger received kind=$kind eventId=${data["eventId"] ?: "-"} " +
@@ -173,10 +190,23 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                     VoiceNudgeDiagnostics.tag,
                     "[FCM-W1] Legacy notification has no type; displaying foreground fallback",
                 )
+                VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                    worker = "W1",
+                    kind = "legacy_notification",
+                    eventId = data["eventId"] ?: message.messageId,
+                    groupId = data["groupId"],
+                    extras = mapOf("checkpoint" to "fcm_legacy_notification_no_type"),
+                )
                 showForegroundNotification(message, "legacy_notification")
                 return
             }
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W1] Ignored data message without type")
+            VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                worker = "W1",
+                eventId = data["eventId"] ?: message.messageId,
+                groupId = data["groupId"],
+                extras = mapOf("checkpoint" to "fcm_data_message_no_type"),
+            )
             return
         }
         when (kind) {
@@ -192,6 +222,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             VoiceNudgeContract.kindPush -> {
                 // B5: Schedule 10-min expiry for push nudges.
                 scheduleNudgeExpiry(data)
+                recordIncomingNudge(data)
                 showActionableNotification(message)
                 data["groupId"]?.takeIf { it.isNotBlank() }
                     ?.let { NudgeReceivedDispatcher.signal(it) }
@@ -217,6 +248,13 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             VoiceNudgeContract.kindRing -> Unit
             else -> {
                 Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W2] Ignored unknown message type=$kind")
+                VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                    worker = "W2",
+                    kind = kind,
+                    eventId = data["eventId"] ?: message.messageId,
+                    groupId = data["groupId"],
+                    extras = mapOf("checkpoint" to "fcm_unknown_message_type"),
+                )
                 return
             }
         }
@@ -227,25 +265,22 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         val eventId = data["eventId"]
         if (eventId == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W3] Ignored $kind without eventId")
-            VoiceNudgeDiagnostics.recordNudgeFailure(
-                reason = "unknown",
-                eventId = null,
+            VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                worker = "W3",
                 kind = kind,
-                extras = mapOf("checkpoint" to "fcm_missing_event_id"),
                 groupId = data["groupId"],
-                senderUserId = data["senderUserId"],
+                extras = mapOf("checkpoint" to "fcm_missing_event_id"),
             )
             return
         }
         val groupId = data["groupId"]?.takeIf { it.isNotBlank() }
         if (groupId == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W10] Ignored $kind without groupId")
-            VoiceNudgeDiagnostics.recordNudgeFailure(
-                reason = "unknown",
-                eventId = eventId,
+            VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                worker = "W10",
                 kind = kind,
+                eventId = eventId,
                 extras = mapOf("checkpoint" to "fcm_missing_group_id"),
-                senderUserId = data["senderUserId"],
             )
             return
         }
@@ -253,20 +288,19 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         // Prefetch/warm the LiveKit connection while playback starts so the
         // accept -> connected path is faster.
         NudgeReceivedDispatcher.signal(groupId)
+        recordIncomingNudge(data)
         val senderName = data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
         val senderPhotoUrl = data["senderPhotoUrl"]?.takeIf { it.isNotBlank() }
         val senderAvatarAsset = data["senderAvatarAsset"]?.takeIf { it.isNotBlank() }
         val durationMs = data["durationMs"]?.toLongOrNull()?.coerceIn(250L, 10_000L)
         if (durationMs == null) {
             Log.w(VoiceNudgeDiagnostics.tag, "[FCM-W4] Ignored $kind with invalid duration")
-            VoiceNudgeDiagnostics.recordNudgeFailure(
-                reason = "unknown",
-                eventId = eventId,
+            VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                worker = "W4",
                 kind = kind,
-                extras = mapOf("checkpoint" to "fcm_invalid_duration"),
+                eventId = eventId,
                 groupId = groupId,
-                senderUserId = data["senderUserId"],
-                senderName = senderName,
+                extras = mapOf("checkpoint" to "fcm_invalid_duration"),
             )
             return
         }
@@ -277,14 +311,12 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 "Nudge not delivered: unknown (expired before playback) eventId=$eventId",
                 groupId = groupId,
             )
-            VoiceNudgeDiagnostics.recordNudgeFailure(
-                reason = "unknown",
-                eventId = eventId,
+            VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                worker = "W5",
                 kind = kind,
-                extras = mapOf("checkpoint" to "fcm_expired_voice"),
+                eventId = eventId,
                 groupId = groupId,
-                senderUserId = data["senderUserId"],
-                senderName = senderName,
+                extras = mapOf("checkpoint" to "fcm_expired_voice"),
             )
             return
         }
@@ -326,19 +358,18 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 groupId = groupId,
                 throwable = error,
             )
-            VoiceNudgeDiagnostics.recordNudgeFailure(
-                reason = failureReason,
-                eventId = eventId,
+            VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                worker = "E3",
+                error = error,
                 kind = kind,
+                eventId = eventId,
+                groupId = groupId,
                 extras = mapOf(
                     "error" to (error.message ?: "unknown"),
                     "error_class" to error.javaClass.simpleName,
                     "checkpoint" to "fcm_start_playback_service",
+                    "failure_reason" to failureReason,
                 ),
-                groupId = data["groupId"],
-                senderUserId = data["senderUserId"],
-                senderName = senderName,
-                throwable = error,
             )
             // The playback service never got a chance to run (and therefore
             // never got to POST its own ack) — report the specific reason
@@ -368,6 +399,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                             "Tap to open this nudge 👋",
                             ongoing = false,
                             largeIcon = largeIcon,
+                            senderUserId = data["senderUserId"],
                         ),
                     )
                 } catch (error: SecurityException) {
@@ -382,9 +414,8 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             VoiceNudgeDiagnostics.tag,
             "[FCM-W7] FCM deleted pending messages before delivery",
         )
-        VoiceNudgeDiagnostics.recordNudgeFailure(
-            reason = "fcm_not_delivered",
-            eventId = null,
+        VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+            worker = "W7",
             kind = "fcm",
             extras = mapOf("checkpoint" to "onDeletedMessages"),
         )
@@ -521,6 +552,12 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 VoiceNudgeDiagnostics.tag,
                 "[FCM-W8] Legacy Push has no eventId; displaying non-actionable fallback",
             )
+            VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                worker = "W8",
+                kind = VoiceNudgeContract.kindPush,
+                groupId = data["groupId"],
+                extras = mapOf("checkpoint" to "fcm_legacy_push_missing_event_id"),
+            )
             showForegroundNotification(message, VoiceNudgeContract.kindPush)
             return
         }
@@ -528,6 +565,12 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             Log.w(
                 VoiceNudgeDiagnostics.tag,
                 "[FCM-W9] Legacy Push has no groupId; displaying non-actionable fallback",
+            )
+            VoiceNudgeDiagnostics.recordFcmHandlingFailure(
+                worker = "W9",
+                kind = VoiceNudgeContract.kindPush,
+                eventId = eventId,
+                extras = mapOf("checkpoint" to "fcm_legacy_push_missing_group_id"),
             )
             showForegroundNotification(message, VoiceNudgeContract.kindPush)
             return
@@ -573,6 +616,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                             "👋 $senderName nudged you",
                             "Accept, snooze, or decline ✨",
                             largeIcon = largeIcon,
+                            senderUserId = data["senderUserId"],
                         ),
                     )
                 } catch (error: SecurityException) {
@@ -598,30 +642,17 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         // B5: Nudge response arrived — cancel sender's expiry alarm.
         NudgeExpiryTracker.cancelExpiry(this, eventId)
         if (responseAction == "accept") {
-            NudgeActionStore.save(
-                this,
-                PendingNudgeAction("connect", eventId, groupId),
-            )
-            NudgeActionDispatcher.signal()
-
-            // B6: Attempt to wake the sender's app / keep it alive so Flutter
-            // can reconnect to LiveKit automatically.  If the app is backgrounded
-            // but Flutter is still alive, the signal above will trigger the
-            // reconnect.  If the app is killed, the notification below gives
-            // the user a tap-to-join fallback.
-            try {
-                val serviceIntent = Intent(this, VoiceSessionService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(serviceIntent)
-                } else {
-                    startService(serviceIntent)
-                }
-            } catch (error: RuntimeException) {
-                Log.w(
-                    VoiceNudgeDiagnostics.tag,
-                    "[NUDGE-ACTION-04] Could not start foreground service " +
-                        "for auto-reconnect: ${error.message}",
+            // Only auto-join the sender when they are already looking at the
+            // app (they just sent the nudge and are waiting). If the app is
+            // backgrounded or killed, the notification's tap-to-join is the
+            // explicit intent — queuing a connect here would join the room
+            // the next time they merely open the app.
+            if (!DeviceLog.wasAppInBackground()) {
+                NudgeActionStore.save(
+                    this,
+                    PendingNudgeAction("connect", eventId, groupId),
                 )
+                NudgeActionDispatcher.signal()
             }
         }
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
@@ -694,6 +725,30 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             recipientUserId,
             groupId,
             recipientName,
+        )
+    }
+
+    private fun recordIncomingNudge(data: Map<String, String>) {
+        val eventId = data["eventId"]?.takeIf { it.isNotBlank() } ?: return
+        val groupId = data["groupId"]?.takeIf { it.isNotBlank() } ?: return
+        val senderUserId = data["senderUserId"]
+        val senderName = data["senderName"]?.take(80)
+        IncomingNudgeStore.upsert(
+            this,
+            eventId,
+            groupId,
+            senderUserId,
+            senderName,
+        )
+        IncomingNudgeDispatcher.signal(
+            buildMap {
+                put("eventId", eventId)
+                put("groupId", groupId)
+                put("arrivedAtMs", System.currentTimeMillis())
+                put("status", "pending")
+                if (!senderUserId.isNullOrBlank()) put("senderUserId", senderUserId)
+                if (!senderName.isNullOrBlank()) put("senderName", senderName)
+            },
         )
     }
 }

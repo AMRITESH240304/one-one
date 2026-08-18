@@ -75,6 +75,7 @@ dependencies {
     implementation("com.google.firebase:firebase-installations")
     implementation("com.google.firebase:firebase-auth")
     implementation("com.google.firebase:firebase-messaging")
+    implementation("com.google.firebase:firebase-database")
     implementation("com.google.firebase:firebase-crashlytics")
     implementation("com.google.firebase:firebase-perf")
     // Play requires Billing Library ≥ 8.0.0 (deadline Aug 31, 2026).

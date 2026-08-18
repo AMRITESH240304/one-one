@@ -994,7 +994,7 @@ class VoiceNudgePlaybackService : Service() {
 
         val health = activeHealth
         val attention = health?.attentionReason()
-        if (attention == "volume_muted" || attention == "volume_low") {
+        if (attention != null) {
             DeviceLog.warn(
                 "NudgeService",
                 "Nudge not delivered: volume too low " +
@@ -1162,32 +1162,26 @@ class VoiceNudgePlaybackService : Service() {
     ) {
         /**
          * Coarse audibility band, kept deliberately separate from whether
-         * playback genuinely started. A muted/very-low receiver still
-         * "received" the nudge — the audio pipeline ran — so these must never
-         * be reported as a delivery failure. They are surfaced as an
-         * attention flag the sender can act on instead.
+         * playback genuinely started. A muted/low receiver still "received"
+         * the nudge — the audio pipeline ran — so these must never be
+         * reported as a delivery failure. They are surfaced as an attention
+         * flag the sender can act on instead.
+         *
+         * Bands match the sender-facing spec: muted (0), very low (<25%),
+         * low (<50%), ok (≥50%).
          */
+        val volumePercent: Int
+            get() = mediaVolumePercent(streamMuted, streamVolume, streamMaxVolume)
+
         val volumeLevel: String
-            get() = when {
-                streamMuted || streamVolume <= 0 -> "muted"
-                streamVolume <= lowVolumeStep() -> "very_low"
-                else -> "ok"
-            }
+            get() = mediaVolumeBand(volumePercent)
 
         /**
          * Primary listening concern for an otherwise-successful playback.
-         * Reported separately from a delivery failure so a muted/very-low
+         * Reported separately from a delivery failure so a muted/low
          * device is never mislabeled as "did not receive".
          */
-        fun attentionReason(): String? = when {
-            streamMuted || streamVolume <= 0 -> "volume_muted"
-            streamVolume <= lowVolumeStep() -> "volume_low"
-            else -> null
-        }
-
-        /** Bottom ~20% of the volume range counts as "very low", minimum one step. */
-        private fun lowVolumeStep(): Int =
-            (streamMaxVolume * 0.20).toInt().coerceAtLeast(1)
+        fun attentionReason(): String? = mediaVolumeAttention(volumePercent)
 
         fun toJson(): JSONObject = JSONObject().apply {
             put("streamVolume", streamVolume)
@@ -1196,6 +1190,7 @@ class VoiceNudgePlaybackService : Service() {
             put("ringerMode", ringerMode)
             put("notificationsEnabled", notificationsEnabled)
             put("volumeLevel", volumeLevel)
+            put("volumePercent", volumePercent)
             put("dndActive", dndActive)
         }
 
@@ -1207,6 +1202,7 @@ class VoiceNudgePlaybackService : Service() {
             "ringerMode" to ringerMode.toString(),
             "notificationsEnabled" to notificationsEnabled.toString(),
             "volumeLevel" to volumeLevel,
+            "volumePercent" to volumePercent.toString(),
             "dndActive" to dndActive.toString(),
         )
     }
@@ -1567,6 +1563,7 @@ class VoiceNudgePlaybackService : Service() {
                 request.senderName,
                 request.senderAvatarAsset,
             ),
+            senderUserId = request.senderUserId,
         )
     }
 

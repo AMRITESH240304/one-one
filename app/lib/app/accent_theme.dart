@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 class AccentOption {
   const AccentOption({
@@ -49,6 +50,21 @@ class AccentThemeController {
     // Avoid notifying listeners when nothing changed — a root rebuild of
     // MaterialApp-dependent trees while widgets are mid-save/pop can crash.
     if (accentKey.value == next) return;
-    accentKey.value = next;
+    void apply() {
+      if (accentKey.value == next) return;
+      accentKey.value = next;
+    }
+
+    // IdentityHomeScreen is first inserted as StartupGateScreen's child
+    // during that screen's build. Notifying the root ValueListenableBuilder
+    // in the same frame marks it dirty while StartupGateScreen is still
+    // building and fatals with setState-during-build.
+    final phase = WidgetsBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.idle ||
+        phase == SchedulerPhase.postFrameCallbacks) {
+      apply();
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => apply());
   }
 }

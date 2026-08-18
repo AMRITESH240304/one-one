@@ -43,6 +43,7 @@ object VoiceNudgeContract {
 
     const val actionAccept = "app.oneone.action.ACCEPT_NUDGE"
     const val actionConnect = "app.oneone.action.CONNECT_NUDGE"
+    const val actionOpenNudge = "app.oneone.action.OPEN_NUDGE"
     const val actionOpenChatPile = "app.oneone.action.OPEN_CHAT_PILE"
     const val actionDecline = "app.oneone.action.DECLINE_NUDGE"
     const val actionSnooze = "app.oneone.action.SNOOZE_NUDGE"
@@ -158,7 +159,7 @@ object VoiceNudgeDiagnostics {
         "download_failed", "download_error" -> "download_failed"
         "playback_failed", "playback_error", "playback_service_start_error", "timeout" ->
             "playback_failed"
-        "volume_too_low", "volume_low", "volume_muted" -> "volume_too_low"
+        "volume_too_low", "volume_low", "volume_very_low", "volume_muted" -> "volume_too_low"
         "dnd_active" -> "dnd_active"
         "livekit_session_failed" -> "livekit_session_failed"
         "background_fg_service_blocked", "permission_denied_foreground_service" ->
@@ -233,6 +234,57 @@ object VoiceNudgeDiagnostics {
             "[NUDGE-FAIL] reason=$canonical kind=$kind " +
                 "groupId=${groupId?.takeLast(6) ?: "none"} " +
                 "receiver=${receiverUserId?.takeLast(6) ?: "none"} ${extras}",
+        )
+    }
+
+    /**
+     * Non-fatal FCM notification-handling failure.
+     *
+     * Filterable in Crashlytics by custom key
+     * `reason=fcm_notification_handling_failure`. Worker / channel identifiers
+     * stay in this report and logcat — never in user-facing UI.
+     */
+    fun recordFcmHandlingFailure(
+        worker: String,
+        error: Throwable? = null,
+        kind: String? = null,
+        eventId: String? = null,
+        groupId: String? = null,
+        extras: Map<String, String> = emptyMap(),
+    ) {
+        val crashlytics = FirebaseCrashlytics.getInstance()
+        val inBackground = DeviceLog.wasAppInBackground()
+        val information = fcmHandlingInformation(
+            worker = worker,
+            groupId = groupId,
+            eventId = eventId,
+            kind = kind,
+            inBackground = inBackground,
+        )
+        crashlytics.setCustomKey("reason", FCM_HANDLING_FAILURE_REASON)
+        crashlytics.setCustomKey("fcm_worker", worker)
+        crashlytics.setCustomKey("fcm_kind", kind.orEmpty())
+        crashlytics.setCustomKey("group_id", groupId.orEmpty())
+        crashlytics.setCustomKey("nudge_event_id", eventId.orEmpty())
+        crashlytics.setCustomKey("was_app_in_background", inBackground)
+        for (line in information) {
+            crashlytics.log(line)
+        }
+        for ((key, value) in extras) {
+            crashlytics.setCustomKey(key, value)
+        }
+        val throwable = RuntimeException(
+            "$FCM_HANDLING_FAILURE_REASON worker=$worker kind=${kind ?: "-"} " +
+                "eventId=${eventId ?: "-"} groupId=${groupId ?: "-"}",
+            error,
+        )
+        crashlytics.recordException(throwable)
+        Log.w(
+            tag,
+            "[$worker] $FCM_HANDLING_FAILURE_REASON kind=${kind ?: "-"} " +
+                "groupId=${groupId?.takeLast(6) ?: "none"} " +
+                "eventId=${eventId?.takeLast(6) ?: "none"} " +
+                "appState=${if (inBackground) "background" else "foreground"}",
         )
     }
 }

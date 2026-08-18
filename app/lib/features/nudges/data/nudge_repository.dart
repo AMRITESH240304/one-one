@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/firebase/firebase_analytics_service.dart';
 import '../../../core/logging/log_level.dart';
 import '../../../core/logging/log_manager.dart';
+import '../../../core/logging/user_facing_copy.dart';
 import '../../../core/network/api_client.dart';
 
 class NudgeTarget {
@@ -46,12 +49,16 @@ class NudgeRepository {
       '/v1/groups/$groupId/nudges',
       target.json,
     );
-    final result = _requireAcceptedDelivery(response);
+    final result = _requireAcceptedDelivery(
+      response,
+      groupId: groupId,
+      kind: 'nudge',
+    );
     LogManager.log(
       LogLevel.info,
       'NudgeService',
       'Nudge sent kind=push targetScope=${target.targetScope} '
-      'eventId=${result['notificationEventId'] ?? '-'}',
+          'eventId=${result['notificationEventId'] ?? '-'}',
       groupId: groupId,
     );
     await AnalyticsService.logNudgeSent(
@@ -74,13 +81,17 @@ class NudgeRepository {
       '/v1/groups/$groupId/ring-nudges',
       {...target.json, 'durationSeconds': durationSeconds},
     );
-    final result = _requireAcceptedDelivery(response);
+    final result = _requireAcceptedDelivery(
+      response,
+      groupId: groupId,
+      kind: 'ring_nudge',
+    );
     LogManager.log(
       LogLevel.info,
       'NudgeService',
       'Nudge sent kind=ring durationSeconds=$durationSeconds '
-      'targetScope=${target.targetScope} '
-      'eventId=${result['notificationEventId'] ?? '-'}',
+          'targetScope=${target.targetScope} '
+          'eventId=${result['notificationEventId'] ?? '-'}',
       groupId: groupId,
     );
     await AnalyticsService.logNudgeSent(
@@ -160,12 +171,16 @@ class NudgeRepository {
         'targetDevices=${response['targetDevices']} '
         'uploadMode=signed_write_url',
       );
-      final result = _requireAcceptedDelivery(response);
+      final result = _requireAcceptedDelivery(
+        response,
+        groupId: groupId,
+        kind: 'voice_nudge',
+      );
       LogManager.log(
         LogLevel.info,
         'NudgeService',
         'Nudge sent kind=voice bytes=${audio.length} durationMs=$durationMs '
-        'eventId=${result['notificationEventId'] ?? eventId}',
+            'eventId=${result['notificationEventId'] ?? eventId}',
         groupId: groupId,
       );
       await AnalyticsService.logNudgeSent(
@@ -191,13 +206,15 @@ class NudgeRepository {
         'Nudge not delivered: network error. Voice send failed: $error',
         groupId: groupId,
       );
-      await CrashlyticsService.recordNudgeFailure(
-        error: error,
-        stack: stack,
-        failureReason: NudgeFailureReason.unknown,
-        groupId: groupId,
-        extras: {'checkpoint': 'voice_nudge_upload'},
-      );
+      if (error is! NudgeDeliveryException) {
+        await CrashlyticsService.recordNudgeFailure(
+          error: error,
+          stack: stack,
+          failureReason: NudgeFailureReason.unknown,
+          groupId: groupId,
+          extras: {'checkpoint': 'voice_nudge_upload'},
+        );
+      }
       rethrow;
     }
   }
@@ -229,7 +246,11 @@ class NudgeRepository {
     return response;
   }
 
-  Map<String, dynamic> _requireAcceptedDelivery(Map<String, dynamic> response) {
+  Map<String, dynamic> _requireAcceptedDelivery(
+    Map<String, dynamic> response, {
+    String? groupId,
+    String? kind,
+  }) {
     final recipientUsers = _readCount(response['recipientUsers']);
     final targetDevices = _readCount(response['targetDevices']);
     final sent = _readCount(response['sent']);
@@ -244,8 +265,20 @@ class NudgeRepository {
       );
     }
     if (sent == 0) {
+      unawaited(
+        CrashlyticsService.recordFcmNotificationHandlingFailure(
+          error: StateError(
+            'FCM rejected every target device (FCM-BE-W1) '
+            'kind=${kind ?? '-'} groupId=${groupId ?? '-'}',
+          ),
+          worker: 'FCM-BE-W1',
+          groupId: groupId,
+          eventId: response['notificationEventId']?.toString(),
+          kind: kind,
+        ),
+      );
       throw const NudgeDeliveryException(
-        'FCM rejected every target device. Check the backend FCM-BE-W1 error code.',
+        UserFacingCopy.notificationDeliveryFailure,
       );
     }
     return response;

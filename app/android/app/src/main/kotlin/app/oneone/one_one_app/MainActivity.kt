@@ -25,6 +25,7 @@ class MainActivity : FlutterFragmentActivity() {
     private lateinit var voiceNudgeChannel: MethodChannel
     private lateinit var inviteLinkChannel: MethodChannel
     private lateinit var voicePipChannel: MethodChannel
+    private var voiceOverlayAnnouncer: VoiceOverlayAnnouncer? = null
     private var voiceSessionActive = false
     private var voiceSessionTalking = false
 
@@ -75,6 +76,7 @@ class MainActivity : FlutterFragmentActivity() {
         NudgeActionDispatcher.attach(voiceNudgeChannel)
         NudgeDeliveryResultDispatcher.attach(voiceNudgeChannel)
         NudgeReceivedDispatcher.attach(voiceNudgeChannel)
+        IncomingNudgeDispatcher.attach(voiceNudgeChannel)
         captureNudgeAction(intent)
         captureChatPileOpen(intent)
         inviteLinkChannel = MethodChannel(
@@ -87,6 +89,25 @@ class MainActivity : FlutterFragmentActivity() {
             VoicePipContract.flutterChannel,
         )
         VoicePipActionDispatcher.attach(voicePipChannel)
+        voiceOverlayAnnouncer?.shutdown()
+        val overlayAnnouncer = VoiceOverlayAnnouncer(this)
+        voiceOverlayAnnouncer = overlayAnnouncer
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            VoiceOverlayContract.flutterChannel,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                VoiceOverlayContract.methodAnnounceCallModeTimeout -> {
+                    overlayAnnouncer.announceCallModeTimeout()
+                    result.success(null)
+                }
+                VoiceOverlayContract.methodWarmup -> {
+                    overlayAnnouncer.warmup()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "app.oneone/device_log",
@@ -189,8 +210,25 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(NudgeActionStore.take(this)?.toMap())
                 }
 
+                "listIncomingNudges" -> {
+                    result.success(IncomingNudgeStore.list(this))
+                }
+
+                "dismissIncomingNudge" -> {
+                    val eventId = call.arguments?.toString()
+                    if (!eventId.isNullOrBlank()) {
+                        (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                            .cancel(VoiceNudgeNotifications.idFor(eventId))
+                    }
+                    result.success(null)
+                }
+
                 "takePendingChatPileOpen" -> {
                     result.success(ChatPileStore.takeOpened(this))
+                }
+
+                "getMediaVolumePercent" -> {
+                    result.success(MediaVolume.readPercent(this))
                 }
 
                 // B5: Sender schedules a 10-min expiry alarm for a nudge they
@@ -318,10 +356,13 @@ class MainActivity : FlutterFragmentActivity() {
             NudgeActionDispatcher.detach(voiceNudgeChannel)
             NudgeDeliveryResultDispatcher.detach(voiceNudgeChannel)
             NudgeReceivedDispatcher.detach(voiceNudgeChannel)
+            IncomingNudgeDispatcher.detach(voiceNudgeChannel)
         }
         if (::voicePipChannel.isInitialized) {
             VoicePipActionDispatcher.detach(voicePipChannel)
         }
+        voiceOverlayAnnouncer?.shutdown()
+        voiceOverlayAnnouncer = null
         super.onDestroy()
     }
 
@@ -377,28 +418,62 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     private fun captureNudgeAction(intent: Intent?) {
-        val action = when (intent?.action) {
+        if (intent == null) return
+        // Returning from Recents redelivers the original notification intent.
+        // That is not a new Accept/Connect tap — ignore it.
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) {
+            return
+        }
+        val action = when (intent.action) {
             VoiceNudgeContract.actionAccept -> "accept"
             VoiceNudgeContract.actionConnect -> "connect"
+            VoiceNudgeContract.actionOpenNudge -> "open"
             else -> return
         }
         val eventId = intent.getStringExtra(VoiceNudgeContract.extraEventId) ?: return
         val groupId = intent.getStringExtra(VoiceNudgeContract.extraGroupId) ?: return
+        val senderUserId = intent.getStringExtra(VoiceNudgeContract.extraSenderUserId)
         val notificationId = intent.getIntExtra(
             VoiceNudgeContract.extraNotificationId,
             VoiceNudgeNotifications.idFor(eventId),
         )
         (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
             .cancel(notificationId)
-        VoiceNudgeAudioCache.delete(this, eventId)
-        // B5: Cancel the 10-minute expiry alarm since the user took action.
-        NudgeExpiryTracker.cancelExpiry(this, eventId)
-        NudgeActionStore.save(this, PendingNudgeAction(action, eventId, groupId))
+        if (action != "open") {
+            VoiceNudgeAudioCache.delete(this, eventId)
+            // B5: Cancel the 10-minute expiry alarm since the user took action.
+            NudgeExpiryTracker.cancelExpiry(this, eventId)
+            IncomingNudgeStore.markStatus(this, eventId, "accepted")
+            IncomingNudgeDispatcher.signalStatus(eventId, "accepted")
+        }
+        NudgeActionStore.save(
+            this,
+            PendingNudgeAction(action, eventId, groupId, senderUserId),
+        )
         NudgeActionDispatcher.signal()
+        // Consume the launch intent so a later process recreation / cold
+        // start does not re-queue the same Accept/Connect tap and auto-join.
+        consumeNudgeActionIntent(intent)
         Log.i(
             VoiceNudgeDiagnostics.tag,
             "[NUDGE-ACTION-02] queued action=$action eventSuffix=${eventId.takeLast(6)}",
         )
+    }
+
+    private fun consumeNudgeActionIntent(intent: Intent?) {
+        if (intent == null) return
+        if (
+            intent.action != VoiceNudgeContract.actionAccept &&
+            intent.action != VoiceNudgeContract.actionConnect
+        ) {
+            return
+        }
+        intent.action = null
+        intent.removeExtra(VoiceNudgeContract.extraEventId)
+        intent.removeExtra(VoiceNudgeContract.extraGroupId)
+        intent.removeExtra(VoiceNudgeContract.extraNotificationId)
+        intent.removeExtra(VoiceNudgeContract.extraAction)
+        setIntent(intent)
     }
 
     private fun captureInviteLink(intent: Intent?) {

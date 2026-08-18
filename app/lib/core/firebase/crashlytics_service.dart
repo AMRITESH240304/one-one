@@ -9,6 +9,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../logging/log_level.dart';
 import '../logging/log_manager.dart';
+import '../logging/user_facing_copy.dart';
 import 'firebase_analytics_service.dart';
 
 /// Canonical non-fatal nudge failure reasons shown in Crashlytics.
@@ -58,6 +59,7 @@ abstract final class NudgeFailureReason {
       case 'timeout':
         return playbackFailed;
       case 'volume_low':
+      case 'volume_very_low':
       case 'volume_muted':
         return volumeTooLow;
       default:
@@ -134,7 +136,7 @@ class CrashlyticsService {
       fatal ? LogLevel.fatal : LogLevel.error,
       'CrashlyticsService',
       'Caught ${fatal ? 'fatal' : 'non-fatal'} error reason=${reason ?? '-'} '
-      'error=$error',
+          'error=$error',
     );
     await _crashlytics.recordError(
       error,
@@ -150,6 +152,50 @@ class CrashlyticsService {
       screenName: screenName,
       isFatal: fatal,
       reason: reason,
+    );
+  }
+
+  /// Non-fatal FCM notification-handling failure.
+  ///
+  /// Filterable in Crashlytics by `reason=fcm_notification_handling_failure`.
+  /// Worker / channel identifiers stay in this report — never in user-facing UI.
+  static Future<void> recordFcmNotificationHandlingFailure({
+    required Object error,
+    StackTrace? stack,
+    required String worker,
+    String? groupId,
+    String? eventId,
+    String? kind,
+    DateTime? timestamp,
+    bool? inBackground,
+  }) async {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    final background =
+        inBackground ??
+        (lifecycle != null && lifecycle != AppLifecycleState.resumed);
+    final information = FcmHandlingContext.information(
+      worker: worker,
+      groupId: groupId,
+      eventId: eventId,
+      kind: kind,
+      timestamp: timestamp,
+      inBackground: background,
+    );
+    await setCustomKeys({
+      'reason': FcmHandlingContext.failureReason,
+      'fcm_worker': worker,
+      'fcm_kind': kind ?? '',
+      'group_id': groupId ?? '',
+      'nudge_event_id': eventId ?? '',
+      'was_app_in_background': background,
+    });
+    await recordError(
+      error,
+      stack ?? StackTrace.current,
+      reason: FcmHandlingContext.failureReason,
+      fatal: false,
+      feature: 'fcm',
+      information: information,
     );
   }
 
@@ -248,8 +294,8 @@ class CrashlyticsService {
       LogLevel.error,
       'NudgeService',
       'Nudge not delivered: ${_deviceLogReason(reason)} '
-      '(failure_reason=$reason networkType=$networkType '
-      'background=$inBackground eventId=${eventId ?? '-'})',
+          '(failure_reason=$reason networkType=$networkType '
+          'background=$inBackground eventId=${eventId ?? '-'})',
       userId: receiverId ?? senderId,
       groupId: groupId,
     );
@@ -310,9 +356,9 @@ class CrashlyticsService {
       LogLevel.error,
       'SoloParticipantGuard',
       'Reported single-user-in-room as non-fatal bug '
-      '(room=$roomName remoteCountAtConnect=$remoteCountAtConnect '
-      'soloDurationSeconds=$soloDurationSeconds entryReason=$entryReason '
-      'mode=${connectionMode ?? '-'})',
+          '(room=$roomName remoteCountAtConnect=$remoteCountAtConnect '
+          'soloDurationSeconds=$soloDurationSeconds entryReason=$entryReason '
+          'mode=${connectionMode ?? '-'})',
       userId: userId,
       groupId: groupId,
     );
