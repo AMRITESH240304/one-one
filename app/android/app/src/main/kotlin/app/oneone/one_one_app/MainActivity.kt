@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Rational
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.splashscreen.SplashScreenViewProvider
 import com.google.firebase.FirebaseApp
 import com.google.firebase.installations.FirebaseInstallations
 import com.google.firebase.messaging.FirebaseMessaging
@@ -33,22 +34,47 @@ class MainActivity : FlutterFragmentActivity() {
     // "app/splash" channel below). A generous failsafe timeout guarantees
     // the splash can never get stuck forever if that signal is ever lost.
     @Volatile private var isFlutterReady = false
+    private var heldSplashView: SplashScreenViewProvider? = null
     private val splashFailsafeHandler = Handler(Looper.getMainLooper())
     private val splashFailsafeRunnable = Runnable {
         Log.w(
             VoiceNudgeDiagnostics.tag,
             "[SPLASH-01] flutterReady signal not received within failsafe window; releasing splash",
         )
-        isFlutterReady = true
+        releaseSplash()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Must be called before super.onCreate() so the splash theme is
-        // installed before the window content view is set.
+        // installSplashScreen + keep-on-screen must both run before
+        // super.onCreate(). FlutterFragmentActivity can attach the Flutter
+        // view and request a draw during onCreate; if the keep-condition is
+        // still the default at that point, Android 12+ dismisses the native
+        // splash at first frame and the Flutter underlay (previously a
+        // second, larger logo) flashes through.
         val splashScreen = installSplashScreen()
-        super.onCreate(savedInstanceState)
         splashScreen.setKeepOnScreenCondition { !isFlutterReady }
+        splashScreen.setOnExitAnimationListener { splashView ->
+            if (isFlutterReady) {
+                splashView.remove()
+            } else {
+                // Some OEM/API combinations start the splash exit before
+                // keepOnScreenCondition is honoured. Hold this view until
+                // Flutter signals the first real screen is painted.
+                Log.w(
+                    VoiceNudgeDiagnostics.tag,
+                    "[SPLASH-02] splash exit requested before flutterReady; holding splash view",
+                )
+                heldSplashView = splashView
+            }
+        }
+        super.onCreate(savedInstanceState)
         splashFailsafeHandler.postDelayed(splashFailsafeRunnable, SPLASH_FAILSAFE_TIMEOUT_MS)
+    }
+
+    private fun releaseSplash() {
+        isFlutterReady = true
+        heldSplashView?.remove()
+        heldSplashView = null
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -59,8 +85,8 @@ class MainActivity : FlutterFragmentActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "flutterReady" -> {
-                    isFlutterReady = true
                     splashFailsafeHandler.removeCallbacks(splashFailsafeRunnable)
+                    releaseSplash()
                     result.success(null)
                 }
                 else -> result.notImplemented()
@@ -348,6 +374,8 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun onDestroy() {
         splashFailsafeHandler.removeCallbacks(splashFailsafeRunnable)
+        heldSplashView?.remove()
+        heldSplashView = null
         if (isFinishing && voiceSessionActive) {
             VoiceSessionService.stop(this)
             voiceSessionActive = false

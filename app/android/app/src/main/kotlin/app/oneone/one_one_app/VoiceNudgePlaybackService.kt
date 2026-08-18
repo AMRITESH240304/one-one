@@ -702,6 +702,9 @@ class VoiceNudgePlaybackService : Service() {
             isPlaying = true,
         )
         Log.i(VoiceNudgeDiagnostics.tag, "[FCM-14] Preparing voice audio player")
+        // AAC-LC in M4A is already the compressed payload. ExoPlayer's hardware
+        // decoder is the decompress/decode step; wrapping a second codec would
+        // delay playback without shrinking the download.
         player = ExoPlayer.Builder(this).build().apply {
             // handleAudioFocus = false: play through regardless of audio-focus
             // state, matching how ring nudges play via AudioTrack. On some

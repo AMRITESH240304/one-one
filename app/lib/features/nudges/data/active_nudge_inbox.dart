@@ -43,13 +43,15 @@ class PrefsActiveNudgeStatusStore implements ActiveNudgeStatusStore {
 
   @override
   Future<Map<String, ActiveNudgeStatusRecord>> load(String userId) async {
-    if (userId.isEmpty) return const {};
+    if (userId.isEmpty) return <String, ActiveNudgeStatusRecord>{};
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_key(userId));
-      if (raw == null || raw.isEmpty) return const {};
+      if (raw == null || raw.isEmpty) {
+        return <String, ActiveNudgeStatusRecord>{};
+      }
       final decoded = jsonDecode(raw);
-      if (decoded is! Map) return const {};
+      if (decoded is! Map) return <String, ActiveNudgeStatusRecord>{};
       final records = <String, ActiveNudgeStatusRecord>{};
       decoded.forEach((key, value) {
         final record = ActiveNudgeStatusRecord.tryParse(value);
@@ -57,7 +59,7 @@ class PrefsActiveNudgeStatusStore implements ActiveNudgeStatusStore {
       });
       return records;
     } catch (_) {
-      return const {};
+      return <String, ActiveNudgeStatusRecord>{};
     }
   }
 
@@ -107,7 +109,10 @@ class ActiveNudgeInbox extends ChangeNotifier {
     if (userId.isEmpty) return;
     if (_loaded && _userId == userId) return;
     _userId = userId;
-    _statusById = await _store.load(userId);
+    // Always copy — stores may return an unmodifiable empty map (`const {}`).
+    _statusById = Map<String, ActiveNudgeStatusRecord>.of(
+      await _store.load(userId),
+    );
     _pruneStatusLocked(_now);
     _applyStatusLocked();
     _loaded = true;

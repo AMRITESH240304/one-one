@@ -1,25 +1,33 @@
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:image/image.dart' as image_lib;
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../../core/storage/cloudinary_delivery.dart';
+import '../../../core/storage/profile_photo_optimizer.dart';
+
 /// Shared profile-photo editor used by onboarding and Settings.
 ///
-/// Every successful edit returns a square 512x512 JPEG, irrespective of the
-/// source image's dimensions.
+/// Gallery/camera originals are downscaled before the crop UI, then the
+/// confirmed crop is normalized off the UI isolate to a square JPEG no larger
+/// than [ProfilePhotoOptimizer.maxEdge]. Small sources are not upscaled.
 class ProfilePhotoEditor {
   ProfilePhotoEditor._();
 
-  static const int outputSize = 512;
+  static const int outputSize = ProfilePhotoOptimizer.maxEdge;
   static final ImagePicker _picker = ImagePicker();
   static final ImageCropper _cropper = ImageCropper();
 
   static Future<Uint8List?> pickAndCrop(BuildContext context) async {
-    final picked = await _picker.pickImage(source: ImageSource.gallery);
+    final picked = await _picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: ProfilePhotoOptimizer.pickerMaxEdge.toDouble(),
+      maxHeight: ProfilePhotoOptimizer.pickerMaxEdge.toDouble(),
+      imageQuality: ProfilePhotoOptimizer.cropperPreviewQuality,
+    );
     if (picked == null || !context.mounted) return null;
     return _cropAndNormalize(context, picked.path);
   }
@@ -28,7 +36,11 @@ class ProfilePhotoEditor {
     BuildContext context,
     String photoUrl,
   ) async {
-    final response = await http.get(Uri.parse(photoUrl));
+    final fetchUrl = CloudinaryDelivery.urlFor(
+      photoUrl,
+      pixelSize: ProfilePhotoOptimizer.maxEdge,
+    );
+    final response = await http.get(Uri.parse(fetchUrl));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('Couldn\'t load the current profile picture.');
     }
@@ -60,7 +72,7 @@ class ProfilePhotoEditor {
       maxHeight: outputSize,
       aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1),
       compressFormat: ImageCompressFormat.jpg,
-      compressQuality: 92,
+      compressQuality: ProfilePhotoOptimizer.cropperPreviewQuality,
       uiSettings: [
         AndroidUiSettings(
           toolbarTitle: 'Crop profile picture',
@@ -83,14 +95,7 @@ class ProfilePhotoEditor {
     );
     if (cropped == null) return null;
 
-    final decoded = image_lib.decodeImage(await cropped.readAsBytes());
-    if (decoded == null) throw StateError('Couldn\'t process that image.');
-    final normalized = image_lib.copyResize(
-      decoded,
-      width: outputSize,
-      height: outputSize,
-      interpolation: image_lib.Interpolation.cubic,
-    );
-    return Uint8List.fromList(image_lib.encodeJpg(normalized, quality: 92));
+    final croppedBytes = await cropped.readAsBytes();
+    return compute(ProfilePhotoOptimizer.normalize, croppedBytes);
   }
 }

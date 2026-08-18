@@ -164,6 +164,20 @@ void main() {
       second.upsert(nudge(id: 'n1', group: 'g1', minutesAgo: 1));
       expect(second.activeNudges(), isEmpty);
     });
+
+    test(
+      'bindUser copies an unmodifiable empty store map before pruning',
+      () async {
+        final inbox = ActiveNudgeInbox(
+          store: _ConstEmptyStatusStore(),
+          clock: () => now,
+        );
+        await inbox.bindUser('me');
+        inbox.upsert(nudge(id: 'n1', group: 'g1', minutesAgo: 1));
+        await inbox.mark(nudgeId: 'n1', status: ActiveNudgeStatus.declined);
+        expect(inbox.activeNudges(), isEmpty);
+      },
+    );
   });
 
   group('ActiveNudgeSync.parseEvent', () {
@@ -246,4 +260,16 @@ void main() {
       );
     });
   });
+}
+
+class _ConstEmptyStatusStore implements ActiveNudgeStatusStore {
+  @override
+  Future<Map<String, ActiveNudgeStatusRecord>> load(String userId) async =>
+      const {};
+
+  @override
+  Future<void> save(
+    String userId,
+    Map<String, ActiveNudgeStatusRecord> records,
+  ) async {}
 }

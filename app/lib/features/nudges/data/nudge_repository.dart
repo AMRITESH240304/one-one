@@ -8,6 +8,7 @@ import '../../../core/logging/log_level.dart';
 import '../../../core/logging/log_manager.dart';
 import '../../../core/logging/user_facing_copy.dart';
 import '../../../core/network/api_client.dart';
+import 'voice_nudge_audio.dart';
 
 class NudgeTarget {
   const NudgeTarget.allFriends()
@@ -103,24 +104,46 @@ class NudgeRepository {
     return result;
   }
 
+  /// Reserves a signed GCS write URL so the recorder flush can overlap the
+  /// first network hop. [sendVoice] will retry this if [initiatedUpload] is
+  /// omitted or unusable.
+  Future<Map<String, dynamic>> initiateVoiceUpload({
+    required String groupId,
+    required NudgeTarget target,
+    required int durationMs,
+  }) {
+    return _apiClient.postJson(
+      '/v1/groups/$groupId/voice-nudges/uploads',
+      {...target.json, 'durationMs': durationMs},
+    );
+  }
+
   /// Direct-to-GCS upload via signed write URL, then backend finalize/FCM.
   Future<Map<String, dynamic>> sendVoice({
     required String groupId,
     required NudgeTarget target,
     required Uint8List audio,
     required int durationMs,
+    Map<String, dynamic>? initiatedUpload,
   }) async {
     final stopwatch = Stopwatch()..start();
+    final expectedBytes = VoiceNudgeAudio.expectedPayloadBytes(durationMs);
     debugPrint(
       '[OneOneNudge][DART-01] Requesting voice nudge signed write URL '
-      'audioBytes=${audio.length} durationMs=$durationMs '
+      'audioBytes=${audio.length} expectedBytes=$expectedBytes '
+      'legacyBytes=${VoiceNudgeAudio.legacyPayloadBytes(durationMs)} '
+      'durationMs=$durationMs bitRate=${VoiceNudgeAudio.bitRate} '
+      'sampleRate=${VoiceNudgeAudio.sampleRate} '
       'targetScope=${target.targetScope}',
     );
     try {
-      final upload = await _apiClient.postJson(
-        '/v1/groups/$groupId/voice-nudges/uploads',
-        {...target.json, 'durationMs': durationMs},
-      );
+      final upload =
+          _usableVoiceUpload(initiatedUpload) ??
+          await initiateVoiceUpload(
+            groupId: groupId,
+            target: target,
+            durationMs: durationMs,
+          );
       final eventId = upload['notificationEventId']?.toString();
       final uploadUrl = upload['uploadUrl']?.toString();
       if (eventId == null ||
@@ -143,7 +166,7 @@ class NudgeRepository {
       }
       if (!requiredHeaders.containsKey('content-type')) {
         requiredHeaders['content-type'] =
-            upload['contentType']?.toString() ?? 'audio/mp4';
+            upload['contentType']?.toString() ?? VoiceNudgeAudio.contentType;
       }
 
       debugPrint(
@@ -160,9 +183,13 @@ class NudgeRepository {
         '[OneOneNudge][DART-01C] Completing voice nudge after GCS upload '
         'eventId=$eventId elapsedMs=${stopwatch.elapsedMilliseconds}',
       );
+      final uploadTicket = upload['uploadTicket']?.toString();
       final response = await _apiClient.postJson(
         '/v1/groups/$groupId/voice-nudges/$eventId/complete',
-        const {},
+        {
+          if (uploadTicket != null && uploadTicket.isNotEmpty)
+            'uploadTicket': uploadTicket,
+        },
       );
       debugPrint(
         '[OneOneNudge][DART-02] Voice nudge upload accepted '
@@ -351,4 +378,17 @@ int _readCount(Object? value) {
   if (value is int) return value;
   if (value is num) return value.toInt();
   return int.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+Map<String, dynamic>? _usableVoiceUpload(Map<String, dynamic>? upload) {
+  if (upload == null) return null;
+  final eventId = upload['notificationEventId']?.toString();
+  final uploadUrl = upload['uploadUrl']?.toString();
+  if (eventId == null ||
+      eventId.isEmpty ||
+      uploadUrl == null ||
+      uploadUrl.isEmpty) {
+    return null;
+  }
+  return upload;
 }

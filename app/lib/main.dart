@@ -110,9 +110,9 @@ Future<void> main() async {
     );
     FlutterForegroundTask.initCommunicationPort();
 
-    // _FirebaseGate (the brand-splash screen) awaits this same future, so
-    // Firebase only ever initializes once and the first frame never waits
-    // on it.
+    // _FirebaseGate (logo-less underlay under the native splash) awaits this
+    // same future, so Firebase only ever initializes once and the first
+    // frame never waits on it.
     final firebaseReady = FirebaseBootstrap.start();
     unawaited(
       firebaseReady.then((_) {

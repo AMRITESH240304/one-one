@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
+import '../../../core/storage/cloudinary_delivery.dart';
 import '../data/avatar_assets.dart';
 
 /// Renders a profile photo filling its bounds, falling back to [fallback]
@@ -108,19 +110,30 @@ class _ProfileImageState extends State<ProfileImage> {
     if (url != null) {
       return ColoredBox(
         color: resolvedBackgroundColor,
-        child: CachedNetworkImage(
-          imageUrl: url,
-          fit: widget.fit,
-          fadeInDuration: widget.fadeInDuration,
-          placeholder: (context, url) =>
-              _stickyPlaceholder(resolvedBackgroundColor, resolvedFallback) ??
-              Center(child: resolvedFallback),
-          errorWidget: (context, url, error) {
-            debugPrint(
-              'ProfileImage: failed to load profile photo: '
-              '${error.runtimeType}',
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final deliveryUrl = CloudinaryDelivery.urlFor(
+              url,
+              pixelSize: _pixelSizeFor(context, constraints),
             );
-            return Center(child: resolvedFallback);
+            return CachedNetworkImage(
+              imageUrl: deliveryUrl,
+              fit: widget.fit,
+              fadeInDuration: widget.fadeInDuration,
+              placeholder: (context, url) =>
+                  _stickyPlaceholder(
+                    resolvedBackgroundColor,
+                    resolvedFallback,
+                  ) ??
+                  Center(child: resolvedFallback),
+              errorWidget: (context, url, error) {
+                debugPrint(
+                  'ProfileImage: failed to load profile photo: '
+                  '${error.runtimeType}',
+                );
+                return Center(child: resolvedFallback);
+              },
+            );
           },
         ),
       );
@@ -204,6 +217,18 @@ class _ProfileImageState extends State<ProfileImage> {
     final sticky = _stickyPhotoBase64?.trim();
     if (sticky != null && sticky.isNotEmpty) return sticky;
     return null;
+  }
+
+  int _pixelSizeFor(BuildContext context, BoxConstraints constraints) {
+    final width = constraints.maxWidth;
+    final height = constraints.maxHeight;
+    final logical = math.max(
+      width.isFinite ? width : 0,
+      height.isFinite ? height : 0,
+    );
+    if (logical <= 0) return CloudinaryDelivery.maxStoredEdge;
+    final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0;
+    return (logical * dpr).round();
   }
 }
 

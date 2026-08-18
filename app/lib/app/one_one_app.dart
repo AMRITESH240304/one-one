@@ -8,6 +8,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 import 'accent_theme.dart';
+import 'brand_splash_screen.dart';
 import 'firebase_setup_blocked_screen.dart';
 import 'google_auth_screen.dart';
 import 'startup_gate_screen.dart';
@@ -57,7 +58,9 @@ class OneOneApp extends StatelessWidget {
           child: _AuthSessionLifecycle(child: _FirebaseGate()),
         ),
       },
-      theme: _themeFor(accentColorForKey(AccentThemeController.accentKey.value)),
+      theme: _themeFor(
+        accentColorForKey(AccentThemeController.accentKey.value),
+      ),
       builder: (context, child) {
         return ValueListenableBuilder<String>(
           valueListenable: AccentThemeController.accentKey,
@@ -167,8 +170,9 @@ class _FirebaseGateState extends State<_FirebaseGate> {
       future: _firebaseInit,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          // Brand splash only — GoogleAuthScreen constructs IdentityRepository,
-          // which touches FirebaseAuth and must not run before init finishes.
+          // Logo-less underlay matching the native splash. GoogleAuthScreen
+          // constructs IdentityRepository, which touches FirebaseAuth and
+          // must not run before init finishes.
           return const BrandSplashScreen();
         }
 

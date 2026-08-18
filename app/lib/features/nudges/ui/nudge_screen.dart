@@ -16,6 +16,7 @@ import '../../identity/ui/profile_avatar.dart';
 import '../data/android_voice_nudge_bridge.dart';
 import '../data/media_volume_store.dart';
 import '../data/nudge_repository.dart';
+import '../data/voice_nudge_audio.dart';
 import '../models/media_volume_reading.dart';
 import '../nudge_cooldowns.dart';
 import '../nudge_failure_memory.dart';
@@ -901,18 +902,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         return;
       }
       final file = File(
-        '${Directory.systemTemp.path}/one_one_voice_${DateTime.now().microsecondsSinceEpoch}.m4a',
+        '${Directory.systemTemp.path}/one_one_voice_${DateTime.now().microsecondsSinceEpoch}.${VoiceNudgeAudio.fileExtension}',
       );
       await _recorder.start(
-        const RecordConfig(
-          encoder: AudioEncoder.aacLc,
-          bitRate: 64000,
-          sampleRate: 44100,
-          numChannels: 1,
-          autoGain: true,
-          echoCancel: true,
-          noiseSuppress: true,
-        ),
+        VoiceNudgeAudio.recordConfig,
         path: file.path,
       );
       if (!mounted) {
@@ -980,6 +973,16 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     String? path;
     var sent = false;
     String? voiceEventId;
+    // Kick off the signed-URL reservation while MediaRecorder flushes the
+    // M4A file. ExoPlayer on the receiver decodes this AAC natively — there
+    // is no extra decompress step after download.
+    final uploadReservation = send && durationMs >= 250
+        ? _repository.initiateVoiceUpload(
+            groupId: widget.group.groupId,
+            target: _effectiveTarget(),
+            durationMs: durationMs,
+          )
+        : null;
     try {
       path = await _recorder.stop();
       if (!send || path == null) return;
@@ -994,11 +997,20 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         return;
       }
       final file = File(path);
+      Map<String, dynamic>? initiatedUpload;
+      if (uploadReservation != null) {
+        try {
+          initiatedUpload = await uploadReservation;
+        } catch (_) {
+          initiatedUpload = null;
+        }
+      }
       final response = await _repository.sendVoice(
         groupId: widget.group.groupId,
         target: _effectiveTarget(),
         audio: await file.readAsBytes(),
         durationMs: durationMs,
+        initiatedUpload: initiatedUpload,
       );
       _cooldowns.record(NudgeKind.voice);
       sent = true;

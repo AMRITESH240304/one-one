@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Same brand yellow as the Flutter splash/start-gate/welcome screens
-         (Color(0xffF8BE03) in Dart) so the native splash and the first
-         Flutter frame are visually indistinguishable. -->
+    <!-- Same brand yellow as Flutter loading underlays and the welcome
+         screen (Color(0xffF8BE03) in Dart) so a premature native-splash
+         dismiss still matches the window, without a second logo. -->
     <color name="splash_background">#F8BE03</color>
     <color name="notification_accent">#F8BE03</color>
 </resources>

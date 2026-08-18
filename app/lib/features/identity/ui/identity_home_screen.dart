@@ -24,6 +24,7 @@ import '../../../core/logging/log_level.dart';
 import '../../../core/logging/log_manager.dart';
 import '../../../core/logging/user_facing_copy.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/storage/cloudinary_delivery.dart';
 import '../../chat/data/chat_message_repository.dart';
 import '../../chat/models/group_chat_message.dart';
 import '../../chat/ui/chat_bubble_bar.dart';
@@ -284,7 +285,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _incomingNudgeSubscription = AndroidVoiceNudgeBridge.incomingSignals.listen(
       (nudge) {
         _nudgeInbox.upsert(nudge);
-        if (_appLifecycle == AppLifecycleState.resumed) {
+        if (_appLifecycle == AppLifecycleState.resumed &&
+            !_incomingPromptBusy) {
           unawaited(_presentIncomingNudgePrompt());
         }
       },
@@ -802,6 +804,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _nudgeActionInFlight = true;
       await _processNudgeAction(action);
     } catch (error) {
+      // Banner taps only open the Accept/Decline prompt — never auto-join.
+      // Don't surface the Accept-path error if hydrate/present failed.
+      if (action != null && action.isOpenOnly) {
+        if (mounted) {
+          await _presentIncomingNudgePrompt(
+            preferGroupId: action.groupId,
+            preferNudgeId: action.eventId,
+          );
+        }
+        return;
+      }
       // Only defer while home data is still loading. Re-queuing after a
       // later failure would auto-connect on every subsequent foreground.
       if (action != null && _loadingGroups) {
@@ -894,16 +907,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // last sent nudge is no longer the active pending state.
     NudgeStatusMemory.instance.clear(action.groupId);
     if (action.action != 'accept') return;
-    await _nudgeRepository.respond(
-      groupId: action.groupId,
-      eventId: action.eventId,
-      action: 'accept',
-    );
-    unawaited(_nudgeActionBridge.dismissIncomingNudge(action.eventId));
     await _nudgeInbox.mark(
       nudgeId: action.eventId,
       status: ActiveNudgeStatus.accepted,
     );
+    unawaited(_nudgeActionBridge.dismissIncomingNudge(action.eventId));
+    // Don't block the in-app dialogue on the HTTP respond — the receiver is
+    // already live. A hung /respond left Accept spinning forever.
+    unawaited(_notifyNudgeAccepted(action));
     debugPrint(
       '[OneOneFCM][DART-07] Accepted nudge and entered group '
       'eventSuffix=${action.eventId.length <= 6 ? action.eventId : action.eventId.substring(action.eventId.length - 6)}',
@@ -920,6 +931,24 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     unawaited(
       _acceptSiblingNudges(action.groupId, exceptNudgeId: action.eventId),
     );
+  }
+
+  Future<void> _notifyNudgeAccepted(NudgeNotificationAction action) async {
+    try {
+      await _nudgeRepository.respond(
+        groupId: action.groupId,
+        eventId: action.eventId,
+        action: 'accept',
+      );
+    } catch (error) {
+      LogManager.log(
+        LogLevel.warn,
+        'NudgeService',
+        'Accept respond failed after join: $error',
+        userId: _session.userId,
+        groupId: action.groupId,
+      );
+    }
   }
 
   /// After the receiver is already live, accept any other still-pending
@@ -974,32 +1003,59 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
     _incomingHydrateInFlight = true;
     try {
-      await _nudgeInbox.bindUser(_session.userId);
-      final native = await _nudgeActionBridge.listIncomingNudges();
-      for (final nudge in native) {
-        if (nudge.senderId == _session.userId) continue;
-        _nudgeInbox.upsert(nudge);
-        if (nudge.status != ActiveNudgeStatus.pending) {
-          await _nudgeInbox.mark(
-            nudgeId: nudge.nudgeId,
-            status: nudge.status,
-            snoozedUntil: nudge.snoozedUntil,
-          );
-        }
+      try {
+        await _nudgeInbox.bindUser(_session.userId);
+      } catch (error) {
+        LogManager.log(
+          LogLevel.warn,
+          'NudgeService',
+          'Incoming nudge inbox bind failed: $error',
+          userId: _session.userId,
+        );
       }
-      final remote = await _nudgeSync.loadForGroups(
-        groupIds: _groups.map((group) => group.groupId),
-        currentUserId: _session.userId,
-      );
-      _nudgeInbox.upsertAll(remote);
-      if (present) {
-        await _presentIncomingNudgePrompt(
-          preferGroupId: preferGroupId,
-          preferNudgeId: preferNudgeId,
+      try {
+        final native = await _nudgeActionBridge.listIncomingNudges();
+        for (final nudge in native) {
+          if (nudge.senderId == _session.userId) continue;
+          _nudgeInbox.upsert(nudge);
+          if (nudge.status != ActiveNudgeStatus.pending) {
+            await _nudgeInbox.mark(
+              nudgeId: nudge.nudgeId,
+              status: nudge.status,
+              snoozedUntil: nudge.snoozedUntil,
+            );
+          }
+        }
+      } catch (error) {
+        LogManager.log(
+          LogLevel.warn,
+          'NudgeService',
+          'Native incoming nudge cache failed: $error',
+          userId: _session.userId,
+        );
+      }
+      try {
+        final remote = await _nudgeSync.loadForGroups(
+          groupIds: _groups.map((group) => group.groupId),
+          currentUserId: _session.userId,
+        );
+        _nudgeInbox.upsertAll(remote);
+      } catch (error) {
+        LogManager.log(
+          LogLevel.warn,
+          'NudgeService',
+          'Remote incoming nudge sync failed: $error',
+          userId: _session.userId,
         );
       }
     } finally {
       _incomingHydrateInFlight = false;
+    }
+    if (present && mounted) {
+      await _presentIncomingNudgePrompt(
+        preferGroupId: preferGroupId,
+        preferNudgeId: preferNudgeId,
+      );
     }
   }
 
@@ -1009,7 +1065,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     bool ignoreInFlight = false,
   }) async {
     if (!mounted || _inPictureInPicture || _loadingGroups) return;
-    if (!ignoreInFlight && _nudgeActionInFlight) return;
+    if (!ignoreInFlight && (_nudgeActionInFlight || _incomingPromptBusy)) {
+      return;
+    }
     final queue = _nudgeInbox
         .presentationQueue(
           preferGroupId: preferGroupId ?? _incomingPromptNudge?.groupId,
@@ -1065,7 +1123,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   Future<void> _acceptIncomingNudge(ActiveNudge nudge) async {
     if (_incomingPromptBusy) return;
-    setState(() => _incomingPromptBusy = true);
+    setState(() {
+      _incomingPromptBusy = true;
+      _incomingPromptNudge = null;
+    });
+    _incomingExpiryTimer?.cancel();
     try {
       await _processNudgeAction(
         NudgeNotificationAction(
@@ -1079,13 +1141,18 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       if (!mounted) return;
       setState(() {
         _incomingPromptBusy = false;
+        _incomingPromptNudge = nudge;
         _message = 'Couldn’t join this group. Check your connection.';
       });
+      _scheduleIncomingExpiryWatch();
+      return;
     } finally {
       if (mounted && _incomingPromptBusy) {
         setState(() => _incomingPromptBusy = false);
-        unawaited(_presentIncomingNudgePrompt());
       }
+    }
+    if (mounted) {
+      await _presentIncomingNudgePrompt();
     }
   }
 
@@ -1152,11 +1219,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         .where((url) => url.isNotEmpty)
         .toSet();
 
+    final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0;
+    final pixelSize = (MediaQuery.sizeOf(context).shortestSide * dpr)
+        .round()
+        .clamp(
+          CloudinaryDelivery.minFetchEdge,
+          CloudinaryDelivery.maxStoredEdge,
+        );
     await Future.wait(
       urls.map((url) async {
         try {
           await precacheImage(
-            CachedNetworkImageProvider(url),
+            CachedNetworkImageProvider(
+              CloudinaryDelivery.urlFor(url, pixelSize: pixelSize),
+            ),
             context,
             onError: (error, stackTrace) {},
           );

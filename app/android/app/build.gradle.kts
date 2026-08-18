@@ -85,5 +85,5 @@ dependencies {
     // Unified SplashScreen API back to API 24 — lets us hold a single
     // branded splash on screen until Flutter signals it's actually ready,
     // instead of Android auto-dismissing a native splash at first frame.
-    implementation("androidx.core:core-splashscreen:1.0.1")
+    implementation("androidx.core:core-splashscreen:1.2.0")
 }

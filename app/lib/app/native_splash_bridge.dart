@@ -3,11 +3,11 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 
 /// Bridges to the native Android splash (`MainActivity.installSplashScreen`
-/// + `setKeepOnScreenCondition`). The native splash renders the same brand
-/// background/logo as our Flutter loading screens and stays on top of
-/// everything — engine boot, Firebase init, identity/group prefetch — until
-/// this fires. That gives a single continuous splash instead of a native
-/// splash handing off to a second, different-looking Flutter splash.
+/// + `setKeepOnScreenCondition`). The native splash owns the branded logo
+/// and stays on top of engine boot, Firebase init, and identity/group
+/// prefetch until this fires. Flutter loading widgets underneath must not
+/// paint a second logo — they only match the splash background so a
+/// premature native dismiss does not flash a different-looking screen.
 ///
 /// Safe to call from multiple call sites and multiple times; only the first
 /// call has any effect.
@@ -23,8 +23,6 @@ class NativeSplashBridge {
   static void markReady() {
     if (_sent) return;
     _sent = true;
-    unawaited(
-      _channel.invokeMethod<void>('flutterReady').catchError((_) {}),
-    );
+    unawaited(_channel.invokeMethod<void>('flutterReady').catchError((_) {}));
   }
 }

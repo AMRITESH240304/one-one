@@ -232,10 +232,16 @@ object NotificationAvatarHelper {
         if (index < 0) return url
         val insertAt = index + marker.length
         val after = url.substring(insertAt)
-        if (after.startsWith("w_") || after.startsWith("c_") || after.startsWith("h_")) {
+        if (
+            after.startsWith("w_") ||
+            after.startsWith("c_") ||
+            after.startsWith("h_") ||
+            after.startsWith("f_") ||
+            after.startsWith("q_")
+        ) {
             return url
         }
-        return url.substring(0, insertAt) + "w_128,h_128,c_fill,q_auto/" + after
+        return url.substring(0, insertAt) + "w_128,h_128,c_fill,f_auto,q_auto/" + after
     }
 
     private fun toCircular(source: Bitmap, context: Context): Bitmap {
