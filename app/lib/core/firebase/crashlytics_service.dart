@@ -251,6 +251,8 @@ class CrashlyticsService {
     String? eventId,
     Map<String, Object> extras = const {},
   }) async {
+    // Copy before merge — callers may pass `const {}`. Plugin key writes
+    // and map spreads are safe; in-place extras mutation is not.
     final reason = NudgeFailureReason.canonicalize(failureReason);
     final lifecycle = WidgetsBinding.instance.lifecycleState;
     final inBackground =
@@ -281,7 +283,7 @@ class CrashlyticsService {
       'was_app_in_background': inBackground,
       'livekit_room_state': livekitRoomState ?? '',
       if (eventId != null) 'nudge_event_id': eventId,
-      ...extras,
+      ...Map<String, Object>.of(extras),
     });
     await recordError(
       error,

@@ -3,6 +3,8 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import '../maps.dart';
+
 /// Production Analytics wrapper for Duo.
 ///
 /// Event names follow Firebase conventions (snake_case, ≤40 chars).
@@ -334,22 +336,31 @@ class AnalyticsService {
     String name, {
     Map<String, Object>? parameters,
   }) async {
-    final cleanParams = parameters == null
-        ? null
-        : Map<String, Object>.fromEntries(
-            parameters.entries.where((e) => e.value.toString().isNotEmpty),
-          );
-    if (kDebugMode) {
-      final buffer = StringBuffer('Analytics Event:\n$name');
-      if (cleanParams != null && cleanParams.isNotEmpty) {
-        buffer.write('\nparameters:');
-        for (final entry in cleanParams.entries) {
-          buffer.write('\n  ${entry.key}=${entry.value}');
+    try {
+      // Always copy. `logEvent` may write into the parameters map, and
+      // `session_started` is fired on every AppLifecycle foreground. Passing
+      // `const {}` / an unmodifiable map fatals the root zone.
+      final cleanParams = parameters == null
+          ? null
+          : mutableMapOf(
+              Map<String, Object>.fromEntries(
+                parameters.entries.where((e) => e.value.toString().isNotEmpty),
+              ),
+            );
+      if (kDebugMode) {
+        final buffer = StringBuffer('Analytics Event:\n$name');
+        if (cleanParams != null && cleanParams.isNotEmpty) {
+          buffer.write('\nparameters:');
+          for (final entry in cleanParams.entries) {
+            buffer.write('\n  ${entry.key}=${entry.value}');
+          }
         }
+        debugPrint(buffer.toString());
       }
-      debugPrint(buffer.toString());
+      await _analytics.logEvent(name: name, parameters: cleanParams);
+    } catch (error) {
+      debugPrint('[Analytics] log failed name=$name error=$error');
     }
-    await _analytics.logEvent(name: name, parameters: cleanParams);
   }
 
   static String _idSuffix(String id) {

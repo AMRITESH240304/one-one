@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../ui/bottom_system_inset.dart';
 import 'log_level.dart';
 import 'log_manager.dart';
 
@@ -67,7 +68,7 @@ class _DebugLogsSheetState extends State<_DebugLogsSheet> {
   @override
   Widget build(BuildContext context) {
     final info = _info;
-    return SafeArea(
+    return BottomSystemSafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
         child: Column(

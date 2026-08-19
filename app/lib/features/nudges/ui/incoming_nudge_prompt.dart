@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
+import '../../../core/ui/bottom_system_inset.dart';
 import '../models/active_nudge.dart';
 
 /// One row of incoming-nudge UI, shared by the dialogue overlay and the
@@ -242,7 +243,7 @@ class IncomingNudgeListSheet extends StatelessWidget {
       color: const Color(0xff141414),
       borderRadius: BorderRadius.vertical(top: Radius.circular(28.r)),
       clipBehavior: Clip.antiAlias,
-      child: SafeArea(
+      child: BottomSystemSafeArea(
         top: false,
         child: Padding(
           padding: EdgeInsets.fromLTRB(20.w, 12.h, 20.w, 20.h),

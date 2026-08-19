@@ -49,6 +49,10 @@ void _reportFatalToCrashlytics(Future<void> Function() report) {
 }
 
 Future<void> main() async {
+  // Do not pass `zoneValues:` here. Zone value maps are unmodifiable; any
+  // later write (or a plugin that mutates the map it was given) becomes a
+  // fatal `Cannot modify unmodifiable map` inside this zone. If zone values
+  // are ever needed, pass `mutableMapOf(values)` — never `const {}`.
   await runZonedGuarded(() async {
     // Nothing below this line may `await` — every millisecond here is a
     // millisecond the user stares at a blank/frozen screen. All I/O

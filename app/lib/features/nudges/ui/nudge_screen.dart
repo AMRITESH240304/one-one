@@ -5,7 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:lucide_icons/lucide_icons.dart';
+import 'package:lucide_flutter/lucide_flutter.dart';
 import 'package:record/record.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
@@ -24,41 +24,6 @@ import '../models/media_volume_reading.dart';
 import '../nudge_cooldowns.dart';
 import '../nudge_failure_memory.dart';
 import '../nudge_status_memory.dart';
-
-/// Redesigned 4-step send flow (Prompt 1).
-///
-/// Voice walks the full flow: `sendingVoice` (1) → `confirmingVoice` (2) →
-/// `awaitingVoice` (3, live per-recipient signifiers) → final signifiers (4).
-/// Ring and push skip the "confirming"/live steps and go straight from
-/// `sendingRing`/`sendingPush` to the final signifier state (4), with no
-/// low-volume step.
-enum _SendFlow {
-  idle,
-  sendingVoice,
-  confirmingVoice,
-  awaitingVoice,
-  sendingRing,
-  sendingPush,
-}
-
-/// Lucide icon + color mapping for per-participant volume signifiers.
-/// >50% → green Volume2 · <50% → yellow Volume1 · <25% → red Volume ·
-/// muted → red VolumeX (iOS speaker-with-X).
-extension _VolumeBandSignifierX on MediaVolumeBand {
-  IconData get lucideIcon => switch (this) {
-    MediaVolumeBand.ok => LucideIcons.volume2,
-    MediaVolumeBand.low => LucideIcons.volume1,
-    MediaVolumeBand.veryLow => LucideIcons.volume,
-    MediaVolumeBand.muted => LucideIcons.volumeX,
-  };
-
-  Color get badgeColor => switch (this) {
-    MediaVolumeBand.ok => const Color(0xff9bdc28),
-    MediaVolumeBand.low => const Color(0xffe0a83c),
-    MediaVolumeBand.veryLow => const Color(0xffff6b6f),
-    MediaVolumeBand.muted => const Color(0xffff6b6f),
-  };
-}
 
 Future<void> showNudgeBottomSheet(
   BuildContext context, {
@@ -107,11 +72,11 @@ class _QuickNudgeSheet extends StatefulWidget {
 }
 
 class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
-  // Reduced from 6s to 5s (Prompt 10). Configurable: change this single
-  // constant to 4 or 5 seconds and the recording cap, progress ring and
-  // copy all follow. Receiver-side playback is unaffected.
-  static const _maxVoiceDuration = Duration(seconds: 5);
+  static const _maxVoiceDuration = Duration(seconds: 6);
   static const _autoDismissDelay = Duration(seconds: 5);
+
+  // Configurable ring durations — spec: 3/6/9 (cycling), keep this configurable.
+  static const List<int> _ringDurations = [3, 6, 9];
 
   final NudgeRepository _repository = NudgeRepository();
   final AudioRecorder _recorder = AudioRecorder();
@@ -134,6 +99,20 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   bool _messageIsWarning = false;
   bool _messagePending = false;
 
+  // Ring duration cycling: tracks which index in _ringDurations will fire next.
+  int _ringDurationIndex = 0;
+
+  // Delivery icon state: when true, delivery results appear as avatar badges
+  // rather than the _NudgeStatus text widget.
+  bool _showDeliveryBadges = false;
+
+  // Whether to show "Confirming if everyone received…" text during delivery wait.
+  // True for voice nudges only (ring skips step 2 per spec).
+  bool _showConfirmingText = false;
+
+  // Tracks what kind of nudge was last sent, used to decide which badges to show.
+  NudgeKind? _lastSentNudgeKind;
+
   // Real-time delivery confirmation (nudge reliability checklist): once a
   // ring/voice nudge is accepted by the backend, the sheet stays open
   // awaiting the receiver's genuine playback outcome instead of closing
@@ -144,11 +123,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   final Map<String, _PendingRecipient> _expectedRecipients = {};
   final Map<String, NudgeDeliveryResult> _resultsByUserId = {};
   MediaVolumeFeedback _rtdbVolumeFeedback = MediaVolumeFeedback.none;
-
-  // Redesigned send flow (Prompt 1) and ring duration selector state.
-  _SendFlow _flow = _SendFlow.idle;
-  int _ringDurationSeconds = 3;
-  Timer? _volumeRefreshTimer;
 
   static const _deliveryConfirmationTimeout = Duration(seconds: 12);
 
@@ -165,35 +139,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     );
     _restorePersistedFailures();
     _restoreLastNudgeStatus();
-    // Live volume signifiers (Prompt 2): load once now, then refresh on a
-    // cadence so the badges track each participant's current volume.
-    unawaited(_refreshVolumeFeedback());
-    _volumeRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      unawaited(_refreshVolumeFeedback());
-    });
-  }
-
-  Future<void> _refreshVolumeFeedback() async {
-    final friends = _friends;
-    if (friends.isEmpty) return;
-    final feedback = await MediaVolumeStore.instance.feedbackFor(
-      groupId: widget.group.groupId,
-      recipients: [
-        for (final friend in friends)
-          MediaVolumeRecipient(
-            userId: friend.userId,
-            displayName: friend.displayName,
-          ),
-      ],
-    );
-    if (!mounted) return;
-    setState(() => _rtdbVolumeFeedback = feedback);
   }
 
   /// Re-surface the latest failure reason for anyone who didn't receive the
   /// previous nudge (until success or [NudgeFailureMemory.timeout]).
-  /// B5: Schedules a 10-minute expiry alarm on the sender's device so the
-  /// sender gets a local notification if the receiver doesn't accept in time.
   void _scheduleSenderExpiry(String eventId, List<_PendingRecipient> expected) {
     if (!Platform.isAndroid) return;
     final first = expected.firstOrNull;
@@ -208,8 +157,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   }
 
   void _restorePersistedFailures() {
-    // Scoped to this group only — a failure from a different group must
-    // never bleed into this sheet.
     final failure = NudgeFailureMemory.instance.forGroup(widget.group.groupId);
     if (failure == null) return;
     _message = failure.message;
@@ -218,10 +165,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     _messagePending = false;
   }
 
-  /// Re-surface the most recent nudge's lifecycle status for this group so
-  /// tapping the main nudge button shows where the last nudge stands (waiting
-  /// for the receiver, played, low volume) instead of a blank send sheet.
-  /// Runs after [_restorePersistedFailures] so the newest state wins.
   void _restoreLastNudgeStatus() {
     final last = NudgeStatusMemory.instance.forGroup(widget.group.groupId);
     if (last == null) return;
@@ -277,11 +220,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   bool _isOnline(String userId) => widget.onlineUserIds.contains(userId);
 
-  /// Fresh per-participant volume band for the picker/status signifiers.
-  MediaVolumeBand? _volumeBandFor(String userId) =>
-      _rtdbVolumeFeedback.bandsByUserId[userId];
-
-  /// Friends who can actually be nudged (not already in the live session).
   List<GroupMemberSummary> get _nudgeableFriends =>
       _friends.where((f) => !_isOnline(f.userId)).toList(growable: false);
 
@@ -299,7 +237,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     _cooldownTicker?.cancel();
     _deliveryTimeoutTimer?.cancel();
     _autoDismissTimer?.cancel();
-    _volumeRefreshTimer?.cancel();
     unawaited(_deliverySub?.cancel());
     if (_recording) unawaited(_recorder.stop());
     unawaited(_recorder.dispose());
@@ -352,11 +289,49 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     }
   }
 
+  // ── Delivery badge helpers ──────────────────────────────────────────────────
+
+  /// Returns true when this recipient's nudge was not played (skull state).
+  bool _isDeliveryFailed(String userId) {
+    if (!_showDeliveryBadges) return false;
+    if (!_expectedRecipients.containsKey(userId)) return false;
+    final result = _resultsByUserId[userId];
+    return result != null && !result.played;
+  }
+
+  /// Returns the volume band to show as a corner badge for this recipient.
+  /// Only returns a value for voice nudges (ring/PN never show volume bands
+  /// per spec). Returns null when the avatar should show nothing extra.
+  MediaVolumeBand? _volumeBandFor(String userId) {
+    if (!_showDeliveryBadges) return null;
+    if (_isDeliveryFailed(userId)) return null;
+    if (!_expectedRecipients.containsKey(userId)) return null;
+    if (_lastSentNudgeKind != NudgeKind.voice) return null;
+
+    // Ground truth: live playback attention flag from the receiver.
+    final result = _resultsByUserId[userId];
+    if (result != null && result.played) {
+      final band = MediaVolumeBandX.fromAttention(result.attention);
+      if (band != null) return band;
+      // Played with no attention = volume was OK; show green badge.
+      return MediaVolumeBand.ok;
+    }
+
+    // Fallback: RTDB self-report for recipients where we have no result yet
+    // (e.g. awaiting-mid-delivery partial results) or for voice nudges whose
+    // event IDs did not return a delivery ack (rare edge case).
+    return _rtdbVolumeFeedback.bandsByUserId[userId];
+  }
+
+  // ── Send helpers ────────────────────────────────────────────────────────────
+
   Future<void> _prepareDeliveryWait({
     required String eventId,
     required List<_PendingRecipient> expected,
     required String waitingMessage,
   }) async {
+    // Load RTDB volume for badge fallback data — but do not surface volume
+    // warnings as text here; they appear as avatar badges after finalization.
     final feedback = await _loadVolumeFeedback(expected);
     if (!mounted) return;
     _rtdbVolumeFeedback = feedback;
@@ -365,13 +340,546 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       waitingMessage: waitingMessage,
       expected: expected,
     );
-    if (!feedback.hasWarnings) return;
+  }
+
+  void _beginAwaitingDeliveryConfirmation(
+    String? eventId, {
+    required String waitingMessage,
+    required List<_PendingRecipient> expected,
+  }) {
+    if (eventId == null || eventId.isEmpty) return;
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Awaiting delivery confirmation eventId=$eventId '
+          'expected=[${expected.map((e) => '${e.displayName}:${e.userId}').join(', ')}]',
+      groupId: widget.group.groupId,
+    );
+    _deliveryTimeoutTimer?.cancel();
+    _autoDismissTimer?.cancel();
     setState(() {
-      _message = feedback.joinedWarnings;
-      _messageIsError = false;
-      _messageIsWarning = true;
-      _messagePending = true;
+      _awaitingEventId = eventId;
+      _expectedRecipients
+        ..clear()
+        ..addEntries(expected.map((e) => MapEntry(e.userId, e)));
+      _resultsByUserId.clear();
+      // Step 2 text only for voice nudges — ring skips straight to icons.
+      if (_showConfirmingText && waitingMessage.isNotEmpty) {
+        _message = waitingMessage;
+        _messageIsError = false;
+        _messageIsWarning = false;
+        _messagePending = true;
+      }
     });
+    _recordLastStatus(LastNudgeStatus.waiting, 'Waiting for receiver');
+    _deliveryTimeoutTimer = Timer(_deliveryConfirmationTimeout, () {
+      if (!mounted || _awaitingEventId != eventId) return;
+      _finalizeDeliverySummary(timedOut: true);
+    });
+  }
+
+  void _onDeliveryResult(NudgeDeliveryResult result) {
+    if (!mounted) return;
+    if (result.eventId != _awaitingEventId) {
+      LogManager.log(
+        LogLevel.warn,
+        'NudgeService',
+        'Delivery result ignored: eventId mismatch result=${result.eventId} '
+            'awaiting=${_awaitingEventId} status=${result.status}',
+        groupId: widget.group.groupId,
+      );
+      return;
+    }
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Delivery result matched eventId=${result.eventId} status=${result.status} '
+          'reason=${result.reason ?? '-'} attention=${result.attention ?? '-'} '
+          'recipientUserId=${result.recipientUserId ?? '-'} '
+          'recipientName=${result.recipientName ?? '-'}',
+      groupId: widget.group.groupId,
+    );
+
+    String? matchedId = result.recipientUserId;
+    if (matchedId == null || !_expectedRecipients.containsKey(matchedId)) {
+      final name = result.recipientName?.trim().toLowerCase();
+      if (name != null && name.isNotEmpty) {
+        matchedId = _expectedRecipients.entries
+            .where((e) => e.value.displayName.trim().toLowerCase() == name)
+            .map((e) => e.key)
+            .firstOrNull;
+      }
+    }
+    matchedId ??= _expectedRecipients.length == 1
+        ? _expectedRecipients.keys.first
+        : null;
+    if (matchedId == null || matchedId.isEmpty) {
+      matchedId =
+          result.recipientUserId ??
+          result.recipientName ??
+          'unknown_${_resultsByUserId.length}';
+    }
+
+    _resultsByUserId[matchedId] = result;
+
+    final expectedCount = _expectedRecipients.isEmpty
+        ? 1
+        : _expectedRecipients.length;
+    if (_resultsByUserId.length >= expectedCount) {
+      _deliveryTimeoutTimer?.cancel();
+      _finalizeDeliverySummary(timedOut: false);
+    } else {
+      // Partial progress: trigger rebuild so in-flight badges update live.
+      setState(() {});
+    }
+  }
+
+  void _finalizeDeliverySummary({required bool timedOut}) {
+    if (!mounted) return;
+    LogManager.log(
+      timedOut ? LogLevel.warn : LogLevel.info,
+      'NudgeService',
+      'Finalizing delivery summary timedOut=$timedOut '
+          'results=[${_resultsByUserId.entries.map((e) => '${e.key}:${e.value.status}').join(', ')}] '
+          'expected=[${_expectedRecipients.keys.join(', ')}]',
+      groupId: widget.group.groupId,
+    );
+    final expected = _expectedRecipients.values.toList(growable: false);
+    // Synthesize timeout failures for anyone without a result.
+    for (final pending in expected) {
+      if (!_resultsByUserId.containsKey(pending.userId)) {
+        LogManager.log(
+          LogLevel.warn,
+          'NudgeService',
+          'No delivery result for ${pending.displayName} (${pending.userId}); '
+              'synthesizing failed/${timedOut ? 'timeout' : 'unknown'}',
+          groupId: widget.group.groupId,
+        );
+        _resultsByUserId[pending.userId] = NudgeDeliveryResult(
+          eventId: _awaitingEventId ?? '',
+          status: 'failed',
+          reason: timedOut ? 'timeout' : 'unknown',
+          recipientUserId: pending.userId,
+          recipientName: pending.displayName,
+        );
+      }
+    }
+
+    // Persist failure summaries so they can be shown on sheet reopen.
+    final failed = <NudgeDeliveryResult>[];
+    final failedNames = <String>[];
+    for (final entry in _resultsByUserId.entries) {
+      final result = entry.value;
+      final name =
+          result.recipientName ??
+          _expectedRecipients[entry.key]?.displayName ??
+          'them';
+      if (!result.played) {
+        failed.add(result);
+        failedNames.add(name.trim().split(RegExp(r'\s+')).first);
+      }
+    }
+    final volumeWarnings = _mergedVolumeWarnings();
+    final totalRecipients = _resultsByUserId.length;
+    if (failed.isEmpty) {
+      NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
+    } else {
+      final persistMsg = failed.length == 1
+          ? _shortFailureWithReason(failedNames.first, failed.first.reason)
+          : _persistedFailureMessage(
+              failed.length,
+              totalRecipients,
+              failedNames,
+            );
+      NudgeFailureMemory.instance.record(
+        widget.group.groupId,
+        failed.length >= totalRecipients
+            ? NudgeErrorSeverity.full
+            : NudgeErrorSeverity.partial,
+        persistMsg,
+      );
+    }
+
+    // Record status to memory for sheet reopen restoration.
+    final summaryMessage = _buildDeliveryMessage(partial: false);
+    if (failed.isNotEmpty) {
+      _recordLastStatus(LastNudgeStatus.failed, summaryMessage);
+    } else if (volumeWarnings.isNotEmpty) {
+      final allMuted = volumeWarnings.every((l) => l.contains(' is muted'));
+      _recordLastStatus(
+        allMuted ? LastNudgeStatus.volumeMuted : LastNudgeStatus.volumeLow,
+        summaryMessage,
+      );
+    } else {
+      _recordLastStatus(LastNudgeStatus.played, summaryMessage);
+    }
+
+    // Steps 3 & 4: delivery state is communicated entirely through profile
+    // icon signifiers — no text notifiers shown.
+    setState(() {
+      _awaitingEventId = null;
+      _messagePending = false;
+      _showDeliveryBadges = true;
+      _message = null;
+      _messageIsError = false;
+      _messageIsWarning = false;
+    });
+    _scheduleAutoDismiss();
+  }
+
+  String _buildDeliveryMessage({required bool partial}) {
+    final expected = _expectedRecipients;
+    final results = _resultsByUserId.values.toList(growable: false);
+    if (results.isEmpty) {
+      return partial
+          ? 'Confirming delivery\u2026'
+          : 'Nudge wasn\u2019t played, try again.';
+    }
+
+    final failed = results.where((r) => !r.played).toList(growable: false);
+    final attention = results
+        .where((r) => r.playedButNotAudible)
+        .toList(growable: false);
+    final cleanPlayed = results
+        .where((r) => r.played && r.attention == null)
+        .toList(growable: false);
+
+    String nameOf(NudgeDeliveryResult r) {
+      if (r.recipientName != null && r.recipientName!.trim().isNotEmpty) {
+        return r.recipientName!.trim().split(RegExp(r'\s+')).first;
+      }
+      if (r.recipientUserId != null) {
+        final pending = expected[r.recipientUserId!];
+        if (pending != null) {
+          return pending.displayName.trim().split(RegExp(r'\s+')).first;
+        }
+      }
+      return 'Someone';
+    }
+
+    if (failed.isNotEmpty) {
+      if (failed.length == 1 && (expected.length <= 1 || results.length == 1)) {
+        final f = failed.first;
+        return _shortFailureWithReason(nameOf(f), f.reason);
+      }
+      final names = failed.map(nameOf).toList(growable: false);
+      final named = _joinNames(names);
+      if (cleanPlayed.isEmpty && attention.isEmpty) {
+        return '$named did not receive the nudge.';
+      }
+      return '$named did not receive the nudge \u2014 everyone else did.';
+    }
+
+    final volumeWarnings = _mergedVolumeWarnings();
+    if (volumeWarnings.isNotEmpty) return volumeWarnings.join('\n');
+
+    if (expected.length <= 1 && results.length == 1) {
+      final name =
+          results.first.recipientName ??
+          expected.values.firstOrNull?.displayName;
+      if (name == null) return 'Everyone received the nudge \u2713';
+      return 'Nudge successfully playing on $name\u2019s device';
+    }
+    return 'Everyone received the nudge \u2713';
+  }
+
+  List<String> _mergedVolumeWarnings() {
+    final warnings = <String>[];
+    final covered = <String>{};
+
+    void addWarning(String userId, String displayName, MediaVolumeBand? band) {
+      if (band == null || !band.isWarning) return;
+      if (!covered.add(userId)) return;
+      warnings.add(band.warningMessage(mediaVolumeFirstName(displayName))!);
+    }
+
+    for (final entry in _resultsByUserId.entries) {
+      final result = entry.value;
+      if (!result.played) {
+        covered.add(entry.key);
+        continue;
+      }
+      final pending = _expectedRecipients[entry.key];
+      final name = result.recipientName ?? pending?.displayName ?? 'They';
+      addWarning(
+        entry.key,
+        name,
+        MediaVolumeBandX.fromAttention(result.attention),
+      );
+      covered.add(entry.key);
+    }
+
+    for (final entry in _expectedRecipients.entries) {
+      if (covered.contains(entry.key)) continue;
+      final band = _rtdbVolumeFeedback.bandsByUserId[entry.key];
+      addWarning(entry.key, entry.value.displayName, band);
+    }
+    return warnings;
+  }
+
+  String _joinNames(List<String> names) {
+    if (names.isEmpty) return 'Someone';
+    if (names.length == 1) return names.first;
+    if (names.length == 2) return '${names[0]} and ${names[1]}';
+    return '${names.sublist(0, names.length - 1).join(', ')}, and ${names.last}';
+  }
+
+  String _shortFailureWithReason(String name, String? reason) {
+    switch (reason) {
+      case 'permission_denied_foreground_service':
+        return 'Nudge did not reach $name \u2014 their phone blocked the app '
+            'from playing it. Ask them to reopen Duo.';
+      case 'playback_error':
+      case 'playback_service_start_error':
+      case 'download_error':
+      case 'timeout':
+        return 'Nudge did not reach $name \u2014 something went wrong on '
+            'Duo\u2019s end.';
+      default:
+        return 'Nudge did not reach $name.';
+    }
+  }
+
+  String _persistedFailureMessage(
+    int failedCount,
+    int totalRecipients,
+    List<String> failedNames,
+  ) {
+    if (failedCount >= totalRecipients) {
+      return 'Nudge wasn\u2019t delivered to anyone in this group.';
+    }
+    if (failedNames.length == failedCount && failedNames.length <= 2) {
+      return 'Last nudge to ${_joinNames(failedNames)} wasn\u2019t received.';
+    }
+    return 'Nudge wasn\u2019t delivered to $failedCount of $totalRecipients people.';
+  }
+
+  Duration _cooldownRemaining(NudgeKind kind) => _cooldowns.remaining(kind);
+
+  String _cooldownLabel(Duration remaining) {
+    final seconds = remaining.inMilliseconds / 1000;
+    return seconds <= 1 ? 'wait 1s' : 'wait ${seconds.ceil()}s';
+  }
+
+  void _scheduleAutoDismiss() {
+    _autoDismissTimer?.cancel();
+    _autoDismissTimer = Timer(_autoDismissDelay, () {
+      if (mounted && _canSend && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+    });
+  }
+
+  // ── Ring ─────────────────────────────────────────────────────────────────
+
+  /// Sends a ring nudge at the currently shown duration, then cycles to the
+  /// next duration for the following tap (3 → 6 → 9 → 3…).
+  /// Ring skips the "Confirming…" text step and shows results as avatar badges.
+  Future<void> _sendRingAtCurrentDuration() async {
+    if (_cooldownRemaining(NudgeKind.ring) > Duration.zero) return;
+    final seconds = _ringDurations[_ringDurationIndex];
+    _lastSentNudgeKind = NudgeKind.ring;
+    _showConfirmingText = false; // ring skips step 2 text
+    await _send(
+      () => _repository.sendRing(
+        groupId: widget.group.groupId,
+        target: _effectiveTarget(),
+        durationSeconds: seconds,
+      ),
+      kind: NudgeKind.ring,
+      awaitsDeliveryConfirmation: true,
+      waitingMessage: '',
+    );
+    // Advance to the next duration for the next tap.
+    if (mounted) {
+      setState(() {
+        _ringDurationIndex = (_ringDurationIndex + 1) % _ringDurations.length;
+      });
+    }
+  }
+
+  // ── Push ─────────────────────────────────────────────────────────────────
+
+  /// Sends a push notification. No delivery confirmation, no volume badges —
+  /// per spec, PN nudges skip steps 2 & 3 entirely and use silent success.
+  Future<void> _sendPush() async {
+    if (_cooldownRemaining(NudgeKind.push) > Duration.zero) return;
+    _lastSentNudgeKind = NudgeKind.push;
+    _showConfirmingText = false;
+    await _send(
+      () => _repository.sendPush(
+        groupId: widget.group.groupId,
+        target: _effectiveTarget(),
+      ),
+      kind: NudgeKind.push,
+      silentSuccess: true,
+    );
+  }
+
+  NudgeTarget _effectiveTarget() {
+    if (_target.targetScope == 'single_friend') {
+      final id = _target.targetUserId;
+      if (id != null && _isOnline(id)) return const NudgeTarget.allFriends();
+      return _target;
+    }
+    final nudgeable = _nudgeableFriends;
+    if (nudgeable.length == 1) {
+      return NudgeTarget.singleFriend(nudgeable.first.userId);
+    }
+    return _target;
+  }
+
+  Future<void> _send(
+    Future<Object?> Function() action, {
+    required NudgeKind kind,
+    bool awaitsDeliveryConfirmation = false,
+    String waitingMessage = '',
+    bool silentSuccess = false,
+  }) async {
+    if (!_canSend) return;
+    final expected = _recipientsForTarget();
+    if (expected.isEmpty) {
+      setState(() {
+        _message = 'Everyone is already online.';
+        _messageIsError = true;
+        _messageIsWarning = false;
+      });
+      return;
+    }
+    if (_target.targetScope == 'single_friend' &&
+        _target.targetUserId != null &&
+        _isOnline(_target.targetUserId!)) {
+      setState(() {
+        _message = 'They\u2019re already online.';
+        _messageIsError = true;
+        _messageIsWarning = false;
+      });
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _message = null;
+      _messageIsError = false;
+      _messageIsWarning = false;
+      _messagePending = false;
+      _showDeliveryBadges = false;
+    });
+    _rtdbVolumeFeedback = MediaVolumeFeedback.none;
+    try {
+      final result = await action();
+      _cooldowns.record(kind);
+      if (!mounted) return;
+      setState(() => _busy = false);
+      if (awaitsDeliveryConfirmation && result is Map) {
+        final eventId = result['notificationEventId']?.toString();
+        if (eventId != null && eventId.isNotEmpty) {
+          _scheduleSenderExpiry(eventId, expected);
+          await _prepareDeliveryWait(
+            eventId: eventId,
+            expected: expected,
+            waitingMessage: waitingMessage,
+          );
+          return;
+        }
+      }
+      if (!awaitsDeliveryConfirmation && result is Map) {
+        final eventId = result['notificationEventId']?.toString();
+        if (eventId != null && eventId.isNotEmpty) {
+          _scheduleSenderExpiry(eventId, expected);
+        }
+      }
+      // Check aggregate send/failed counts before claiming success.
+      if (!awaitsDeliveryConfirmation && result is Map<String, dynamic>) {
+        final nudgeResult = NudgeResult.fromSendResponse(
+          result,
+          expected.map((e) => e.userId).toList(growable: false),
+        );
+        if (!nudgeResult.isFullSuccess) {
+          final message = nudgeResult.isFullFailure
+              ? 'Nudge wasn\u2019t delivered to anyone in this group.'
+              : 'Nudge wasn\u2019t delivered to ${nudgeResult.failedCount} of '
+                    '${nudgeResult.totalRecipients} people.';
+          unawaited(
+            CrashlyticsService.recordNudgeFailure(
+              error: StateError(message),
+              failureReason: NudgeFailureReason.fcmNotDelivered,
+              senderId: widget.currentUserId,
+              groupId: widget.group.groupId,
+              extras: {
+                'failed_count': nudgeResult.failedCount,
+                'total_recipients': nudgeResult.totalRecipients,
+              },
+            ),
+          );
+          NudgeFailureMemory.instance.record(
+            widget.group.groupId,
+            nudgeResult.isFullFailure
+                ? NudgeErrorSeverity.full
+                : NudgeErrorSeverity.partial,
+            message,
+          );
+          _recordLastStatus(LastNudgeStatus.failed, message);
+          setState(() {
+            _message = message;
+            _messageIsError = true;
+            _messageIsWarning = false;
+            _messagePending = false;
+          });
+          _scheduleAutoDismiss();
+          return;
+        }
+      }
+
+      if (silentSuccess) {
+        // Push/PN: no delivery confirmation, no volume badges (spec).
+        // Clear any stale failure and dismiss silently.
+        NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
+        _recordLastStatus(LastNudgeStatus.sent, 'Sent');
+        setState(() {
+          _message = null;
+          _messageIsError = false;
+          _messageIsWarning = false;
+          _messagePending = false;
+        });
+        _scheduleAutoDismiss();
+      } else {
+        await _showImmediateSendOutcome(expected);
+      }
+    } catch (error, stack) {
+      final cancelled = error.toString().toLowerCase().contains('cancel');
+      final expectedDelivery = error is NudgeDeliveryException;
+      if (!cancelled && !expectedDelivery) {
+        unawaited(
+          CrashlyticsService.recordNudgeFailure(
+            error: error,
+            stack: stack,
+            failureReason:
+                error is ApiException && error.code == 'permission_denied'
+                ? NudgeFailureReason.permissionDeniedFirebase
+                : NudgeFailureReason.unknown,
+            senderId: widget.currentUserId,
+            groupId: widget.group.groupId,
+          ),
+        );
+      }
+      if (!mounted) return;
+      final rateLimited =
+          error is ApiException && error.code == 'nudge_rate_limited';
+      final message = rateLimited ? error.message : _friendlyError(error);
+      if (!cancelled && !rateLimited) {
+        NudgeFailureMemory.instance.record(
+          widget.group.groupId,
+          NudgeErrorSeverity.full,
+          message,
+        );
+      }
+      setState(() {
+        _message = message;
+        _messageIsError = true;
+        _messageIsWarning = false;
+        _busy = false;
+      });
+    }
   }
 
   Future<void> _showImmediateSendOutcome(
@@ -426,593 +934,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     return anyMuted ? LastNudgeStatus.volumeMuted : LastNudgeStatus.volumeLow;
   }
 
-  void _scheduleAutoDismiss() {
-    _autoDismissTimer?.cancel();
-    _autoDismissTimer = Timer(_autoDismissDelay, () {
-      if (mounted && _canSend && Navigator.of(context).canPop()) {
-        Navigator.of(context).pop();
-      }
-    });
-  }
-
-  /// Begins waiting for the receiver's genuine playback outcome for the
-  /// ring/voice nudge identified by [eventId] instead of closing the sheet.
-  /// Falls back to a generic "wasn't played" message if no result arrives
-  /// within [_deliveryConfirmationTimeout] (e.g. the receiver is offline).
-  void _beginAwaitingDeliveryConfirmation(
-    String? eventId, {
-    required String waitingMessage,
-    required List<_PendingRecipient> expected,
-  }) {
-    if (eventId == null || eventId.isEmpty) return;
-    LogManager.log(
-      LogLevel.info,
-      'NudgeService',
-      'Awaiting delivery confirmation eventId=$eventId '
-          'expected=[${expected.map((e) => '${e.displayName}:${e.userId}').join(', ')}]',
-      groupId: widget.group.groupId,
-    );
-    _deliveryTimeoutTimer?.cancel();
-    _autoDismissTimer?.cancel();
-    setState(() {
-      _awaitingEventId = eventId;
-      _expectedRecipients
-        ..clear()
-        ..addEntries(expected.map((e) => MapEntry(e.userId, e)));
-      _resultsByUserId.clear();
-      _message = waitingMessage;
-      _messageIsError = false;
-      _messageIsWarning = false;
-      _messagePending = true;
-    });
-    _recordLastStatus(LastNudgeStatus.waiting, 'Waiting for receiver');
-    _deliveryTimeoutTimer = Timer(_deliveryConfirmationTimeout, () {
-      if (!mounted || _awaitingEventId != eventId) return;
-      _finalizeDeliverySummary(timedOut: true);
-    });
-  }
-
-  void _onDeliveryResult(NudgeDeliveryResult result) {
-    if (!mounted) return;
-    if (result.eventId != _awaitingEventId) {
-      LogManager.log(
-        LogLevel.warn,
-        'NudgeService',
-        'Delivery result ignored: eventId mismatch result=${result.eventId} '
-            'awaiting=${_awaitingEventId} status=${result.status}',
-        groupId: widget.group.groupId,
-      );
-      return;
-    }
-    LogManager.log(
-      LogLevel.info,
-      'NudgeService',
-      'Delivery result matched eventId=${result.eventId} status=${result.status} '
-          'reason=${result.reason ?? '-'} attention=${result.attention ?? '-'} '
-          'recipientUserId=${result.recipientUserId ?? '-'} '
-          'recipientName=${result.recipientName ?? '-'}',
-      groupId: widget.group.groupId,
-    );
-
-    // Match result to an expected recipient by userId first, then by name.
-    String? matchedId = result.recipientUserId;
-    if (matchedId == null || !_expectedRecipients.containsKey(matchedId)) {
-      final name = result.recipientName?.trim().toLowerCase();
-      if (name != null && name.isNotEmpty) {
-        matchedId = _expectedRecipients.entries
-            .where((e) => e.value.displayName.trim().toLowerCase() == name)
-            .map((e) => e.key)
-            .firstOrNull;
-      }
-    }
-    // Single expected recipient fallback (unique friend target).
-    matchedId ??= _expectedRecipients.length == 1
-        ? _expectedRecipients.keys.first
-        : null;
-    if (matchedId == null || matchedId.isEmpty) {
-      // Still useful when the map is empty (legacy path).
-      matchedId =
-          result.recipientUserId ??
-          result.recipientName ??
-          'unknown_${_resultsByUserId.length}';
-    }
-
-    _resultsByUserId[matchedId] = result;
-
-    final expectedCount = _expectedRecipients.isEmpty
-        ? 1
-        : _expectedRecipients.length;
-    if (_resultsByUserId.length >= expectedCount) {
-      _deliveryTimeoutTimer?.cancel();
-      _finalizeDeliverySummary(timedOut: false);
-    } else {
-      // Partial progress so the sender sees results as they arrive.
-      setState(() {
-        _message = _buildDeliveryMessage(partial: true);
-        _messageIsError = _resultsByUserId.values.any((r) => !r.played);
-        _messageIsWarning =
-            !_messageIsError &&
-            _resultsByUserId.values.any((r) => r.playedButNotAudible);
-        _messagePending = true;
-      });
-    }
-  }
-
-  void _finalizeDeliverySummary({required bool timedOut}) {
-    if (!mounted) return;
-    LogManager.log(
-      timedOut ? LogLevel.warn : LogLevel.info,
-      'NudgeService',
-      'Finalizing delivery summary timedOut=$timedOut '
-          'results=[${_resultsByUserId.entries.map((e) => '${e.key}:${e.value.status}').join(', ')}] '
-          'expected=[${_expectedRecipients.keys.join(', ')}]',
-      groupId: widget.group.groupId,
-    );
-    final expected = _expectedRecipients.values.toList(growable: false);
-    // Synthesize timeout failures for anyone without a result.
-    for (final pending in expected) {
-      if (!_resultsByUserId.containsKey(pending.userId)) {
-        LogManager.log(
-          LogLevel.warn,
-          'NudgeService',
-          'No delivery result for ${pending.displayName} (${pending.userId}); '
-              'synthesizing failed/${timedOut ? 'timeout' : 'unknown'}',
-          groupId: widget.group.groupId,
-        );
-        _resultsByUserId[pending.userId] = NudgeDeliveryResult(
-          eventId: _awaitingEventId ?? '',
-          status: 'failed',
-          reason: timedOut ? 'timeout' : 'unknown',
-          recipientUserId: pending.userId,
-          recipientName: pending.displayName,
-        );
-      }
-    }
-
-    if (_resultsByUserId.isEmpty && timedOut) {
-      setState(() {
-        _awaitingEventId = null;
-        _message = 'Nudge wasn\u2019t played, try again.';
-        _messageIsError = true;
-        _messageIsWarning = false;
-        _messagePending = false;
-      });
-      _scheduleAutoDismiss();
-      return;
-    }
-
-    // Persist a group-scoped failure summary (or clear it on full success)
-    // for the return-to-sheet banner. Only genuine playback failures count as
-    // failures here \u2014 a muted/low-volume recipient "played" the nudge and
-    // is surfaced as a warning instead of a "did not receive" error.
-    final failed = <NudgeDeliveryResult>[];
-    final failedNames = <String>[];
-    for (final entry in _resultsByUserId.entries) {
-      final result = entry.value;
-      final name =
-          result.recipientName ??
-          _expectedRecipients[entry.key]?.displayName ??
-          'them';
-      if (!result.played) {
-        failed.add(result);
-        failedNames.add(name.trim().split(RegExp(r'\s+')).first);
-      }
-    }
-    final volumeWarnings = _mergedVolumeWarnings();
-    final totalRecipients = _resultsByUserId.length;
-    if (failed.isEmpty) {
-      NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
-    } else {
-      // With exactly one failed recipient, keep the specific reason-coded
-      // message (more useful than a generic count) instead of collapsing it.
-      final message = failed.length == 1
-          ? _shortFailureWithReason(failedNames.first, failed.first.reason)
-          : _persistedFailureMessage(
-              failed.length,
-              totalRecipients,
-              failedNames,
-            );
-      NudgeFailureMemory.instance.record(
-        widget.group.groupId,
-        failed.length >= totalRecipients
-            ? NudgeErrorSeverity.full
-            : NudgeErrorSeverity.partial,
-        message,
-      );
-    }
-
-    final summaryMessage = _buildDeliveryMessage(partial: false);
-    if (failed.isNotEmpty) {
-      _recordLastStatus(LastNudgeStatus.failed, summaryMessage);
-    } else if (volumeWarnings.isNotEmpty) {
-      final allMuted = volumeWarnings.every(
-        (line) => line.contains(' is muted'),
-      );
-      _recordLastStatus(
-        allMuted ? LastNudgeStatus.volumeMuted : LastNudgeStatus.volumeLow,
-        summaryMessage,
-      );
-    } else {
-      _recordLastStatus(LastNudgeStatus.played, summaryMessage);
-    }
-
-    setState(() {
-      _awaitingEventId = null;
-      _messagePending = false;
-      _message = summaryMessage;
-      _messageIsError = failed.isNotEmpty;
-      _messageIsWarning = failed.isEmpty && volumeWarnings.isNotEmpty;
-    });
-    _scheduleAutoDismiss();
-  }
-
-  String _buildDeliveryMessage({required bool partial}) {
-    final expected = _expectedRecipients;
-    final results = _resultsByUserId.values.toList(growable: false);
-    if (results.isEmpty) {
-      return partial
-          ? 'Confirming delivery\u2026'
-          : 'Nudge wasn\u2019t played, try again.';
-    }
-
-    final failed = results.where((r) => !r.played).toList(growable: false);
-    final attention = results
-        .where((r) => r.playedButNotAudible)
-        .toList(growable: false);
-    final cleanPlayed = results
-        .where((r) => r.played && r.attention == null)
-        .toList(growable: false);
-
-    String nameOf(NudgeDeliveryResult r) {
-      if (r.recipientName != null && r.recipientName!.trim().isNotEmpty) {
-        return r.recipientName!.trim().split(RegExp(r'\s+')).first;
-      }
-      if (r.recipientUserId != null) {
-        final pending = expected[r.recipientUserId!];
-        if (pending != null) {
-          return pending.displayName.trim().split(RegExp(r'\s+')).first;
-        }
-      }
-      return 'Someone';
-    }
-
-    // 1) Genuine playback failures \u2014 the only "did not receive" cases.
-    if (failed.isNotEmpty) {
-      if (failed.length == 1 && (expected.length <= 1 || results.length == 1)) {
-        final f = failed.first;
-        return _shortFailureWithReason(nameOf(f), f.reason);
-      }
-
-      final names = failed.map(nameOf).toList(growable: false);
-      final named = _joinNames(names);
-      if (cleanPlayed.isEmpty && attention.isEmpty) {
-        return '$named did not receive the nudge.';
-      }
-      return '$named did not receive the nudge \u2014 everyone else did.';
-    }
-
-    // 2) Played, but likely inaudible (muted / low volume) — playback
-    // health wins per recipient; RTDB fills in anyone without a live reading.
-    final volumeWarnings = _mergedVolumeWarnings();
-    if (volumeWarnings.isNotEmpty) {
-      return volumeWarnings.join('\n');
-    }
-
-    // 3) Clean success.
-    if (expected.length <= 1 && results.length == 1) {
-      final name =
-          results.first.recipientName ??
-          expected.values.firstOrNull?.displayName;
-      if (name == null) {
-        return 'Everyone received the nudge \u2713';
-      }
-      return 'Nudge successfully playing on $name\u2019s device';
-    }
-    return 'Everyone received the nudge \u2713';
-  }
-
-  /// Per-recipient volume warnings after a send.
-  ///
-  /// Playback `attention` is ground truth at play time. Recipients with no
-  /// playback result (timeout / push) fall back to a fresh RTDB self-report.
-  /// Stale or missing reports are omitted — never a false warning, and never
-  /// used to claim "all OK".
-  List<String> _mergedVolumeWarnings() {
-    final warnings = <String>[];
-    final covered = <String>{};
-
-    void addWarning(String userId, String displayName, MediaVolumeBand? band) {
-      if (band == null || !band.isWarning) return;
-      if (!covered.add(userId)) return;
-      warnings.add(band.warningMessage(mediaVolumeFirstName(displayName))!);
-    }
-
-    for (final entry in _resultsByUserId.entries) {
-      final result = entry.value;
-      if (!result.played) {
-        covered.add(entry.key);
-        continue;
-      }
-      final pending = _expectedRecipients[entry.key];
-      final name = result.recipientName ?? pending?.displayName ?? 'They';
-      addWarning(
-        entry.key,
-        name,
-        MediaVolumeBandX.fromAttention(result.attention),
-      );
-      // Played with no attention = live volume is OK; don't overlay RTDB.
-      covered.add(entry.key);
-    }
-
-    for (final entry in _expectedRecipients.entries) {
-      if (covered.contains(entry.key)) continue;
-      final band = _rtdbVolumeFeedback.bandsByUserId[entry.key];
-      addWarning(entry.key, entry.value.displayName, band);
-    }
-    return warnings;
-  }
-
-  String _joinNames(List<String> names) {
-    if (names.isEmpty) return 'Someone';
-    if (names.length == 1) return names.first;
-    if (names.length == 2) return '${names[0]} and ${names[1]}';
-    return '${names.sublist(0, names.length - 1).join(', ')}, and ${names.last}';
-  }
-
-  String _shortFailureWithReason(String name, String? reason) {
-    switch (reason) {
-      // Receiver-device conditions \u2014 show a specific, actionable cause so the
-      // sender knows it's not Duo's fault.
-      case 'permission_denied_foreground_service':
-        return 'Nudge did not reach $name \u2014 their phone blocked the app '
-            'from playing it. Ask them to reopen Duo.';
-      // Duo-side bugs \u2014 be honest that it's our fault. (A "send a report"
-      // affordance will be wired here once the receiver-log delivery channel
-      // is chosen.)
-      case 'playback_error':
-      case 'playback_service_start_error':
-      case 'download_error':
-      case 'timeout':
-        return 'Nudge did not reach $name \u2014 something went wrong on '
-            'Duo\u2019s end.';
-      default:
-        return 'Nudge did not reach $name.';
-    }
-  }
-
-  /// Builds the group-scoped persisted-failure message shown when the
-  /// sheet is reopened. Uses real names for a full failure (small groups),
-  /// and falls back to a plain count for partial failures where we can't
-  /// attribute the message to one or two people cleanly.
-  String _persistedFailureMessage(
-    int failedCount,
-    int totalRecipients,
-    List<String> failedNames,
-  ) {
-    if (failedCount >= totalRecipients) {
-      return 'Nudge wasn\u2019t delivered to anyone in this group.';
-    }
-    if (failedNames.length == failedCount && failedNames.length <= 2) {
-      return 'Last nudge to ${_joinNames(failedNames)} wasn\u2019t received.';
-    }
-    return 'Nudge wasn\u2019t delivered to $failedCount of $totalRecipients people.';
-  }
-
-  /// Remaining local cooldown for [kind]. Purely a UX affordance — the
-  /// backend is the authoritative enforcer and still returns
-  /// `nudge_rate_limited` if this local check is somehow bypassed.
-  Duration _cooldownRemaining(NudgeKind kind) => _cooldowns.remaining(kind);
-
-  String _cooldownLabel(Duration remaining) {
-    final seconds = remaining.inMilliseconds / 1000;
-    return seconds <= 1 ? 'wait 1s' : 'wait ${seconds.ceil()}s';
-  }
-
-  /// Cycles the ring duration selector 3s \u2192 6s \u2192 9s \u2192 3s (Prompt 1).
-  void _cycleRingDuration() {
-    const durations = [3, 6, 9];
-    final next = durations[(durations.indexOf(_ringDurationSeconds) + 1) %
-        durations.length];
-    setState(() => _ringDurationSeconds = next);
-    if (widget.hapticsEnabled) {
-      unawaited(HapticFeedback.selectionClick());
-    }
-  }
-
-  Future<void> _sendRing(int seconds) async {
-    if (_cooldownRemaining(NudgeKind.ring) > Duration.zero) return;
-    // Ring skips the "confirming"/live steps and has no low-volume step \u2014
-    // it resolves straight to the final signifier state (Prompt 1).
-    await _send(
-      () => _repository.sendRing(
-        groupId: widget.group.groupId,
-        target: _effectiveTarget(),
-        durationSeconds: seconds,
-      ),
-      kind: NudgeKind.ring,
-      sendingFlow: _SendFlow.sendingRing,
-    );
-  }
-
-  Future<void> _sendPush() async {
-    if (_cooldownRemaining(NudgeKind.push) > Duration.zero) return;
-    await _send(
-      () => _repository.sendPush(
-        groupId: widget.group.groupId,
-        target: _effectiveTarget(),
-      ),
-      kind: NudgeKind.push,
-      sendingFlow: _SendFlow.sendingPush,
-    );
-  }
-
-  /// Resolves "everyone" to only nudgeable (offline) friends when some are
-  /// already live — live members are never offered as nudge targets.
-  NudgeTarget _effectiveTarget() {
-    if (_target.targetScope == 'single_friend') {
-      final id = _target.targetUserId;
-      if (id != null && _isOnline(id)) {
-        // Online-only selection should be disabled in UI; fall back safely.
-        return const NudgeTarget.allFriends();
-      }
-      return _target;
-    }
-    // Backend still fans out to all friends for all_friends; UI filters
-    // online members from single-target picks. Prefer single friend if only
-    // one nudgeable remains after filtering.
-    final nudgeable = _nudgeableFriends;
-    if (nudgeable.length == 1) {
-      return NudgeTarget.singleFriend(nudgeable.first.userId);
-    }
-    return _target;
-  }
-
-  Future<void> _send(
-    Future<Object?> Function() action, {
-    required NudgeKind kind,
-    bool awaitsDeliveryConfirmation = false,
-    String waitingMessage = '',
-  }) async {
-    if (!_canSend) return;
-    final expected = _recipientsForTarget();
-    if (expected.isEmpty) {
-      setState(() {
-        _message = 'Everyone is already online.';
-        _messageIsError = true;
-        _messageIsWarning = false;
-      });
-      return;
-    }
-    // Guard single-friend target against online peer.
-    if (_target.targetScope == 'single_friend' &&
-        _target.targetUserId != null &&
-        _isOnline(_target.targetUserId!)) {
-      setState(() {
-        _message = 'They\u2019re already online.';
-        _messageIsError = true;
-        _messageIsWarning = false;
-      });
-      return;
-    }
-    setState(() {
-      _busy = true;
-      _message = null;
-      _messageIsError = false;
-      _messageIsWarning = false;
-      _messagePending = false;
-    });
-    _rtdbVolumeFeedback = MediaVolumeFeedback.none;
-    try {
-      final result = await action();
-      _cooldowns.record(kind);
-      if (!mounted) return;
-      setState(() => _busy = false);
-      if (awaitsDeliveryConfirmation && result is Map) {
-        final eventId = result['notificationEventId']?.toString();
-        if (eventId != null && eventId.isNotEmpty) {
-          // B5: Schedule sender-side 10-minute expiry alarm.
-          _scheduleSenderExpiry(eventId, expected);
-          await _prepareDeliveryWait(
-            eventId: eventId,
-            expected: expected,
-            waitingMessage: waitingMessage,
-          );
-          return;
-        }
-      }
-      // B5: Also schedule expiry for push nudges (no delivery confirmation).
-      if (!awaitsDeliveryConfirmation && result is Map) {
-        final eventId = result['notificationEventId']?.toString();
-        if (eventId != null && eventId.isNotEmpty) {
-          _scheduleSenderExpiry(eventId, expected);
-        }
-      }
-      // Push (and unconfirmed ring/voice) has no per-recipient playback
-      // confirmation, but the send response still reports aggregate
-      // sent/failed device counts — use those to catch partial failures
-      // instead of always reporting success when `sent > 0`.
-      if (!awaitsDeliveryConfirmation && result is Map<String, dynamic>) {
-        final nudgeResult = NudgeResult.fromSendResponse(
-          result,
-          expected.map((e) => e.userId).toList(growable: false),
-        );
-        if (!nudgeResult.isFullSuccess) {
-          final message = nudgeResult.isFullFailure
-              ? 'Nudge wasn\u2019t delivered to anyone in this group.'
-              : 'Nudge wasn\u2019t delivered to ${nudgeResult.failedCount} of '
-                    '${nudgeResult.totalRecipients} people.';
-          unawaited(
-            CrashlyticsService.recordNudgeFailure(
-              error: StateError(message),
-              failureReason: NudgeFailureReason.fcmNotDelivered,
-              senderId: widget.currentUserId,
-              groupId: widget.group.groupId,
-              extras: {
-                'failed_count': nudgeResult.failedCount,
-                'total_recipients': nudgeResult.totalRecipients,
-              },
-            ),
-          );
-          NudgeFailureMemory.instance.record(
-            widget.group.groupId,
-            nudgeResult.isFullFailure
-                ? NudgeErrorSeverity.full
-                : NudgeErrorSeverity.partial,
-            message,
-          );
-          _recordLastStatus(LastNudgeStatus.failed, message);
-          setState(() {
-            _message = message;
-            _messageIsError = true;
-            _messageIsWarning = false;
-            _messagePending = false;
-          });
-          _scheduleAutoDismiss();
-          return;
-        }
-      }
-      // Push (and unconfirmed ring/voice) — fetch receiver-reported volume
-      // before claiming everyone heard it. Stale/missing readings omit the
-      // warning rather than inventing one.
-      await _showImmediateSendOutcome(expected);
-    } catch (error, stack) {
-      final cancelled = error.toString().toLowerCase().contains('cancel');
-      final expectedDelivery = error is NudgeDeliveryException;
-      if (!cancelled && !expectedDelivery) {
-        unawaited(
-          CrashlyticsService.recordNudgeFailure(
-            error: error,
-            stack: stack,
-            failureReason:
-                error is ApiException && error.code == 'permission_denied'
-                ? NudgeFailureReason.permissionDeniedFirebase
-                : NudgeFailureReason.unknown,
-            senderId: widget.currentUserId,
-            groupId: widget.group.groupId,
-          ),
-        );
-      }
-      if (!mounted) return;
-      final rateLimited =
-          error is ApiException && error.code == 'nudge_rate_limited';
-      final message = rateLimited ? error.message : _friendlyError(error);
-      // Rate limiting and user-initiated cancellation aren't delivery
-      // failures — don't persist those as a group error.
-      if (!cancelled && !rateLimited) {
-        NudgeFailureMemory.instance.record(
-          widget.group.groupId,
-          NudgeErrorSeverity.full,
-          message,
-        );
-      }
-      setState(() {
-        _message = message;
-        _messageIsError = true;
-        _messageIsWarning = false;
-        _busy = false;
-      });
-    }
-  }
+  // ── Voice recording ─────────────────────────────────────────────────────
 
   Future<void> _beginRecording() async {
     if (!_canSend || _startingRecording) return;
@@ -1032,16 +954,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       final file = File(
         '${Directory.systemTemp.path}/one_one_voice_${DateTime.now().microsecondsSinceEpoch}.${VoiceNudgeAudio.fileExtension}',
       );
-      await _recorder.start(
-        VoiceNudgeAudio.recordConfig,
-        path: file.path,
-      );
+      await _recorder.start(VoiceNudgeAudio.recordConfig, path: file.path);
       if (!mounted) {
         await _recorder.stop();
         return;
       }
-      // Second, slightly stronger pulse confirms recording actually started
-      // (distinct from the immediate "press acknowledged" pulse on touch-down).
       if (widget.hapticsEnabled) unawaited(HapticFeedback.mediumImpact());
       _recordingWatch
         ..reset()
@@ -1058,7 +975,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       setState(() {
         _recording = true;
         _elapsed = Duration.zero;
-        _message = 'Recording… release to send';
+        _message = 'Recording\u2026 release to send';
         _messageIsError = false;
         _messageIsWarning = false;
       });
@@ -1092,18 +1009,17 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _recording = false;
         _busy = send;
         _sendingVoice = send;
-        _message = send ? 'Sending voice nudge…' : null;
+        // Step 1: "Voice nudge sending"
+        _message = send ? 'Voice nudge sending\u2026' : null;
         _messageIsError = false;
         _messageIsWarning = false;
+        _showDeliveryBadges = false;
       });
     }
 
     String? path;
     var sent = false;
     String? voiceEventId;
-    // Kick off the signed-URL reservation while MediaRecorder flushes the
-    // M4A file. ExoPlayer on the receiver decodes this AAC natively — there
-    // is no extra decompress step after download.
     final uploadReservation = send && durationMs >= 250
         ? _repository.initiateVoiceUpload(
             groupId: widget.group.groupId,
@@ -1155,9 +1071,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       if (path != null) {
         try {
           await File(path).delete();
-        } catch (_) {
-          // The OS cache cleaner is the final fallback.
-        }
+        } catch (_) {}
       }
       _recordingWatch.reset();
       _finishingRecording = false;
@@ -1168,10 +1082,14 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           _elapsed = Duration.zero;
         });
         if (sent && voiceEventId != null && voiceEventId.isNotEmpty) {
+          // Voice nudge: show step 2 "Confirming if everyone received"
+          // then transition to avatar badges on finalization.
+          _lastSentNudgeKind = NudgeKind.voice;
+          _showConfirmingText = true;
           await _prepareDeliveryWait(
             eventId: voiceEventId,
             expected: _recipientsForTarget(),
-            waitingMessage: 'Sent\u2026 confirming it played',
+            waitingMessage: 'Confirming if everyone received\u2026',
           );
         } else if (sent) {
           await _showImmediateSendOutcome(_recipientsForTarget());
@@ -1197,8 +1115,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     if (text.contains('voice_nudge_too_large')) {
       return 'Recording was too large. Try again.';
     }
-    return 'Couldn’t send the nudge. Check your connection.';
+    return 'Couldn\u2019t send the nudge. Check your connection.';
   }
+
+  // ── Build ───────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -1215,6 +1135,16 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           1.0,
         );
     final accent = widget.accent;
+
+    // Only show status widget for: errors, no-friends/all-online guards,
+    // step 1 (voice uploading), and step 2 (voice confirming).
+    // Delivery results (steps 3 & 4) are shown as avatar badges only.
+    final showStatus =
+        _friends.isEmpty ||
+        _nudgeableFriends.isEmpty ||
+        (_messageIsError && _message != null) ||
+        (_sendingVoice && _message != null) ||
+        (_messagePending && _awaitingEventId != null && _message != null);
 
     return PopScope(
       canPop:
@@ -1296,13 +1226,14 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
                 SizedBox(height: 18.h),
 
-                // ── Recipient picker ──
+                // ── Recipient picker (with delivery state badges) ──
                 SizedBox(
                   height: 88.h,
                   child: ListView(
                     scrollDirection: Axis.horizontal,
                     padding: EdgeInsets.symmetric(horizontal: 20.w),
                     children: [
+                      // "Everyone" group chip — no delivery badge (not a user)
                       _NudgeRecipient(
                         label: 'Everyone',
                         selected: _target.targetScope == 'all_friends',
@@ -1327,6 +1258,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                         Builder(
                           builder: (context) {
                             final online = _isOnline(friend.userId);
+                            final failed = _isDeliveryFailed(friend.userId);
+                            final volumeBand = _volumeBandFor(friend.userId);
                             return _NudgeRecipient(
                               label: friend.displayName,
                               subtitle: online ? 'already online' : null,
@@ -1343,29 +1276,16 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                                       ),
                                     )
                                   : null,
+                              // Delivery badge: volume icon or null.
+                              // Skull state is embedded inside the avatar widget.
+                              deliveryBadge: (!failed && volumeBand != null)
+                                  ? _VolumeBadgeIcon(band: volumeBand)
+                                  : null,
                               avatar: Opacity(
                                 opacity: online ? 0.38 : 1,
-                                child: ProfileAvatar(
-                                  key: ValueKey(friend.userId),
-                                  profilePhotoUrl: friend.profilePhotoUrl,
-                                  profilePhotoBase64: friend.profilePhotoBase64,
-                                  avatarAsset: friend.avatarAsset,
-                                  radius: 24.r,
-                                  fallback: Text(
-                                    friend.displayName.trim().isEmpty
-                                        ? '?'
-                                        : String.fromCharCode(
-                                            friend.displayName
-                                                .trim()
-                                                .runes
-                                                .first,
-                                          ).toUpperCase(),
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 17.sp,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
+                                child: _buildFriendAvatar(
+                                  friend: friend,
+                                  failed: failed,
                                 ),
                               ),
                             );
@@ -1376,277 +1296,60 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                   ),
                 ),
 
-                SizedBox(height: 14.h),
+                SizedBox(height: 20.h),
                 _SheetDivider(),
+                SizedBox(height: 24.h),
 
-                // ── Quick ring (most subtle — listed first) ──
+                // ── Three-element action row: Ring | Voice | Push ──
                 Padding(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: 20.w,
-                    vertical: 13.h,
-                  ),
+                  padding: EdgeInsets.symmetric(horizontal: 24.w),
                   child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Icon(
-                        Icons.vibration_rounded,
-                        color: Colors.white38,
-                        size: 17.sp,
+                      // Left: Ring duration selector
+                      _RingActionButton(
+                        durationSeconds: _ringDurations[_ringDurationIndex],
+                        accent: accent,
+                        enabled: ringEnabled,
+                        cooldownLabel: ringCooldown > Duration.zero
+                            ? _cooldownLabel(ringCooldown)
+                            : null,
+                        onTap: _sendRingAtCurrentDuration,
                       ),
-                      SizedBox(width: 10.w),
-                      Text(
-                        ringCooldown > Duration.zero
-                            ? 'Quick ring · ${_cooldownLabel(ringCooldown)}'
-                            : 'Quick ring',
-                        style: TextStyle(
-                          color: Colors.white54,
-                          fontSize: 13.sp,
-                          fontWeight: FontWeight.w600,
-                        ),
+
+                      // Center: Voice mic (press-and-hold, unchanged behavior)
+                      _buildVoiceMicButton(
+                        accent: accent,
+                        voiceEnabled: voiceEnabled,
+                        recordingProgress: recordingProgress,
+                        voiceCooldown: voiceCooldown,
                       ),
-                      const Spacer(),
-                      // Chips stay visible (only their enabled state changes)
-                      // so an in-flight send never hides the duration picker —
-                      // a generic spinner here previously replaced it.
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          for (final s in const [3, 5, 10]) ...[
-                            if (s != 3) SizedBox(width: 6.w),
-                            _RingChip(
-                              seconds: s,
-                              accent: accent,
-                              enabled: ringEnabled,
-                              onTap: () => _sendRing(s),
-                            ),
-                          ],
-                        ],
+
+                      // Right: Push notification
+                      _PushActionButton(
+                        accent: accent,
+                        enabled: pushEnabled,
+                        cooldownLabel: pushCooldown > Duration.zero
+                            ? _cooldownLabel(pushCooldown)
+                            : null,
+                        onTap: _sendPush,
                       ),
                     ],
                   ),
                 ),
 
-                _SheetDivider(),
+                SizedBox(height: 24.h),
 
-                // ── Push notification (medium urgency — second) ──
-                InkWell(
-                  onTap: pushEnabled ? _sendPush : null,
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(
-                      horizontal: 20.w,
-                      vertical: 14.h,
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.notifications_none_rounded,
-                          color: pushEnabled ? Colors.white70 : Colors.white24,
-                          size: 20.sp,
-                        ),
-                        SizedBox(width: 12.w),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Push notification',
-                                style: TextStyle(
-                                  color: pushEnabled
-                                      ? Colors.white
-                                      : Colors.white24,
-                                  fontSize: 14.sp,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              Text(
-                                pushCooldown > Duration.zero
-                                    ? _cooldownLabel(pushCooldown)
-                                    : 'Standard alert',
-                                style: TextStyle(
-                                  color: pushEnabled
-                                      ? Colors.white38
-                                      : Colors.white12,
-                                  fontSize: 11.sp,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        Icon(
-                          Icons.arrow_forward_rounded,
-                          color: pushEnabled ? Colors.white24 : Colors.white12,
-                          size: 16.sp,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-
-                _SheetDivider(),
-
-                // ── Voice message — recorded and sent inside this sheet ──
-                Padding(
-                  padding: EdgeInsets.fromLTRB(20.w, 16.h, 20.w, 18.h),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.mic_none_rounded,
-                            color: voiceEnabled || _recording
-                                ? accent
-                                : Colors.white24,
-                            size: 20.sp,
-                          ),
-                          SizedBox(width: 10.w),
-                          Text(
-                            'Voice nudge',
-                            style: TextStyle(
-                              color: voiceEnabled || _recording
-                                  ? Colors.white
-                                  : Colors.white24,
-                              fontSize: 14.sp,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                      SizedBox(height: 5.h),
-                      Text(
-                        voiceCooldown > Duration.zero
-                            ? 'Voice nudge sent recently — ${_cooldownLabel(voiceCooldown)}.'
-                            : 'Press and hold the mic. Your recording is capped at 6 seconds and sent when you release.',
-                        style: TextStyle(
-                          color: voiceEnabled || _recording
-                              ? Colors.white38
-                              : Colors.white12,
-                          fontSize: 11.sp,
-                          height: 1.4,
-                        ),
-                      ),
-                      SizedBox(height: 16.h),
-                      Center(
-                        child: Semantics(
-                          button: true,
-                          enabled: voiceEnabled,
-                          label: _recording
-                              ? 'Recording voice nudge, release to send'
-                              : _sendingVoice
-                              ? 'Sending voice nudge'
-                              : 'Voice nudge, press and hold to record',
-                          child: Listener(
-                            onPointerDown: (_) {
-                              if (!voiceEnabled) return;
-                              // Immediate, subtle pulse the instant the press is
-                              // registered — before we even know the recorder
-                              // will start — so the touch feels acknowledged.
-                              if (widget.hapticsEnabled) {
-                                unawaited(HapticFeedback.lightImpact());
-                              }
-                              _pointerHeld = true;
-                              _sendAfterPointerEnd = true;
-                              unawaited(_beginRecording());
-                            },
-                            onPointerUp: (_) {
-                              _pointerHeld = false;
-                              _sendAfterPointerEnd = true;
-                              unawaited(_finishRecording(send: true));
-                            },
-                            onPointerCancel: (_) {
-                              _pointerHeld = false;
-                              _sendAfterPointerEnd = false;
-                              unawaited(_finishRecording(send: false));
-                            },
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 160),
-                              width: 104.r,
-                              height: 104.r,
-                              decoration: BoxDecoration(
-                                color: _recording
-                                    ? accent
-                                    : _sendingVoice
-                                    ? accent.withValues(alpha: 0.18)
-                                    : const Color(0xff202020),
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: _recording || _sendingVoice
-                                      ? accent
-                                      : Colors.white.withValues(alpha: 0.09),
-                                ),
-                                boxShadow: _recording || _sendingVoice
-                                    ? [
-                                        BoxShadow(
-                                          color: accent.withValues(alpha: 0.35),
-                                          blurRadius: 26.r,
-                                        ),
-                                      ]
-                                    : null,
-                              ),
-                              child: _sendingVoice
-                                  ? _SendingVoicePulse(accent: accent)
-                                  : Stack(
-                                      fit: StackFit.expand,
-                                      children: [
-                                        Padding(
-                                          padding: EdgeInsets.all(6.r),
-                                          child: CircularProgressIndicator(
-                                            value: _recording
-                                                ? recordingProgress
-                                                : 0,
-                                            strokeWidth: 4.r,
-                                            color: Colors.white,
-                                            backgroundColor: Colors.white24,
-                                          ),
-                                        ),
-                                        Icon(
-                                          _recording
-                                              ? Icons.mic_rounded
-                                              : Icons.mic_none_rounded,
-                                          size: 42.sp,
-                                          color: _recording
-                                              ? Colors.black
-                                              : voiceEnabled
-                                              ? Colors.white
-                                              : Colors.white24,
-                                        ),
-                                      ],
-                                    ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      SizedBox(height: 9.h),
-                      Center(
-                        child: Text(
-                          _recording
-                              ? '${(_elapsed.inMilliseconds / 1000).toStringAsFixed(1)} / 6.0 sec'
-                              : _sendingVoice
-                              ? 'Sending…'
-                              : 'Hold to record · release to send',
-                          style: TextStyle(
-                            color: _recording || _sendingVoice
-                                ? accent
-                                : Colors.white30,
-                            fontSize: 10.sp,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // ── Status / no-friends message ──
-                if (_friends.isEmpty ||
-                    _nudgeableFriends.isEmpty ||
-                    _message != null) ...[
+                // ── Status (step 1, step 2, errors, guards) ──
+                if (showStatus) ...[
                   Padding(
-                    padding: EdgeInsets.fromLTRB(20.w, 4.h, 20.w, 0),
+                    padding: EdgeInsets.fromLTRB(20.w, 0, 20.w, 0),
                     child: _NudgeStatus(
                       message: _friends.isEmpty
                           ? 'Invite a friend before sending a nudge.'
                           : _nudgeableFriends.isEmpty && _message == null
-                          ? 'Everyone is already online — no nudge needed.'
+                          ? 'Everyone is already online \u2014 no nudge needed.'
                           : UserFacingCopy.sanitize(
                               _message!,
                               fallback:
@@ -1661,7 +1364,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                   ),
                 ],
 
-                SizedBox(height: 28.h),
+                SizedBox(height: 32.h),
               ],
             ),
           ),
@@ -1669,15 +1372,178 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       ),
     );
   }
+
+  /// Builds a friend's avatar with optional skull+grayscale overlay for
+  /// failed delivery state.
+  Widget _buildFriendAvatar({
+    required GroupMemberSummary friend,
+    required bool failed,
+  }) {
+    final baseAvatar = ProfileAvatar(
+      key: ValueKey(friend.userId),
+      profilePhotoUrl: friend.profilePhotoUrl,
+      profilePhotoBase64: friend.profilePhotoBase64,
+      avatarAsset: friend.avatarAsset,
+      radius: 24.r,
+      fallback: Text(
+        friend.displayName.trim().isEmpty
+            ? '?'
+            : String.fromCharCode(
+                friend.displayName.trim().runes.first,
+              ).toUpperCase(),
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 17.sp,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+
+    if (!failed) return baseAvatar;
+
+    // Grayscale + skull for "nudge not received at all" state.
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ColorFiltered(
+          colorFilter: const ColorFilter.matrix([
+            0.2126, 0.7152, 0.0722, 0, 0,
+            0.2126, 0.7152, 0.0722, 0, 0,
+            0.2126, 0.7152, 0.0722, 0, 0,
+            0, 0, 0, 1, 0,
+          ]),
+          child: baseAvatar,
+        ),
+        Center(
+          child: Text(
+            '\u{1F480}',
+            textScaler: TextScaler.noScaling,
+            style: TextStyle(fontSize: 18.sp),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Builds the central voice mic button (unchanged behavior, new sizing).
+  Widget _buildVoiceMicButton({
+    required Color accent,
+    required bool voiceEnabled,
+    required double recordingProgress,
+    required Duration voiceCooldown,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Semantics(
+          button: true,
+          enabled: voiceEnabled,
+          label: _recording
+              ? 'Recording voice nudge, release to send'
+              : _sendingVoice
+              ? 'Sending voice nudge'
+              : 'Voice nudge, press and hold to record',
+          child: Listener(
+            onPointerDown: (_) {
+              if (!voiceEnabled) return;
+              if (widget.hapticsEnabled) unawaited(HapticFeedback.lightImpact());
+              _pointerHeld = true;
+              _sendAfterPointerEnd = true;
+              unawaited(_beginRecording());
+            },
+            onPointerUp: (_) {
+              _pointerHeld = false;
+              _sendAfterPointerEnd = true;
+              unawaited(_finishRecording(send: true));
+            },
+            onPointerCancel: (_) {
+              _pointerHeld = false;
+              _sendAfterPointerEnd = false;
+              unawaited(_finishRecording(send: false));
+            },
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              width: 104.r,
+              height: 104.r,
+              decoration: BoxDecoration(
+                color: _recording
+                    ? accent
+                    : _sendingVoice
+                    ? accent.withValues(alpha: 0.18)
+                    : const Color(0xff202020),
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: _recording || _sendingVoice
+                      ? accent
+                      : Colors.white.withValues(alpha: 0.09),
+                ),
+                boxShadow: _recording || _sendingVoice
+                    ? [
+                        BoxShadow(
+                          color: accent.withValues(alpha: 0.35),
+                          blurRadius: 26.r,
+                        ),
+                      ]
+                    : null,
+              ),
+              child: _sendingVoice
+                  ? _SendingVoicePulse(accent: accent)
+                  : Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Padding(
+                          padding: EdgeInsets.all(6.r),
+                          child: CircularProgressIndicator(
+                            value: _recording ? recordingProgress : 0,
+                            strokeWidth: 4.r,
+                            color: Colors.white,
+                            backgroundColor: Colors.white24,
+                          ),
+                        ),
+                        Icon(
+                          _recording
+                              ? Icons.mic_rounded
+                              : Icons.mic_none_rounded,
+                          size: 42.sp,
+                          color: _recording
+                              ? Colors.black
+                              : voiceEnabled
+                              ? Colors.white
+                              : Colors.white24,
+                        ),
+                      ],
+                    ),
+            ),
+          ),
+        ),
+        SizedBox(height: 8.h),
+        Text(
+          voiceCooldown > Duration.zero
+              ? _cooldownLabel(voiceCooldown)
+              : _recording
+              ? '${(_elapsed.inMilliseconds / 1000).toStringAsFixed(1)} / 6.0s'
+              : _sendingVoice
+              ? 'Sending\u2026'
+              : 'Hold to record',
+          style: TextStyle(
+            color: _recording || _sendingVoice
+                ? accent
+                : voiceEnabled
+                ? Colors.white54
+                : Colors.white24,
+            fontSize: 11.sp,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
 }
 
-/// Replaces the generic spinner previously shown while a voice nudge
-/// uploads: a paper-plane glyph gently bobbing inside two staggered,
-/// outward-fading ripples — reads as "transmitting" rather than "loading"
-/// and keeps the mic button's footprint identical so nothing jumps around.
+// ── Sending animation ──────────────────────────────────────────────────────
+
 class _SendingVoicePulse extends StatefulWidget {
   const _SendingVoicePulse({required this.accent});
-
   final Color accent;
 
   @override
@@ -1737,7 +1603,8 @@ class _SendingVoicePulseState extends State<_SendingVoicePulse>
   }
 }
 
-// Thin sheet section divider
+// ── Shared divider ─────────────────────────────────────────────────────────
+
 class _SheetDivider extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
@@ -1750,45 +1617,195 @@ class _SheetDivider extends StatelessWidget {
   }
 }
 
-// Compact ring duration chip
-class _RingChip extends StatelessWidget {
-  const _RingChip({
-    required this.seconds,
+// ── Ring action button ─────────────────────────────────────────────────────
+//
+// Circular button on the left of the three-element row. A single tap fires the
+// ring nudge at the displayed duration, then cycles to the next duration so
+// successive taps escalate intensity (3 s → 6 s → 9 s → 3 s…).
+
+class _RingActionButton extends StatelessWidget {
+  const _RingActionButton({
+    required this.durationSeconds,
     required this.accent,
     required this.enabled,
     required this.onTap,
+    this.cooldownLabel,
   });
 
-  final int seconds;
+  final int durationSeconds;
   final Color accent;
   final bool enabled;
   final VoidCallback onTap;
+  final String? cooldownLabel;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: enabled
-          ? accent.withValues(alpha: 0.12)
-          : Colors.white.withValues(alpha: 0.04),
-      borderRadius: BorderRadius.circular(10.r),
-      child: InkWell(
-        onTap: enabled ? onTap : null,
-        borderRadius: BorderRadius.circular(10.r),
-        child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: 10.w, vertical: 6.h),
-          child: Text(
-            '${seconds}s',
-            style: TextStyle(
-              color: enabled ? accent : Colors.white24,
-              fontSize: 12.sp,
-              fontWeight: FontWeight.w700,
+    final label = cooldownLabel ?? '${durationSeconds}s';
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        GestureDetector(
+          onTap: enabled ? onTap : null,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            width: 72.r,
+            height: 72.r,
+            decoration: BoxDecoration(
+              color: enabled
+                  ? accent.withValues(alpha: 0.12)
+                  : const Color(0xff1a1a1a),
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: enabled
+                    ? accent.withValues(alpha: 0.45)
+                    : Colors.white.withValues(alpha: 0.07),
+                width: 1.5,
+              ),
+              boxShadow: enabled
+                  ? [
+                      BoxShadow(
+                        color: accent.withValues(alpha: 0.12),
+                        blurRadius: 16.r,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.vibration_rounded,
+                  color: enabled ? accent : Colors.white24,
+                  size: 22.sp,
+                ),
+                SizedBox(height: 3.h),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: enabled ? accent : Colors.white24,
+                    fontSize: 12.sp,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
-      ),
+        SizedBox(height: 8.h),
+        Text(
+          'Ring',
+          style: TextStyle(
+            color: enabled ? Colors.white54 : Colors.white24,
+            fontSize: 11.sp,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
     );
   }
 }
+
+// ── Push notification action button ────────────────────────────────────────
+
+class _PushActionButton extends StatelessWidget {
+  const _PushActionButton({
+    required this.accent,
+    required this.enabled,
+    required this.onTap,
+    this.cooldownLabel,
+  });
+
+  final Color accent;
+  final bool enabled;
+  final VoidCallback onTap;
+  final String? cooldownLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        GestureDetector(
+          onTap: enabled ? onTap : null,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            width: 72.r,
+            height: 72.r,
+            decoration: BoxDecoration(
+              color: enabled
+                  ? const Color(0xff232323)
+                  : const Color(0xff1a1a1a),
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: enabled
+                    ? Colors.white.withValues(alpha: 0.18)
+                    : Colors.white.withValues(alpha: 0.06),
+                width: 1.5,
+              ),
+            ),
+            child: Icon(
+              Icons.notifications_none_rounded,
+              color: enabled ? Colors.white70 : Colors.white24,
+              size: 30.sp,
+            ),
+          ),
+        ),
+        SizedBox(height: 8.h),
+        Text(
+          cooldownLabel ?? 'Notify',
+          style: TextStyle(
+            color: enabled ? Colors.white54 : Colors.white24,
+            fontSize: 11.sp,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Volume badge icon ───────────────────────────────────────────────────────
+//
+// Small circular overlay shown at the bottom-right corner of a recipient's
+// avatar after a voice nudge is delivered. Uses Lucide volume icons to
+// communicate the receiver's device volume at playback time.
+//
+// Icon mapping (per spec):
+//   Volume > 50%  → LucideIcons.volume2  (green)
+//   Volume < 50%  → LucideIcons.volume1  (yellow)
+//   Volume < 25%  → LucideIcons.volume   (red)
+//   Muted         → LucideIcons.volumeX  (red)  — iOS-convention speaker+X
+
+class _VolumeBadgeIcon extends StatelessWidget {
+  const _VolumeBadgeIcon({required this.band});
+
+  final MediaVolumeBand band;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, color) = switch (band) {
+      MediaVolumeBand.muted => (LucideIcons.volumeX, const Color(0xffff4040)),
+      MediaVolumeBand.veryLow => (LucideIcons.volume, const Color(0xffff4040)),
+      MediaVolumeBand.low => (LucideIcons.volume1, const Color(0xffe0a83c)),
+      MediaVolumeBand.ok => (LucideIcons.volume2, const Color(0xff4caf50)),
+    };
+    return Container(
+      width: 18.r,
+      height: 18.r,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: const Color(0xff141414),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.18),
+          width: 1,
+        ),
+      ),
+      child: Center(child: Icon(icon, size: 10.sp, color: color)),
+    );
+  }
+}
+
+// ── Recipient chip ─────────────────────────────────────────────────────────
 
 class _PendingRecipient {
   const _PendingRecipient({required this.userId, required this.displayName});
@@ -1807,6 +1824,7 @@ class _NudgeRecipient extends StatelessWidget {
     this.enabled = true,
     this.dimmed = false,
     this.subtitle,
+    this.deliveryBadge,
   });
 
   final String label;
@@ -1817,6 +1835,10 @@ class _NudgeRecipient extends StatelessWidget {
   final bool enabled;
   final bool dimmed;
   final String? subtitle;
+
+  /// Small icon widget shown at the bottom-right corner of the avatar circle.
+  /// Used for Lucide volume badges. Skull state is embedded in [avatar] itself.
+  final Widget? deliveryBadge;
 
   @override
   Widget build(BuildContext context) {
@@ -1833,20 +1855,35 @@ class _NudgeRecipient extends StatelessWidget {
           width: 60.w,
           child: Column(
             children: [
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 160),
-                padding: EdgeInsets.all(2.r),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: const Color(0xff1e1e1e),
-                  border: Border.all(
-                    color: selected ? accent : Colors.transparent,
-                    width: 2,
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    padding: EdgeInsets.all(2.r),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0xff1e1e1e),
+                      border: Border.all(
+                        color: selected ? accent : Colors.transparent,
+                        width: 2,
+                      ),
+                    ),
+                    child: ClipOval(
+                      child: SizedBox(
+                        width: 46.r,
+                        height: 46.r,
+                        child: avatar,
+                      ),
+                    ),
                   ),
-                ),
-                child: ClipOval(
-                  child: SizedBox(width: 46.r, height: 46.r, child: avatar),
-                ),
+                  if (deliveryBadge != null)
+                    Positioned(
+                      right: -2,
+                      bottom: -2,
+                      child: deliveryBadge!,
+                    ),
+                ],
               ),
               SizedBox(height: 5.h),
               Text(
@@ -1883,6 +1920,12 @@ class _NudgeRecipient extends StatelessWidget {
     );
   }
 }
+
+// ── Status banner ──────────────────────────────────────────────────────────
+//
+// Shown only for: errors, step 1 ("Voice nudge sending…"), step 2
+// ("Confirming if everyone received…"), and guard conditions (no friends /
+// all already online). Steps 3 & 4 delivery results are shown as avatar badges.
 
 class _NudgeStatus extends StatelessWidget {
   const _NudgeStatus({

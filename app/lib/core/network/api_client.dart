@@ -114,10 +114,11 @@ class ApiClient {
     }
 
     final uri = Uri.parse('$_baseUrl$path');
+    // Copy caller headers — default is `const {}` and http may write in place.
     final requestHeaders = {
       'authorization': 'Bearer $token',
       'content-type': contentType,
-      ...headers,
+      ...Map<String, String>.of(headers),
     };
     final response = await _tracedRequest(
       url: uri.toString(),

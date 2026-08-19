@@ -26,6 +26,8 @@ class MainActivity : FlutterFragmentActivity() {
     private lateinit var voiceNudgeChannel: MethodChannel
     private lateinit var inviteLinkChannel: MethodChannel
     private lateinit var voicePipChannel: MethodChannel
+    private var audioOutputChannel: MethodChannel? = null
+    private var audioOutputMonitor: AudioOutputMonitor? = null
     private var voiceOverlayAnnouncer: VoiceOverlayAnnouncer? = null
     private var voiceSessionActive = false
     private var voiceSessionTalking = false
@@ -77,6 +79,34 @@ class MainActivity : FlutterFragmentActivity() {
         heldSplashView = null
     }
 
+    private fun attachAudioOutputChannel(flutterEngine: FlutterEngine) {
+        audioOutputMonitor?.stop()
+        val channel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            AudioOutputContract.flutterChannel,
+        )
+        audioOutputChannel = channel
+        val monitor = AudioOutputMonitor(this) {
+            channel.invokeMethod(
+                AudioOutputContract.methodOnStateChanged,
+                AudioOutput.readState(this),
+            )
+        }
+        audioOutputMonitor = monitor
+        monitor.start()
+        channel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                AudioOutputContract.methodGetState ->
+                    result.success(AudioOutput.readState(this))
+                AudioOutputContract.methodSetMuted -> {
+                    MediaVolume.setMuted(this, call.arguments == true)
+                    result.success(AudioOutput.readState(this))
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(
@@ -115,6 +145,8 @@ class MainActivity : FlutterFragmentActivity() {
             VoicePipContract.flutterChannel,
         )
         VoicePipActionDispatcher.attach(voicePipChannel)
+        VoiceSessionTeardownDispatcher.attach(voicePipChannel)
+        attachAudioOutputChannel(flutterEngine)
         voiceOverlayAnnouncer?.shutdown()
         val overlayAnnouncer = VoiceOverlayAnnouncer(this)
         voiceOverlayAnnouncer = overlayAnnouncer
@@ -160,6 +192,18 @@ class MainActivity : FlutterFragmentActivity() {
                     val wasActive = voiceSessionActive
                     voiceSessionActive = arguments?.get("active") == true
                     voiceSessionTalking = arguments?.get("isTalking") == true
+                    if (voiceSessionActive) {
+                        ActiveVoiceSessionStore.save(
+                            this,
+                            groupId = arguments?.get("groupId")?.toString(),
+                            userId = arguments?.get("userId")?.toString(),
+                            deviceId = arguments?.get("deviceId")?.toString(),
+                            serviceSessionId = arguments?.get("serviceSessionId")?.toString(),
+                            livekitSessionId = arguments?.get("livekitSessionId")?.toString(),
+                        )
+                    } else {
+                        ActiveVoiceSessionStore.clear(this)
+                    }
                     if (voiceSessionActive && !wasActive) {
                         VoiceSessionService.start(this)
                     } else if (!voiceSessionActive && wasActive) {
@@ -376,9 +420,8 @@ class MainActivity : FlutterFragmentActivity() {
         splashFailsafeHandler.removeCallbacks(splashFailsafeRunnable)
         heldSplashView?.remove()
         heldSplashView = null
-        if (isFinishing && voiceSessionActive) {
-            VoiceSessionService.stop(this)
-            voiceSessionActive = false
+        if (isFinishing) {
+            teardownVoiceSession("activity finishing")
         }
         if (::voiceNudgeChannel.isInitialized) {
             NudgeActionDispatcher.detach(voiceNudgeChannel)
@@ -388,10 +431,23 @@ class MainActivity : FlutterFragmentActivity() {
         }
         if (::voicePipChannel.isInitialized) {
             VoicePipActionDispatcher.detach(voicePipChannel)
+            VoiceSessionTeardownDispatcher.detach(voicePipChannel)
         }
         voiceOverlayAnnouncer?.shutdown()
         voiceOverlayAnnouncer = null
+        audioOutputMonitor?.stop()
+        audioOutputMonitor = null
+        audioOutputChannel?.setMethodCallHandler(null)
+        audioOutputChannel = null
         super.onDestroy()
+    }
+
+    private fun teardownVoiceSession(reason: String) {
+        if (!voiceSessionActive) return
+        DeviceLog.info("VoiceSessionService", "Requesting LiveKit teardown ($reason)")
+        VoiceSessionTeardownDispatcher.requestTeardown()
+        VoiceSessionService.stop(this)
+        voiceSessionActive = false
     }
 
     private fun updatePictureInPictureParams() {

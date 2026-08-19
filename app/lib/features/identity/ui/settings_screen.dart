@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../../app/accent_theme.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/logging/debug_logs_sheet.dart';
+import '../../../core/ui/bottom_system_inset.dart';
 import '../../groups/models/group_summary.dart';
 import '../../subscriptions/eleven_pro_paywall_screen.dart';
 import '../../subscriptions/subscription_management_sheet.dart';
@@ -105,6 +106,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _photoSaving = false;
   bool _accountActionInProgress = false;
   bool _hasUnsavedAccentPreview = false;
+
   /// While true, never rebuild this route from session listenable updates —
   /// parent rebuilds during the edit-profile sheet's deactivate race
   /// `_dependents.isEmpty` assertions.
@@ -195,7 +197,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           context: context,
           backgroundColor: const Color(0xff1b1b1b),
           showDragHandle: true,
-          builder: (context) => SafeArea(
+          builder: (context) => BottomSystemSafeArea(
             child: Wrap(
               children: [
                 ListTile(
@@ -508,7 +510,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (sheetContext) {
-        return SafeArea(
+        return BottomSystemSafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(8, 12, 8, 16),
             child: Column(
@@ -1229,8 +1231,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
         currentUrl: _session.user.profilePhotoUrl,
       );
       if (bytes == null || !mounted) return;
-      final session =
-          await widget.identityRepository.updateProfilePhoto(bytes);
+      final session = await widget.identityRepository.updateProfilePhoto(bytes);
       unawaited(
         CrashlyticsService.log('settings_edit_profile_photo_network_ok'),
       );
@@ -1251,9 +1252,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
         ),
       );
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     } finally {
       if (mounted) setState(() => _changingPhoto = false);
     }
@@ -1269,9 +1270,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
         _pendingAvatarAsset != _session.user.avatarAsset;
 
     if (!nameChanged && !avatarChanged) {
-      unawaited(
-        CrashlyticsService.log('settings_edit_profile_pop_no_change'),
-      );
+      unawaited(CrashlyticsService.log('settings_edit_profile_pop_no_change'));
       if (!mounted) return;
       await _popSheet(_EditProfileSheetResult(session: _session));
       return;
@@ -1308,10 +1307,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       // deactivation. Local state is enough for this frame; the parent applies
       // the returned session after the route is fully gone.
       await _popSheet(
-        _EditProfileSheetResult(
-          session: session,
-          message: 'Profile updated',
-        ),
+        _EditProfileSheetResult(session: session, message: 'Profile updated'),
       );
     } catch (error, stack) {
       unawaited(
@@ -1325,9 +1321,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       );
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -1346,7 +1342,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
     final busy = _saving || _changingPhoto;
 
     return Padding(
-      padding: EdgeInsets.only(bottom: keyboardInset),
+      padding: EdgeInsets.only(
+        bottom: keyboardInset + bottomSystemInsetOf(context),
+      ),
       child: ConstrainedBox(
         constraints: BoxConstraints(
           maxHeight: MediaQuery.sizeOf(context).height * 0.9,
@@ -1421,9 +1419,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
               decoration: BoxDecoration(
                 color: const Color(0xff1b1b1b),
                 border: Border(
-                  top: BorderSide(
-                    color: Colors.white.withValues(alpha: 0.08),
-                  ),
+                  top: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
                 ),
                 boxShadow: [
                   BoxShadow(
@@ -1435,6 +1431,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
               ),
               child: SafeArea(
                 top: false,
+                bottom: false,
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(24, 12, 24, 12),
                   child: FilledButton.icon(
@@ -1609,9 +1606,7 @@ class _AvatarTabContent extends StatelessWidget {
         if (!snapshot.hasData) {
           return const Padding(
             padding: EdgeInsets.symmetric(vertical: 40),
-            child: Center(
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
           );
         }
         return Stack(
@@ -1700,10 +1695,7 @@ class _PhotoTabContent extends StatelessWidget {
               profilePhotoUrl: profilePhotoUrl,
               profilePhotoBase64: profilePhotoBase64,
               backgroundColor: const Color(0xff2b2b2b),
-              fallback: const Icon(
-                Icons.person_outline,
-                color: Colors.white54,
-              ),
+              fallback: const Icon(Icons.person_outline, color: Colors.white54),
             ),
           ),
         ),
@@ -1762,10 +1754,7 @@ class _SectionTitle extends StatelessWidget {
             letterSpacing: 0,
           ),
         ),
-        if (showBeta) ...[
-          const SizedBox(width: 8),
-          const _SettingsBetaBadge(),
-        ],
+        if (showBeta) ...[const SizedBox(width: 8), const _SettingsBetaBadge()],
       ],
     );
   }
@@ -1802,10 +1791,7 @@ class _ElevenProSettingsCard extends StatelessWidget {
                   SizedBox(height: 2),
                   Text(
                     'View plans',
-                    style: TextStyle(
-                      color: Colors.white54,
-                      fontSize: 13,
-                    ),
+                    style: TextStyle(color: Colors.white54, fontSize: 13),
                   ),
                 ],
               ),
@@ -2044,7 +2030,10 @@ class _ChecklistItem extends StatelessWidget {
                       const SizedBox(height: 3),
                       Text(
                         detail,
-                        style: const TextStyle(color: Colors.white54, fontSize: 13),
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 13,
+                        ),
                       ),
                     ],
                   ),

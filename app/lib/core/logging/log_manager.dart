@@ -132,25 +132,33 @@ class LogManager {
     String? userId,
     String? groupId,
   }) async {
-    final network = await _captureNetwork();
-    final line = LogLine.format(
-      time: DateTime.now(),
-      level: level,
-      tag: tag,
-      message: message,
-      metadata: LogMetadata(
-        userId: userId?.trim().isNotEmpty == true ? userId!.trim() : _userId,
-        groupId: groupId?.trim().isNotEmpty == true ? groupId!.trim() : _groupId,
-        networkType: network.$1,
-        networkStrength: network.$2,
-        deviceModel: _deviceModel,
-        androidVersion: _androidVersion,
-        appVersion: _appVersion,
-      ),
-    );
-    _remember(line);
-    debugPrint(line);
-    _enqueueWrite(line);
+    try {
+      final network = await _captureNetwork();
+      final line = LogLine.format(
+        time: DateTime.now(),
+        level: level,
+        tag: tag,
+        message: message,
+        metadata: LogMetadata(
+          userId: userId?.trim().isNotEmpty == true ? userId!.trim() : _userId,
+          groupId: groupId?.trim().isNotEmpty == true
+              ? groupId!.trim()
+              : _groupId,
+          networkType: network.$1,
+          networkStrength: network.$2,
+          deviceModel: _deviceModel,
+          androidVersion: _androidVersion,
+          appVersion: _appVersion,
+        ),
+      );
+      _remember(line);
+      debugPrint(line);
+      _enqueueWrite(line);
+    } catch (error) {
+      // Logging must never fatal the root zone (AppLifecycle logs on every
+      // foreground/background). Native meta maps can be unmodifiable.
+      debugPrint('[LogManager] log failed tag=$tag error=$error');
+    }
   }
 
   static void _remember(String line) {

@@ -13,7 +13,9 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.MethodChannel
@@ -45,6 +47,29 @@ object VoicePipActionDispatcher {
             pendingAction = action
         } else {
             target.invokeMethod("onPipAction", action)
+        }
+    }
+}
+
+object VoiceSessionTeardownDispatcher {
+    private var channel: MethodChannel? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    fun attach(nextChannel: MethodChannel) {
+        channel = nextChannel
+    }
+
+    fun detach(targetChannel: MethodChannel) {
+        if (channel === targetChannel) channel = null
+    }
+
+    fun requestTeardown() {
+        val target = channel ?: return
+        mainHandler.post {
+            try {
+                target.invokeMethod("onProcessTeardown", null)
+            } catch (_: Exception) {
+            }
         }
     }
 }
@@ -144,8 +169,21 @@ class VoiceSessionService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        DeviceLog.info(
+            "VoiceSessionService",
+            "task removed — requesting LiveKit disconnect and presence cleanup",
+        )
+        VoiceSessionTeardownDispatcher.requestTeardown()
+        ActiveVoiceSessionStore.markAwayBestEffort(this)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         DeviceLog.info("VoiceSessionService", "service stopped")
+        VoiceSessionTeardownDispatcher.requestTeardown()
+        ActiveVoiceSessionStore.markAwayBestEffort(this)
         super.onDestroy()
     }
 

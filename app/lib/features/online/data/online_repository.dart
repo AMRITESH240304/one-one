@@ -216,6 +216,21 @@ class OnlineRepository {
     });
   }
 
+  /// Clears leftover RTDB presence from a previous process that died mid-session.
+  ///
+  /// No-ops if another session (or an explicit away write) already replaced
+  /// [session.serviceSessionId] as the active handle.
+  Future<void> clearAbandonedSession(OnlineSession session) async {
+    final snapshot = await _database
+        .ref('memberAvailability/${session.groupId}/${session.userId}')
+        .get();
+    final value = snapshot.value;
+    if (value is! Map) return;
+    final activeId = value['activeServiceSessionId']?.toString();
+    if (activeId != session.serviceSessionId) return;
+    await goAway(session, reason: 'process_killed');
+  }
+
   /// Asks the backend to push a "you're offline" alert to this user's devices
   /// after an involuntary leave (peer left, inactivity, usage cap, network).
   Future<void> notifyGoneOffline({

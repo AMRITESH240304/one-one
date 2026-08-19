@@ -10,6 +10,11 @@ class PresenceConfig {
   /// without punishing the user who stayed online.
   static const Duration disconnectGracePeriod = Duration(seconds: 60);
 
+  /// If the same remote participant rejoins within this window, skip the
+  /// "lost connection" snackbar and show a single "back live" message.
+  /// Covers kill-and-relaunch identity swaps and RTDB onDisconnect races.
+  static const Duration peerRejoinWindow = Duration(seconds: 15);
+
   /// How long the room stays open with no voice activity before it
   /// auto-closes. Set short for testing; raise for production.
   static const Duration inactivityTimeout = Duration(minutes: 5);

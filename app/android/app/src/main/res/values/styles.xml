@@ -18,5 +18,10 @@
          there is no flash while Flutter's first real frame composites in. -->
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
         <item name="android:windowBackground">@color/splash_background</item>
+        <!-- Draw behind the system nav so Flutter can report a real bottom
+             inset (gesture pill vs 3-button). Status bar is already handled
+             by the Flutter overlay; only the nav bar needs this. -->
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
     </style>
 </resources>

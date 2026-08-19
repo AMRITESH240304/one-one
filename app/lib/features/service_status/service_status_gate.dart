@@ -6,6 +6,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/firebase/firebase_analytics_service.dart';
+import '../../core/maps.dart';
+
+/// Mutable Remote Config defaults. Must stay growable — `setDefaults` is
+/// invoked on every app resume and must never receive `const {}`.
+Map<String, Object> serviceStatusRemoteDefaults() {
+  return mutableMapOf(<String, Object>{
+    'service_status': 'operational',
+    'service_status_guidance': '',
+    'service_status_updates_url': '',
+  });
+}
 
 enum ServiceStatus {
   operational,
@@ -95,11 +106,11 @@ class _ServiceStatusGateState extends State<ServiceStatusGate>
       if (mounted) {
         setState(() => _connectivityResults = results);
       }
-      await _remoteConfig.setDefaults(const {
-        'service_status': 'operational',
-        'service_status_guidance': '',
-        'service_status_updates_url': '',
-      });
+      // Copy before setDefaults — this runs on every AppLifecycle resume.
+      // A `const {}` (or any unmodifiable map) thrown into the plugin can be
+      // written in place and fatals the root zone as
+      // "Cannot modify unmodifiable map".
+      await _remoteConfig.setDefaults(serviceStatusRemoteDefaults());
       await _remoteConfig.setConfigSettings(
         RemoteConfigSettings(
           fetchTimeout: const Duration(seconds: 5),

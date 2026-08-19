@@ -14,4 +14,7 @@ fun main() {
     check(mediaVolumeAttention(24) == "volume_very_low")
     check(mediaVolumeAttention(49) == "volume_low")
     check(mediaVolumeAttention(50) == null)
+    check(isMediaMuted(streamMuted = true, streamVolume = 5))
+    check(isMediaMuted(streamMuted = false, streamVolume = 0))
+    check(!isMediaMuted(streamMuted = false, streamVolume = 4))
 }

@@ -42,19 +42,81 @@ fun mediaVolumeAttention(percent: Int): String? = when {
     else -> null
 }
 
+fun isMediaMuted(streamMuted: Boolean, streamVolume: Int): Boolean =
+    streamMuted || streamVolume <= 0
+
 object MediaVolume {
+    private var lastUnmutedVolume = -1
+
+    fun isMuted(context: Context): Boolean {
+        val audioManager = context.getSystemService(AudioManager::class.java)
+        return isMediaMuted(
+            streamMuted = isStreamMuted(audioManager),
+            streamVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC),
+        )
+    }
+
+    fun setMuted(context: Context, muted: Boolean) {
+        val audioManager = context.getSystemService(AudioManager::class.java)
+        val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        if (muted) {
+            if (current > 0) lastUnmutedVolume = current
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                audioManager.adjustStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.ADJUST_MUTE,
+                    AudioManager.FLAG_SHOW_UI,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.setStreamMute(AudioManager.STREAM_MUSIC, true)
+            }
+            if (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) > 0) {
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    0,
+                    AudioManager.FLAG_SHOW_UI,
+                )
+            }
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            audioManager.adjustStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                AudioManager.ADJUST_UNMUTE,
+                AudioManager.FLAG_SHOW_UI,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.setStreamMute(AudioManager.STREAM_MUSIC, false)
+        }
+        if (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) <= 0) {
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val restored = lastUnmutedVolume.takeIf { it > 0 }
+                ?: (max * 2 / 5).coerceAtLeast(1)
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                restored.coerceAtMost(max),
+                AudioManager.FLAG_SHOW_UI,
+            )
+        }
+    }
+
     fun readPercent(context: Context): Int {
         val audioManager = context.getSystemService(AudioManager::class.java)
-        val muted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        return mediaVolumePercent(
+            streamMuted = isStreamMuted(audioManager),
+            streamVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC),
+            streamMaxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+        )
+    }
+
+    private fun isStreamMuted(audioManager: AudioManager): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             audioManager.isStreamMute(AudioManager.STREAM_MUSIC)
         } else {
             audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) == 0
         }
-        return mediaVolumePercent(
-            streamMuted = muted,
-            streamVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC),
-            streamMaxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
-        )
     }
 
     /** Best-effort write used from the FCM handler (runs in background). */

@@ -25,6 +25,7 @@ import '../../../core/logging/log_manager.dart';
 import '../../../core/logging/user_facing_copy.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/storage/cloudinary_delivery.dart';
+import '../../../core/ui/bottom_system_inset.dart';
 import '../../chat/data/chat_message_repository.dart';
 import '../../chat/models/group_chat_message.dart';
 import '../../chat/ui/chat_bubble_bar.dart';
@@ -36,13 +37,16 @@ import '../../groups/models/group_invite_result.dart';
 import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
 import '../../groups/ui/group_management_screen.dart';
+import '../../online/data/active_online_session_store.dart';
 import '../../online/data/online_repository.dart';
 import '../../online/livekit_connection_warmer.dart';
 import '../../online/livekit_status.dart';
 import '../../online/models/member_availability.dart';
 import '../../online/models/online_session.dart';
+import '../../online/peer_reconnect_coordinator.dart';
 import '../../online/presence_config.dart';
 import '../../online/solo_participant_guard.dart';
+import '../../online/audio_output_bridge.dart';
 import '../../online/voice_overlay_bridge.dart';
 import '../../online/voice_pip_bridge.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
@@ -64,6 +68,7 @@ import '../data/identity_repository.dart';
 import '../data/last_active_group_store.dart';
 import '../models/identity_session.dart';
 import 'group_action_screen.dart';
+import 'lucide_audio_icons.dart';
 import 'no_groups_screen.dart';
 import 'profile_avatar.dart';
 import 'settings_screen.dart';
@@ -118,9 +123,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   late IdentitySession _session;
   List<GroupSummary> _groups = const [];
   List<GroupMemberSummary> _members = const [];
-  Map<String, List<GroupMemberSummary>> _membersByGroupId = const {};
-  Map<String, MemberAvailability> _availability = const {};
-  Set<String> _speakingUserIds = const {};
+  Map<String, List<GroupMemberSummary>> _membersByGroupId = {};
+  Map<String, MemberAvailability> _availability = {};
+  Set<String> _speakingUserIds = {};
   List<GroupChatMessage> _chatMessages = const [];
   StreamSubscription<DatabaseEvent>? _chatMessagesSubscription;
   StreamSubscription<Map<String, dynamic>>? _emojiBurstSubscription;
@@ -208,6 +213,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   bool _loadingGroups = true;
   bool _busy = false;
   bool _audioOutputBusy = false;
+  bool _audioMuteBusy = false;
+  AudioOutputRoute _audioRoute = AudioOutputRoute.speaker;
+  bool _softwareMuted = false;
+  bool _nativeMuted = false;
+  StreamSubscription<AudioOutputState>? _audioOutputSubscription;
+  StreamSubscription<List<MediaDevice>>? _hardwareAudioDeviceSubscription;
+  bool get _audioMuted => _softwareMuted || _nativeMuted;
   bool _talkBusy = false;
   bool _talkPressed = false;
   // Per-user connection style for the *local* user's own connection — never
@@ -221,7 +233,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   String _state = 'away';
   String? _message;
   ConnectionQuality _localConnectionQuality = ConnectionQuality.unknown;
-  Map<String, ConnectionQuality> _remoteConnectionQualityByUserId = const {};
+  Map<String, ConnectionQuality> _remoteConnectionQualityByUserId = {};
   List<ConnectivityResult> _connectivity = const [];
   bool _registrationRefreshInFlight = false;
   DateTime? _lastRegistrationRefreshAt;
@@ -239,15 +251,25 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   bool _hasAvailabilitySnapshot = false;
   String? _lastPeerLossUserId;
   DateTime? _lastPeerLossAt;
+  bool _processTeardownInFlight = false;
+  StreamSubscription<void>? _processTeardownSubscription;
+  late final PeerReconnectCoordinator _peerReconnect;
   bool _inPictureInPicture = false;
   String? _preferredGroupId;
 
   @override
   void initState() {
     super.initState();
+    _peerReconnect = PeerReconnectCoordinator(
+      onLostConnection: _showPeerLostConnection,
+      onBackLive: _showPeerBackLive,
+    );
     WidgetsBinding.instance.addObserver(this);
     _session =
         widget.identityRepository.currentSession ?? widget.initialSession;
+    _audioRoute = _session.settings.audioOutputPreference == 'earpiece'
+        ? AudioOutputRoute.earpiece
+        : AudioOutputRoute.speaker;
     _preferredGroupId = widget.initialGroupId;
     widget.identityRepository.sessionListenable.addListener(
       _onIdentitySessionChanged,
@@ -315,6 +337,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _voicePipActionSubscription = _voicePipBridge.actions.listen(
       (action) => unawaited(_handlePipAction(action)),
     );
+    _processTeardownSubscription = _voicePipBridge.processTeardown.listen((_) {
+      unawaited(_teardownLiveSessionForProcessDeath());
+    });
+    _audioOutputSubscription = AudioOutputBridge.changes.listen(
+      _handleAudioOutputState,
+    );
+    unawaited(_refreshAudioOutputState());
+    unawaited(_clearAbandonedOnlineSession());
     unawaited(_startConnectivityMonitoring());
     final bootstrap = widget.initialBootstrap;
     if (bootstrap != null) {
@@ -342,7 +372,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       groupId: bootstrap.selectedGroup?.groupId,
     );
     _members = bootstrap.members;
-    _membersByGroupId = bootstrap.membersByGroupId;
+    // Copy — IdentityHomeBootstrap may hold `const {}`, and later member
+    // loads write this map during foreground reconnects.
+    _membersByGroupId = Map<String, List<GroupMemberSummary>>.of(
+      bootstrap.membersByGroupId,
+    );
     _carouselIndex = bootstrap.carouselIndex;
     _loadingGroups = false;
     _message = bootstrap.loadError;
@@ -388,6 +422,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _registrationRenewalSubscription?.cancel();
     _inviteLinkSubscription?.cancel();
     _voicePipActionSubscription?.cancel();
+    _processTeardownSubscription?.cancel();
+    _audioOutputSubscription?.cancel();
+    _hardwareAudioDeviceSubscription?.cancel();
+    _peerReconnect.clear();
     _voicePipBridge.isInPictureInPicture.removeListener(_onPipModeChanged);
     unawaited(_voicePipBridge.setSessionState(active: false, isTalking: false));
     unawaited(_voicePipBridge.dispose());
@@ -412,30 +450,45 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _appLifecycle = state;
+    if (state == AppLifecycleState.detached) {
+      unawaited(_teardownLiveSessionForProcessDeath());
+      return;
+    }
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
       _liveSessionActiveOnBackground = _isOnline && _room != null;
       return;
     }
     if (state == AppLifecycleState.resumed) {
-      unawaited(_refreshDeviceRegistration());
-      unawaited(_reportMediaVolume());
-      // Notification Accept/Connect taps are queued natively and consumed
-      // here. Opening the app by itself must not start a LiveKit session —
-      // `_goOnline` still requires `_explicitJoinIntent`.
-      unawaited(_takePendingNudgeAction());
-      unawaited(_takePendingInviteLink());
-      // The user is now actively looking at the app, so any pile that
-      // accumulated while backgrounded should be cleared.
-      unawaited(_clearOpenedChatPiles());
-      if (!_liveSessionActiveOnBackground && !_explicitJoinIntent) {
+      try {
+        unawaited(_refreshDeviceRegistration());
+        unawaited(_reportMediaVolume());
+        // Notification Accept/Connect taps are queued natively and consumed
+        // here. Opening the app by itself must not start a LiveKit session —
+        // `_goOnline` still requires `_explicitJoinIntent`.
+        unawaited(_takePendingNudgeAction());
+        unawaited(_takePendingInviteLink());
+        // The user is now actively looking at the app, so any pile that
+        // accumulated while backgrounded should be cleared.
+        unawaited(_clearOpenedChatPiles());
+        if (!_liveSessionActiveOnBackground && !_explicitJoinIntent) {
+          LogManager.log(
+            LogLevel.info,
+            'LiveKitManager',
+            'Foreground with no active session and no join intent — '
+                'skipping room connect',
+            userId: _session.userId,
+            groupId: _selectedGroup?.groupId,
+          );
+        }
+      } catch (error) {
+        // Resume work must never fatal the root zone (unmodifiable map
+        // writes from plugins / inbox prune have historically thrown here).
         LogManager.log(
-          LogLevel.info,
-          'LiveKitManager',
-          'Foreground with no active session and no join intent — '
-              'skipping room connect',
+          LogLevel.error,
+          'AppLifecycle',
+          'Foreground resume handler failed: $error',
           userId: _session.userId,
-          groupId: _selectedGroup?.groupId,
         );
       }
     }
@@ -479,6 +532,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _voicePipBridge.setSessionState(
         active: _onlineSession != null,
         isTalking: _talkSession != null || _isCallMode,
+        session: _onlineSession,
       ),
     );
   }
@@ -527,7 +581,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         if (!mounted) return;
         final latest = widget.identityRepository.currentSession;
         if (latest == null || latest.userId != _session.userId) return;
-        setState(() => _session = latest);
+        setState(() {
+          _session = latest;
+          if (audioRouteChanged &&
+              _audioRoute != AudioOutputRoute.headset &&
+              _audioRoute != AudioOutputRoute.bluetooth) {
+            _audioRoute = latest.settings.audioOutputPreference == 'earpiece'
+                ? AudioOutputRoute.earpiece
+                : AudioOutputRoute.speaker;
+          }
+        });
         AccentThemeController.setAccentKey(latest.settings.accentColorKey);
         if (audioRouteChanged) unawaited(_applyPreferredAudioRoute());
       });
@@ -588,7 +651,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           ? const <GroupMemberSummary>[]
           : await _groupRepository.loadGroupMembers(selected.groupId);
       final membersByGroupId = selected == null
-          ? const <String, List<GroupMemberSummary>>{}
+          ? <String, List<GroupMemberSummary>>{}
           : <String, List<GroupMemberSummary>>{
               selected.groupId: selectedMembers,
             };
@@ -603,7 +666,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             ? const []
             : membersByGroupId[selected.groupId] ?? const [];
         if (selected == null) {
-          _availability = const {};
+          _availability = {};
           _chatMessages = const [];
         }
       });
@@ -1289,8 +1352,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 )
                 .map((entry) => entry.key)
                 .toList(growable: false);
-            if (lostPeerIds.isNotEmpty && mounted) {
-              _showPeerLostConnection(lostPeerIds.first);
+            final rejoinedPeerIds = next.entries
+                .where(
+                  (entry) =>
+                      entry.key != _session.userId &&
+                      entry.value.isLive &&
+                      !(_availability[entry.key]?.isLive ?? false),
+                )
+                .map((entry) => entry.key)
+                .toList(growable: false);
+            for (final userId in lostPeerIds) {
+              _peerReconnect.peerLeft(userId);
+            }
+            for (final userId in rejoinedPeerIds) {
+              _peerReconnect.peerJoined(userId);
             }
           }
           setState(() => _availability = next);
@@ -1589,6 +1664,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
   }
 
+  void _showPeerBackLive(String userId) {
+    final name = _membersByGroupId.values
+        .expand((members) => members)
+        .where((member) => member.userId == userId)
+        .map((member) => member.displayName.trim())
+        .firstOrNull;
+    _showPresenceSnackbar(
+      '${name == null || name.isEmpty ? 'A participant' : name} is back live.',
+    );
+  }
+
   /// Implements "automatic offline handling with a grace period": while
   /// this device is online, watch for the group dropping to exactly one
   /// online member. If nobody else is in (or rejoining) the room for
@@ -1849,13 +1935,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     setState(() {
       _selectedGroup = group;
       _members = cachedMembers ?? const [];
-      _availability = const {};
+      _availability = {};
       _chatMessages = const [];
       _chatFeedOpacity = 1;
       _chatVisibleAfterCreatedAt = 0;
       _prevAnyMemberOnline = null;
       _chatOnlineClearInFlight = false;
     });
+    _peerReconnect.clear();
     unawaited(LastActiveGroupStore.write(_session.userId, group.groupId));
     unawaited(AppTelemetry.setActiveGroup(group.groupId));
     if (cachedMembers == null) {
@@ -1945,7 +2032,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         borderRadius: BorderRadius.vertical(top: Radius.circular(24.r)),
       ),
       builder: (context) {
-        return SafeArea(
+        return BottomSystemSafeArea(
           child: Padding(
             padding: EdgeInsets.fromLTRB(24.w, 20.h, 24.w, 24.h),
             child: Column(
@@ -2183,6 +2270,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         connectionMode: startingConnectionMode,
         preparedToken: preparedToken,
       );
+      unawaited(ActiveOnlineSessionStore.save(createdSession));
       await _connectLiveKit(createdSession, preparedRoom: preparedRoom);
       if (startInCallMode) {
         await _setMicrophoneEnabled(true);
@@ -2259,6 +2347,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         } catch (_) {
           // Best-effort cleanup after a failed connect.
         }
+        unawaited(ActiveOnlineSessionStore.clear());
       }
       if (!mounted) return;
       setState(() {
@@ -2303,6 +2392,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
 
+    setState(() => _state = 'connecting');
     await _runBusy(() async {
       final activeTalk = _talkSession;
       if (activeTalk != null) {
@@ -2328,6 +2418,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _enteredViaNudge = false;
       await _disconnectLiveKit();
       await _onlineRepository.goAway(session, reason: reason);
+      unawaited(ActiveOnlineSessionStore.clear());
       unawaited(
         AnalyticsService.logGoAway(groupId: session.groupId, reason: reason),
       );
@@ -2688,6 +2779,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     _room = room;
     _attachRoomListener(room);
+    _listenToHardwareAudioDevices();
     _soloGuard = SoloParticipantGuard(
       userId: session.userId,
       groupId: session.groupId,
@@ -2756,6 +2848,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     } catch (_) {
       // Non-fatal. LiveKit can still use the platform default route.
     }
+    unawaited(_refreshAudioOutputState());
+    if (_audioMuted) {
+      unawaited(AudioOutputBridge.applyRemotePlaybackMute(room, true));
+    }
 
     final localParticipant = room.localParticipant;
     if (localParticipant == null) {
@@ -2809,6 +2905,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     } catch (_) {
       // Route changes are best effort on devices without a separate earpiece.
     }
+    await _refreshAudioOutputState();
   }
 
   Future<void> _toggleAudioOutput() async {
@@ -2831,6 +2928,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         device: _session.device,
         settings: _session.settings.copyWith(audioOutputPreference: next),
       );
+      if (_audioRoute != AudioOutputRoute.headset &&
+          _audioRoute != AudioOutputRoute.bluetooth) {
+        _audioRoute = next == 'earpiece'
+            ? AudioOutputRoute.earpiece
+            : AudioOutputRoute.speaker;
+      }
     });
     try {
       await _room?.setSpeakerOn(next != 'earpiece');
@@ -2854,11 +2957,90 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           device: _session.device,
           settings: _session.settings.copyWith(audioOutputPreference: current),
         );
+        if (_audioRoute != AudioOutputRoute.headset &&
+            _audioRoute != AudioOutputRoute.bluetooth) {
+          _audioRoute = current == 'earpiece'
+              ? AudioOutputRoute.earpiece
+              : AudioOutputRoute.speaker;
+        }
       });
       await _applyPreferredAudioRoute();
     } finally {
       _audioOutputBusy = false;
+      unawaited(_refreshAudioOutputState());
     }
+  }
+
+  Future<void> _toggleAudioMute() async {
+    if (_audioMuteBusy) return;
+    _audioMuteBusy = true;
+    final nextMuted = !_audioMuted;
+    if (_liveHapticsEnabled) {
+      unawaited(HapticFeedback.mediumImpact());
+    }
+    _softwareMuted = nextMuted;
+    if (!nextMuted) _nativeMuted = false;
+    setState(() {});
+    try {
+      await AudioOutputBridge.applyRemotePlaybackMute(_room, nextMuted);
+      await AudioOutputBridge.setMuted(nextMuted);
+      if (!mounted) return;
+      unawaited(_reportMediaVolume());
+      _showPresenceSnackbar(nextMuted ? 'Volume muted' : 'Volume unmuted');
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'audio_output_mute_failed',
+        ),
+      );
+      if (!mounted) return;
+      _softwareMuted = !nextMuted;
+      setState(() {});
+      await AudioOutputBridge.applyRemotePlaybackMute(_room, _audioMuted);
+    } finally {
+      _audioMuteBusy = false;
+    }
+  }
+
+  void _handleAudioOutputState(AudioOutputState next) {
+    if (!mounted) return;
+    final previousMuted = _audioMuted;
+    _nativeMuted = next.muted;
+    setState(() => _audioRoute = next.route);
+    if (_audioMuted != previousMuted) {
+      unawaited(AudioOutputBridge.applyRemotePlaybackMute(_room, _audioMuted));
+      unawaited(_reportMediaVolume());
+    }
+  }
+
+  Future<void> _refreshAudioOutputState() async {
+    final native = await AudioOutputBridge.getState();
+    if (!mounted) return;
+    if (native != null) {
+      _handleAudioOutputState(native);
+      return;
+    }
+    final speakerOn =
+        Hardware.instance.speakerOn ??
+        (_session.settings.audioOutputPreference != 'earpiece');
+    setState(() {
+      if (_audioRoute != AudioOutputRoute.headset &&
+          _audioRoute != AudioOutputRoute.bluetooth) {
+        _audioRoute = speakerOn
+            ? AudioOutputRoute.speaker
+            : AudioOutputRoute.earpiece;
+      }
+    });
+  }
+
+  void _listenToHardwareAudioDevices() {
+    _hardwareAudioDeviceSubscription?.cancel();
+    _hardwareAudioDeviceSubscription = Hardware.instance.onDeviceChange.stream
+        .listen((_) {
+          unawaited(_refreshAudioOutputState());
+        });
   }
 
   bool get _liveHapticsEnabled {
@@ -2947,7 +3129,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   void _clearConnectionQualities() {
     _localConnectionQuality = ConnectionQuality.unknown;
-    _remoteConnectionQualityByUserId = const {};
+    _remoteConnectionQualityByUserId = {};
     if (mounted) setState(() {});
   }
 
@@ -2987,12 +3169,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               event.participant,
               event.participant.connectionQuality,
             );
+            final userId = _participantUserIdFromIdentity(
+              event.participant.identity,
+            );
+            if (userId != null && userId != _session.userId) {
+              _peerReconnect.peerJoined(userId);
+            }
           })
           ..on<ParticipantDisconnectedEvent>((event) {
             final userId = _participantUserIdFromIdentity(
               event.participant.identity,
             );
-            if (userId != null) _showPeerLostConnection(userId);
+            if (userId != null && userId != _session.userId) {
+              _peerReconnect.peerLeft(userId);
+            }
           })
           ..on<ParticipantConnectionQualityUpdatedEvent>((event) {
             _updateParticipantConnectionQuality(
@@ -3017,6 +3207,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                   startedAt,
                 );
               }
+            }
+            if (_audioMuted && event.publication.kind == TrackType.AUDIO) {
+              unawaited(AudioOutputBridge.applyRemotePlaybackMute(_room, true));
             }
           })
           ..on<ActiveSpeakersChangedEvent>((event) {
@@ -3192,6 +3385,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       await _onlineRepository
           .goAway(session, reason: 'network_loss')
           .timeout(const Duration(seconds: 3));
+      unawaited(ActiveOnlineSessionStore.clear());
       unawaited(
         _onlineRepository.notifyGoneOffline(
           session: session,
@@ -3237,11 +3431,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
   }
 
-  Future<void> _disconnectLiveKit() async {
+  Future<void> _disconnectLiveKit({bool urgent = false}) async {
     final room = _room;
     _room = null;
     _roomListener?.dispose();
     _roomListener = null;
+    _hardwareAudioDeviceSubscription?.cancel();
+    _hardwareAudioDeviceSubscription = null;
     _soloGuard?.detach();
     _soloGuard = null;
     _speakingUserIds = const {};
@@ -3251,20 +3447,106 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       debugPrint(
         '[LiveKit] Disconnecting room — '
         'localParticipant=${room.localParticipant?.identity ?? "none"} '
-        'remoteParticipants=${room.remoteParticipants.length}',
+        'remoteParticipants=${room.remoteParticipants.length} '
+        'urgent=$urgent',
       );
     }
 
-    try {
-      final localParticipant = room?.localParticipant;
-      if (localParticipant != null) {
-        await localParticipant.setMicrophoneEnabled(false);
+    if (!urgent) {
+      try {
+        final localParticipant = room?.localParticipant;
+        if (localParticipant != null) {
+          await localParticipant.setMicrophoneEnabled(false);
+        }
+      } catch (_) {
+        // Ignore cleanup failures.
       }
-    } catch (_) {
-      // Ignore cleanup failures.
     }
 
-    await room?.disconnect();
+    try {
+      await room?.disconnect().timeout(
+        Duration(milliseconds: urgent ? 800 : 8000),
+      );
+    } catch (_) {
+      // Process teardown cannot wait on a hung websocket.
+    }
+  }
+
+  Future<void> _teardownLiveSessionForProcessDeath() async {
+    if (_processTeardownInFlight) return;
+    final session = _onlineSession;
+    final room = _room;
+    if (session == null && room == null) return;
+    _processTeardownInFlight = true;
+    _connectionCleanupInFlight = true;
+    _explicitJoinIntent = false;
+    _liveSessionActiveOnBackground = false;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _peerDisconnectGraceTimer?.cancel();
+    _peerDisconnectGraceTimer = null;
+    _inactivityTimer?.cancel();
+    _inactivityTimer = null;
+    _callModeTimeoutTimer?.cancel();
+    _callModeTimeoutTimer = null;
+    _usagePersistTimer?.cancel();
+    _usagePersistTimer = null;
+    _onlineSession = null;
+    _talkSession = null;
+    LogManager.log(
+      LogLevel.warn,
+      'LiveKitManager',
+      'Process teardown — disconnecting room and clearing presence',
+      userId: _session.userId,
+      groupId: session?.groupId ?? _selectedGroup?.groupId,
+    );
+    try {
+      await _disconnectLiveKit(urgent: true);
+    } catch (_) {}
+    if (session != null) {
+      try {
+        await _onlineRepository
+            .goAway(session, reason: 'process_killed')
+            .timeout(const Duration(seconds: 2));
+      } catch (_) {}
+      unawaited(ActiveOnlineSessionStore.clear());
+    }
+    _syncPipSessionState();
+    if (mounted) {
+      setState(() {
+        _state = 'away';
+        _message = LiveKitStatus.away;
+        _speakingUserIds = const {};
+      });
+    }
+  }
+
+  Future<void> _clearAbandonedOnlineSession() async {
+    final leftover = await ActiveOnlineSessionStore.read();
+    if (leftover == null || _onlineSession != null) return;
+    try {
+      await _onlineRepository.clearAbandonedSession(leftover);
+      LogManager.log(
+        LogLevel.warn,
+        'LiveKitManager',
+        'Cleared abandoned presence from a previous process',
+        userId: leftover.userId,
+        groupId: leftover.groupId,
+      );
+    } catch (error) {
+      LogManager.log(
+        LogLevel.error,
+        'LiveKitManager',
+        'Failed to clear abandoned presence: $error',
+        userId: leftover.userId,
+        groupId: leftover.groupId,
+      );
+    }
+    if (_onlineSession != null) return;
+    final stored = await ActiveOnlineSessionStore.read();
+    if (stored?.serviceSessionId == leftover.serviceSessionId) {
+      await ActiveOnlineSessionStore.clear();
+    }
   }
 
   Future<void> _setMicrophoneEnabled(bool enabled) async {
@@ -3406,7 +3688,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       context: context,
       showDragHandle: true,
       builder: (context) {
-        return SafeArea(
+        return BottomSystemSafeArea(
           child: ListView(
             shrinkWrap: true,
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
@@ -3514,6 +3796,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   bool get _isOnline => _onlineSession != null;
+
+  /// LiveKit join, reconnect, or leave is in flight — the main button must
+  /// show a loader instead of an empty middle state between online/offline.
+  bool get _isSessionConnecting =>
+      _nudgeActionInFlight ||
+      _state == 'connecting' ||
+      _state == 'reconnecting';
+
   bool get _isViewingActiveGroup =>
       _onlineSession?.groupId == _selectedGroup?.groupId;
   bool get _isCallMode => _connectionMode == MemberAvailability.callMode;
@@ -3661,13 +3951,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // Offline chips ↔ online emoji bar, and fade past bubbles on go-live.
     _syncChatVisibilityForOnlineState(anyMemberOnline);
 
-    // Read the live system-reported bottom inset (gesture pill vs. a full
-    // 3-button nav bar) directly from MediaQuery here, before `SafeArea`
-    // below would otherwise silently consume it for its descendants. Used
-    // to size the real gap under the lowest pinned controls (messages bar /
-    // main button row) instead of assuming a fixed layout — see
-    // `bottomSystemInset` usage further down.
-    final bottomSystemInset = MediaQuery.paddingOf(context).bottom;
+    // Live nav-bar / home-indicator inset (gesture pill vs 3-button). Uses
+    // viewPadding as a fallback because modal routes and Android
+    // edge-to-edge often report padding.bottom as 0. Captured here, before
+    // the inner SafeArea, so the pinned messages bar / main button row
+    // can sit above the system nav without touching the top inset.
+    final bottomSystemInset = bottomSystemInsetOf(context);
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -3688,196 +3977,187 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           // gesture-nav-sized inset.
           SafeArea(
             bottom: false,
-            child: RefreshIndicator(
-              onRefresh: _loadGroups,
-              color: Colors.black,
-              backgroundColor: Colors.white,
-              child: CustomScrollView(
-                // The layout below has no intrinsic scroll content (it's a
-                // fixed column with a Spacer), so force scrollability purely
-                // to make the pull-to-refresh drag gesture available.
-                physics: const AlwaysScrollableScrollPhysics(),
-                slivers: [
-                  SliverFillRemaining(
-                    hasScrollBody: false,
-                    child: Column(
-                      children: [
-                        _TopChrome(
-                          onSettings: _openSettings,
-                          onSetup: _openSetupWarnings,
-                          hasSetupWarnings: warnings.isNotEmpty,
-                          busy: _busy,
-                          online: live,
-                          enabled: _serviceReady,
-                          onTogglePresence: _togglePresence,
-                          showAudioOutput: _isOnline,
-                          speakerOn:
-                              _session.settings.audioOutputPreference !=
-                              'earpiece',
-                          onToggleAudioOutput: _toggleAudioOutput,
-                        ),
-                        SizedBox(height: 8.h),
-                        _FriendsStrip(
-                          groupName: focusedGroup?.name,
-                          friends: _friends,
-                          availability: _availability,
-                          speakingUserIds: _speakingUserIds,
-                          connectionQualityByUserId:
-                              _remoteConnectionQualityByUserId,
-                          onInvite: inviteAction,
-                        ),
-                        if (_isOnline &&
-                            (_effectiveLocalConnectionQuality ==
-                                    ConnectionQuality.poor ||
-                                _effectiveLocalConnectionQuality ==
-                                    ConnectionQuality.lost)) ...[
-                          SizedBox(height: 8.h),
-                          Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 24.w),
-                            child: Text(
-                              'Your network connection is a bit low.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: const Color(0xffffb347),
-                                fontSize: 12.sp,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                        if (_message != null) ...[
-                          SizedBox(height: 10.h),
-                          Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 24.w),
-                            child: Text(
-                              UserFacingCopy.sanitize(_message!),
-                              textAlign: TextAlign.center,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: Colors.white70,
-                                fontSize: 12.sp,
-                              ),
-                            ),
-                          ),
-                        ],
-                        // Middle band: ephemeral bubbles sit here (own=right,
-                        // others=left). Empty Expanded keeps layout stable so
-                        // the feed doesn't jump the carousel when it appears.
-                        // Align to bottom so bubbles sit lower (near the status
-                        // hint) instead of floating mid-screen.
-                        Expanded(
-                          child: Padding(
-                            padding: EdgeInsets.fromLTRB(16.w, 0, 16.w, 14.h),
-                            child: Align(
-                              alignment: Alignment.bottomCenter,
-                              child: SingleChildScrollView(
-                                reverse: true,
-                                physics: const ClampingScrollPhysics(),
-                                child: ChatBubbleFeed(
-                                  messages: _chatMessages,
-                                  currentUserId: _session.userId,
-                                  accent: accent,
-                                  onExpire: _dismissExpiredChatMessage,
-                                  opacity: _chatFeedOpacity,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        // Status hint stays full-width and optically centered;
-                        // edge actions sit above the create-group side of the
-                        // row (not over it).
-                        Padding(
-                          padding: EdgeInsets.fromLTRB(24.w, 0, 24.w, 6.h),
-                          child: Text(
-                            viewingActiveGroup
-                                ? (_isCallMode
-                                      ? 'In a call — mic always on'
-                                      : 'Tap to Talk')
-                                : _isOnline
-                                ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
-                                : !_serviceReady
-                                ? 'invite a friend to enable voice service'
-                                : 'send a nudge to go online together',
-                            textAlign: TextAlign.center,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: const Color.fromRGBO(255, 255, 255, 0.55),
-                              fontSize: 13.sp,
-                              fontWeight: FontWeight.w500,
-                              height: 1.3,
-                            ),
-                          ),
-                        ),
-                        // Vertical edge actions only while the local user is
-                        // live. Fully offline restores the original layout:
-                        // nudge lives inside the main button, no side stack.
-                        if (live && (groupMixed || anyMemberOnline))
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: Padding(
-                              // Flush to the right edge of the safe area.
-                              padding: EdgeInsets.only(right: 0, bottom: 6.h),
-                              child: _EdgeQuickActions(
-                                showNudge: groupMixed,
-                                onNudge: _busy ? null : _openNudges,
-                                showModeToggle: anyMemberOnline,
-                                modeToggleEnabled:
-                                    viewingActiveGroup && !_connectionModeBusy,
-                                callModeActive: _isCallMode,
-                                onToggleMode: _toggleConnectionMode,
-                              ),
-                            ),
-                          ),
-                        SizedBox(
-                          height: 160.h,
-                          child: _ExperienceCarousel(
-                            items: items,
-                            index: _carouselIndex,
-                            connectedGroupId: _onlineSession?.groupId,
-                            talkEnabled:
-                                viewingActiveGroup && !_busy && !_isCallMode,
-                            talkActive:
-                                _talkSession != null ||
-                                (_isCallMode &&
-                                    _speakingUserIds.contains(_session.userId)),
-                            talkBusy: _talkBusy,
-                            callMode: _isCallMode,
-                            accent: accent,
-                            nudgeGroupId: groupAllOffline
-                                ? focusedGroup?.groupId
-                                : null,
-                            onNudge: _busy ? null : _openNudges,
-                            onSelected: (index) {
-                              unawaited(_onGroupCarouselChanged(index));
-                            },
-                            onTalkStart: _startTalking,
-                            onTalkStop: () => _stopTalking(),
-                            onJoinVoiceGroup: _togglePresence,
-                            onCreateGroup: _openCreateGroup,
-                            onJoinGroup: _openJoinGroup,
-                          ),
-                        ),
-                        if (focusedGroup != null) ...[
-                          SizedBox(height: 8.h),
-                          ChatBubbleBar(
-                            accent: accent,
-                            anyMemberOnline: anyMemberOnline,
-                            onSend: _sendChatMessage,
-                            onEmojiSelected: _triggerEmojiBurst,
-                          ),
-                        ],
-                        // Live system inset + a short base gap so the main
-                        // button row sits near the bottom without crowding
-                        // the nav area.
-                        SizedBox(height: 8.h + bottomSystemInset),
-                      ],
+            child: Column(
+              children: [
+                _TopChrome(
+                  onSettings: _openSettings,
+                  onSetup: _openSetupWarnings,
+                  hasSetupWarnings: warnings.isNotEmpty,
+                  busy: _busy,
+                  online: live,
+                  enabled: _serviceReady,
+                  onTogglePresence: _togglePresence,
+                  showAudioOutput: _isOnline,
+                  speakerOn:
+                      _session.settings.audioOutputPreference != 'earpiece',
+                  audioRoute: _audioRoute,
+                  audioMuted: _audioMuted,
+                  onToggleAudioOutput: _toggleAudioOutput,
+                  onToggleAudioMute: _toggleAudioMute,
+                ),
+                SizedBox(height: 8.h),
+                _FriendsStrip(
+                  groupName: focusedGroup?.name,
+                  friends: _friends,
+                  availability: _availability,
+                  speakingUserIds: _speakingUserIds,
+                  connectionQualityByUserId: _remoteConnectionQualityByUserId,
+                  onInvite: inviteAction,
+                ),
+                if (_isOnline &&
+                    (_effectiveLocalConnectionQuality ==
+                            ConnectionQuality.poor ||
+                        _effectiveLocalConnectionQuality ==
+                            ConnectionQuality.lost)) ...[
+                  SizedBox(height: 8.h),
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 24.w),
+                    child: Text(
+                      'Your network connection is a bit low.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: const Color(0xffffb347),
+                        fontSize: 12.sp,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ],
-              ),
+                if (_message != null) ...[
+                  SizedBox(height: 10.h),
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 24.w),
+                    child: Text(
+                      UserFacingCopy.sanitize(_message!),
+                      textAlign: TextAlign.center,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: Colors.white70, fontSize: 12.sp),
+                    ),
+                  ),
+                ],
+                // Middle band: ephemeral bubbles sit here (own=right,
+                // others=left). Empty Expanded keeps layout stable so
+                // the feed doesn't jump the carousel when it appears.
+                // Align to bottom so bubbles sit lower (near the status
+                // hint) instead of floating mid-screen. Clip overflow
+                // instead of scrolling — the home layout is fixed and
+                // sized for the rolling window of five short bubbles.
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(16.w, 0, 16.w, 14.h),
+                    child: ClipRect(
+                      child: OverflowBox(
+                        alignment: Alignment.bottomCenter,
+                        maxHeight: double.infinity,
+                        child: ChatBubbleFeed(
+                          messages: _chatMessages,
+                          currentUserId: _session.userId,
+                          accent: accent,
+                          onExpire: _dismissExpiredChatMessage,
+                          opacity: _chatFeedOpacity,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                // Status hint stays full-width and optically centered;
+                // edge actions sit above the create-group side of the
+                // row (not over it).
+                Padding(
+                  padding: EdgeInsets.fromLTRB(24.w, 0, 24.w, 6.h),
+                  child: Text(
+                    _isSessionConnecting
+                        ? (_state == 'reconnecting'
+                              ? LiveKitStatus.reconnecting
+                              : LiveKitStatus.connecting)
+                        : viewingActiveGroup
+                        ? (_isCallMode
+                              ? 'In a call — mic always on'
+                              : 'Tap to Talk')
+                        : _isOnline
+                        ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
+                        : !_serviceReady
+                        ? 'invite a friend to enable voice service'
+                        : 'send a nudge to go online together',
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: const Color.fromRGBO(255, 255, 255, 0.55),
+                      fontSize: 13.sp,
+                      fontWeight: FontWeight.w500,
+                      height: 1.3,
+                    ),
+                  ),
+                ),
+                // Vertical edge actions only while the local user is
+                // live. Fully offline restores the original layout:
+                // nudge lives inside the main button, no side stack.
+                if (live && (groupMixed || anyMemberOnline))
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Padding(
+                      // Flush to the right edge of the safe area.
+                      padding: EdgeInsets.only(right: 0, bottom: 6.h),
+                      child: _EdgeQuickActions(
+                        showNudge: groupMixed,
+                        onNudge: _busy ? null : _openNudges,
+                        showModeToggle: anyMemberOnline,
+                        modeToggleEnabled:
+                            viewingActiveGroup && !_connectionModeBusy,
+                        callModeActive: _isCallMode,
+                        onToggleMode: _toggleConnectionMode,
+                      ),
+                    ),
+                  ),
+                SizedBox(
+                  height: 160.h,
+                  child: _ExperienceCarousel(
+                    items: items,
+                    index: _carouselIndex,
+                    connectedGroupId: _onlineSession?.groupId,
+                    connecting: _isSessionConnecting,
+                    talkEnabled:
+                        viewingActiveGroup &&
+                        !_busy &&
+                        !_isCallMode &&
+                        !_isSessionConnecting,
+                    talkActive:
+                        _talkSession != null ||
+                        (_isCallMode &&
+                            _speakingUserIds.contains(_session.userId)),
+                    talkBusy: _talkBusy,
+                    callMode: _isCallMode,
+                    accent: accent,
+                    nudgeGroupId: groupAllOffline
+                        ? focusedGroup?.groupId
+                        : null,
+                    onNudge: _busy ? null : _openNudges,
+                    onSelected: (index) {
+                      unawaited(_onGroupCarouselChanged(index));
+                    },
+                    onTalkStart: _startTalking,
+                    onTalkStop: () => _stopTalking(),
+                    onJoinVoiceGroup: _togglePresence,
+                    onCreateGroup: _openCreateGroup,
+                    onJoinGroup: _openJoinGroup,
+                  ),
+                ),
+                if (focusedGroup != null) ...[
+                  SizedBox(height: 8.h),
+                  ChatBubbleBar(
+                    accent: accent,
+                    anyMemberOnline: anyMemberOnline,
+                    onSend: _sendChatMessage,
+                    onEmojiSelected: _triggerEmojiBurst,
+                  ),
+                ],
+                // Live system inset + a short base gap so the main
+                // button row sits near the bottom without crowding
+                // the nav area.
+                SizedBox(height: 8.h + bottomSystemInset),
+              ],
             ),
           ),
           if (_emojiBursts.isNotEmpty)
@@ -4188,7 +4468,10 @@ class _TopChrome extends StatelessWidget {
     required this.onTogglePresence,
     required this.showAudioOutput,
     required this.speakerOn,
+    required this.audioRoute,
+    required this.audioMuted,
     required this.onToggleAudioOutput,
+    required this.onToggleAudioMute,
   });
 
   final VoidCallback onSettings;
@@ -4200,7 +4483,10 @@ class _TopChrome extends StatelessWidget {
   final VoidCallback onTogglePresence;
   final bool showAudioOutput;
   final bool speakerOn;
+  final AudioOutputRoute audioRoute;
+  final bool audioMuted;
   final VoidCallback onToggleAudioOutput;
+  final VoidCallback onToggleAudioMute;
 
   @override
   Widget build(BuildContext context) {
@@ -4254,45 +4540,12 @@ class _TopChrome extends StatelessWidget {
                   ),
                   if (showAudioOutput) ...[
                     SizedBox(width: 6.w),
-                    Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        _GlassIconButton(
-                          tooltip: speakerOn
-                              ? 'Speaker — tap to switch to phone'
-                              : 'Phone — tap to switch to speaker',
-                          onPressed: onToggleAudioOutput,
-                          child: _AudioOutputSwitchIcon(speakerOn: speakerOn),
-                        ),
-                        Positioned(
-                          right: -2,
-                          bottom: -2,
-                          child: IgnorePointer(
-                            child: Container(
-                              width: 16.w,
-                              height: 16.w,
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                color: const Color(0xff1c1c1c),
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: const Color.fromRGBO(
-                                    255,
-                                    255,
-                                    255,
-                                    0.45,
-                                  ),
-                                ),
-                              ),
-                              child: Icon(
-                                Icons.sync_alt_rounded,
-                                size: 10.sp,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
+                    _AudioOutputSwitchIcon(
+                      speakerOn: speakerOn,
+                      route: audioRoute,
+                      muted: audioMuted,
+                      onToggle: onToggleAudioOutput,
+                      onMute: onToggleAudioMute,
                     ),
                   ],
                 ],
@@ -4739,41 +4992,49 @@ class _TalkingPulseRingState extends State<_TalkingPulseRing>
   }
 }
 
-class _AudioOutputSwitchIcon extends StatelessWidget {
-  const _AudioOutputSwitchIcon({required this.speakerOn});
+class _AudioOutputSwitchIcon extends StatefulWidget {
+  const _AudioOutputSwitchIcon({
+    required this.speakerOn,
+    required this.route,
+    required this.muted,
+    required this.onToggle,
+    required this.onMute,
+  });
 
   final bool speakerOn;
+  final AudioOutputRoute route;
+  final bool muted;
+  final VoidCallback onToggle;
+  final VoidCallback onMute;
 
   @override
+  State<_AudioOutputSwitchIcon> createState() => _AudioOutputSwitchIconState();
+}
+
+class _AudioOutputSwitchIconState extends State<_AudioOutputSwitchIcon> {
+  @override
   Widget build(BuildContext context) {
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 280),
-      switchInCurve: Curves.easeOut,
-      switchOutCurve: Curves.easeIn,
-      transitionBuilder: (child, animation) {
-        final rotated = Tween<double>(
-          begin: math.pi / 2,
-          end: 0,
-        ).animate(animation);
-        return AnimatedBuilder(
-          animation: rotated,
-          child: child,
-          builder: (context, child) {
-            return Transform(
-              alignment: Alignment.center,
-              transform: Matrix4.identity()
-                ..setEntry(3, 2, 0.001)
-                ..rotateY(rotated.value),
-              child: child,
-            );
-          },
-        );
-      },
-      child: Icon(
-        speakerOn ? Icons.volume_up_rounded : Icons.phone_in_talk_rounded,
-        key: ValueKey(speakerOn),
-        color: Colors.white,
-        size: 22.sp,
+    final kind = resolveAudioOutputGlyph(
+      route: widget.route,
+      muted: widget.muted,
+    );
+    return _GlassIconButton(
+      tooltip: audioOutputTooltip(
+        kind: kind,
+        speakerPreferenceOn: widget.speakerOn,
+      ),
+      onPressed: widget.onToggle,
+      onLongPress: widget.onMute,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 180),
+        switchInCurve: Curves.easeOut,
+        switchOutCurve: Curves.easeIn,
+        child: LucideAudioGlyph(
+          key: ValueKey(kind),
+          kind: kind,
+          color: Colors.white,
+          size: 22.sp,
+        ),
       ),
     );
   }
@@ -5064,6 +5325,7 @@ class _ExperienceCarousel extends StatefulWidget {
     required this.items,
     required this.index,
     required this.connectedGroupId,
+    required this.connecting,
     required this.talkEnabled,
     required this.talkActive,
     required this.talkBusy,
@@ -5082,6 +5344,9 @@ class _ExperienceCarousel extends StatefulWidget {
   final List<_CarouselItem> items;
   final int index;
   final String? connectedGroupId;
+
+  /// True while LiveKit is joining, reconnecting, or leaving.
+  final bool connecting;
   final bool talkEnabled;
   final bool talkActive;
   final bool talkBusy;
@@ -5092,9 +5357,9 @@ class _ExperienceCarousel extends StatefulWidget {
   final Color accent;
 
   /// Group id of the focused card when the whole group (self included) is
-  /// offline — the main circle becomes a nudge trigger for that card instead
-  /// of the normal join/talk control. Null when no card should show that
-  /// state (mixed or all-online).
+  /// offline — tapping the main circle opens the nudge composer. Null when
+  /// the focused card should join instead (peers already live, or switching
+  /// from another connected group).
   final String? nudgeGroupId;
   final VoidCallback? onNudge;
   final ValueChanged<int> onSelected;
@@ -5223,25 +5488,26 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
     final opacity = (1 - distance * 0.18).clamp(0.28, 1.0);
     final rotationY = (delta * -0.26).clamp(-0.62, 0.62);
 
+    final connectedToThisGroup = item.group.groupId == widget.connectedGroupId;
+    final focused = actuallySelected && distance < 0.45;
     Widget circle = _MainAvatarCircle(
       item: item,
       selected: visuallySelected,
-      connected: item.group.groupId == widget.connectedGroupId,
-      talkEnabled: widget.talkEnabled && actuallySelected && distance < 0.45,
+      connected: connectedToThisGroup,
+      connecting: widget.connecting && focused,
+      talkEnabled: widget.talkEnabled && focused,
       joinEnabled:
-          actuallySelected &&
-          distance < 0.45 &&
-          widget.connectedGroupId != null &&
-          item.group.groupId != widget.connectedGroupId,
+          focused &&
+          !widget.connecting &&
+          !connectedToThisGroup &&
+          (widget.connectedGroupId != null || widget.nudgeGroupId == null),
       talkActive: widget.talkActive && actuallySelected,
       talkBusy: widget.talkBusy,
       callMode: widget.callMode,
       accent: widget.accent,
-      nudgeMode:
-          actuallySelected &&
-          distance < 0.45 &&
-          widget.nudgeGroupId != null &&
-          item.group.groupId == widget.nudgeGroupId,
+      // Offline/default icon whenever this focused card is not in a live
+      // session and not mid-connect — never leave the circle with no glyph.
+      nudgeMode: focused && !widget.connecting && !connectedToThisGroup,
       onNudge: widget.onNudge,
       onTalkStart: widget.onTalkStart,
       onTalkStop: widget.onTalkStop,
@@ -5422,6 +5688,7 @@ class _MainAvatarCircle extends StatelessWidget {
     required this.item,
     required this.selected,
     required this.connected,
+    required this.connecting,
     required this.talkEnabled,
     required this.joinEnabled,
     required this.talkActive,
@@ -5438,6 +5705,7 @@ class _MainAvatarCircle extends StatelessWidget {
   final _CarouselItem item;
   final bool selected;
   final bool connected;
+  final bool connecting;
   final bool talkEnabled;
   final bool joinEnabled;
   final bool talkActive;
@@ -5461,7 +5729,9 @@ class _MainAvatarCircle extends StatelessWidget {
   Widget build(BuildContext context) {
     final size = 110.w;
     // Yellow ring only while the local user is actively transmitting.
-    final borderColor = connected
+    final borderColor = connecting
+        ? Colors.white54
+        : connected
         ? (talkActive ? const Color(0xffffd54f) : const Color(0xff28A745))
         : nudgeMode
         ? Colors.white38
@@ -5474,7 +5744,7 @@ class _MainAvatarCircle extends StatelessWidget {
         shape: BoxShape.circle,
         border: Border.all(
           color: borderColor,
-          width: connected ? 4 : (selected ? 2.5 : 2),
+          width: connected || connecting ? 4 : (selected ? 2.5 : 2),
         ),
       ),
       child: ClipOval(
@@ -5483,7 +5753,7 @@ class _MainAvatarCircle extends StatelessWidget {
           children: [
             AnimatedOpacity(
               duration: const Duration(milliseconds: 220),
-              opacity: nudgeMode ? 0.4 : 1,
+              opacity: (nudgeMode || connecting) ? 0.4 : 1,
               child: _MemberPhotoCollage(
                 members: item.members,
                 fallbackPhotoUrl: item.profilePhotoUrl,
@@ -5493,7 +5763,7 @@ class _MainAvatarCircle extends StatelessWidget {
               ),
             ),
             // Bottom fade lifts live glyphs without fully masking profiles.
-            if (connected)
+            if (connected && !connecting)
               const DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
@@ -5509,7 +5779,7 @@ class _MainAvatarCircle extends StatelessWidget {
                 ),
               ),
             // Nudge wave stays inside the clipped circle (offline state).
-            if (nudgeMode)
+            if (nudgeMode && !connecting)
               Align(
                 alignment: Alignment.bottomCenter,
                 child: Padding(
@@ -5522,14 +5792,13 @@ class _MainAvatarCircle extends StatelessWidget {
       ),
     );
 
-    // Live mode glyph sits *above* ClipOval so the walkie art can be large
-    // without being tight-cropped by the circle edge. Call and walkie share
-    // the same plate, size, and opacity — only the glyph swaps.
-    if (connected) {
-      final plateSize = size * 0.96;
-      final glyphSize = size * 0.88;
+    final plateSize = size * 0.96;
+    final glyphSize = size * 0.88;
+    if (connecting || connected) {
       // ~2–3 logical px shrink while PTT is held for a pressed feel.
-      final transmitInset = talkActive && !callMode ? 2.5.w : 0.0;
+      final transmitInset = talkActive && !callMode && !connecting
+          ? 2.5.w
+          : 0.0;
       circle = SizedBox(
         width: size,
         height: size,
@@ -5539,7 +5808,7 @@ class _MainAvatarCircle extends StatelessWidget {
           children: [
             // Compact radial ripples sit outside the solid border so
             // transmitting reads clearly without enlarging the button hit area.
-            if (talkActive)
+            if (talkActive && !connecting)
               Positioned.fill(
                 child: IgnorePointer(
                   child: _TransmitRadialVisualizer(
@@ -5575,7 +5844,12 @@ class _MainAvatarCircle extends StatelessWidget {
                       scale: animation,
                       child: FadeTransition(opacity: animation, child: child),
                     ),
-                    child: callMode
+                    child: connecting
+                        ? _MainButtonDotsLoader(
+                            key: const ValueKey('main-connecting'),
+                            size: glyphSize * 0.52,
+                          )
+                        : callMode
                         ? Icon(
                             Icons.call_rounded,
                             key: const ValueKey('main-call'),
@@ -5607,7 +5881,7 @@ class _MainAvatarCircle extends StatelessWidget {
       );
     }
 
-    if (talkEnabled || joinEnabled || nudgeMode) {
+    if (!connecting && (talkEnabled || joinEnabled || nudgeMode)) {
       circle = Semantics(
         button: true,
         label: joinEnabled
@@ -5621,12 +5895,12 @@ class _MainAvatarCircle extends StatelessWidget {
           onTap: talkBusy
               ? null
               : () {
-                  if (nudgeMode) {
-                    onNudge?.call();
-                    return;
-                  }
                   if (joinEnabled) {
                     onJoin();
+                    return;
+                  }
+                  if (nudgeMode) {
+                    onNudge?.call();
                     return;
                   }
                   if (talkActive) {
@@ -5646,7 +5920,7 @@ class _MainAvatarCircle extends StatelessWidget {
       child: circle,
     );
 
-    if (!nudgeMode) return content;
+    if (!nudgeMode || connecting) return content;
 
     // Rising "Z"s sit outside ClipOval so they can keep travelling past the
     // button's ring and fade out in open space (instead of being clipped or
@@ -5664,6 +5938,74 @@ class _MainAvatarCircle extends StatelessWidget {
             child: IgnorePointer(child: _SleepZAnimation(size: size * 0.3)),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Three-dot pulse used on the main circle while LiveKit is connecting.
+class _MainButtonDotsLoader extends StatefulWidget {
+  const _MainButtonDotsLoader({super.key, required this.size});
+
+  final double size;
+
+  @override
+  State<_MainButtonDotsLoader> createState() => _MainButtonDotsLoaderState();
+}
+
+class _MainButtonDotsLoaderState extends State<_MainButtonDotsLoader>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dot = widget.size * 0.28;
+    return SizedBox(
+      width: widget.size,
+      height: widget.size * 0.45,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              for (var i = 0; i < 3; i++) ...[
+                if (i > 0) SizedBox(width: widget.size * 0.1),
+                _dot(i, dot),
+              ],
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _dot(int index, double diameter) {
+    final t = ((_controller.value + (1 - index * 0.22)) % 1.0);
+    final bounce = math.sin(t * math.pi);
+    final scale = 0.55 + 0.45 * bounce;
+    final opacity = 0.35 + 0.65 * bounce;
+    return Transform.translate(
+      offset: Offset(0, -widget.size * 0.12 * bounce),
+      child: Transform.scale(
+        scale: scale,
+        child: Container(
+          width: diameter,
+          height: diameter,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.white.withValues(alpha: opacity),
+          ),
+        ),
       ),
     );
   }

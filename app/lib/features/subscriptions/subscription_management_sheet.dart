@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:purchases_ui_flutter/purchases_ui_flutter.dart';
 
 import '../../app/app_config.dart';
+import '../../core/ui/bottom_system_inset.dart';
 
 /// Manage Subscription sheet with store management + Team Duo contact.
 ///
@@ -47,7 +48,7 @@ class SubscriptionManagementSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
+    return BottomSystemSafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
         child: Column(

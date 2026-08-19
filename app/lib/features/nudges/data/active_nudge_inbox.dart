@@ -159,6 +159,9 @@ class ActiveNudgeInbox extends ChangeNotifier {
   }) async {
     if (nudgeId.isEmpty) return;
     final now = _now;
+    // Copy before write — `_statusById` may still be an unmodifiable store
+    // map if bindUser's copy is ever skipped or reverted.
+    _statusById = Map<String, ActiveNudgeStatusRecord>.of(_statusById);
     _statusById[nudgeId] = ActiveNudgeStatusRecord(
       status: status,
       at: now,
@@ -241,6 +244,9 @@ class ActiveNudgeInbox extends ChangeNotifier {
   }
 
   void _pruneStatusLocked(DateTime now) {
+    // Copy before write. Store loads and `const {}` are unmodifiable; hydrate
+    // also runs after AppLifecycle resume on every foreground.
+    _statusById = Map<String, ActiveNudgeStatusRecord>.of(_statusById);
     _statusById.removeWhere(
       (_, record) => now.difference(record.at) > _statusRetention,
     );
