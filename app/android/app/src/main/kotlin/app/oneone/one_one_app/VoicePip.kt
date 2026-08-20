@@ -191,7 +191,7 @@ class VoiceSessionService : Service() {
 
     @Suppress("DEPRECATION")
     private fun notification(): Notification {
-        val openApp = PendingIntent.getActivity(
+        val openApp = BrandedSplashIntents.mainActivity(
             this,
             0,
             Intent(this, MainActivity::class.java),

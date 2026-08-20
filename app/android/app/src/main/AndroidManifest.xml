@@ -21,7 +21,8 @@
     <application
         android:label="Duo"
         android:name=".OneOneApplication"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/LaunchTheme">
         <meta-data
             android:name="firebase_messaging_installation_id_enabled"
             android:value="true" />

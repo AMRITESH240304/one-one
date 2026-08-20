@@ -13,6 +13,7 @@ import '../../../core/logging/log_level.dart';
 import '../../../core/logging/log_manager.dart';
 import '../../../core/logging/user_facing_copy.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/ui/bottom_system_inset.dart';
 import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
 import '../../identity/ui/profile_avatar.dart';
@@ -37,7 +38,7 @@ Future<void> showNudgeBottomSheet(
   await showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
-    useSafeArea: true,
+    useSafeArea: false,
     backgroundColor: Colors.transparent,
     builder: (_) => _QuickNudgeSheet(
       group: group,
@@ -72,18 +73,17 @@ class _QuickNudgeSheet extends StatefulWidget {
 }
 
 class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
-  static const _maxVoiceDuration = Duration(seconds: 6);
   static const _autoDismissDelay = Duration(seconds: 5);
-
-  // Configurable ring durations — spec: 3/6/9 (cycling), keep this configurable.
-  static const List<int> _ringDurations = [3, 6, 9];
+  static const _ringTapDurationSeconds = 5;
+  static const _ringDoubleTapDurationSeconds = 10;
 
   final NudgeRepository _repository = NudgeRepository();
   final AudioRecorder _recorder = AudioRecorder();
   final Stopwatch _recordingWatch = Stopwatch();
   final NudgeCooldownTracker _cooldowns = NudgeCooldownTracker.instance;
-  NudgeTarget _target = const NudgeTarget.allFriends();
+  final Set<String> _selectedUserIds = {};
   Timer? _recordingTimer;
+  Timer? _recordingCapTimer;
   Timer? _cooldownTicker;
   Timer? _autoDismissTimer;
   bool _recording = false;
@@ -98,9 +98,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   bool _messageIsError = false;
   bool _messageIsWarning = false;
   bool _messagePending = false;
-
-  // Ring duration cycling: tracks which index in _ringDurations will fire next.
-  int _ringDurationIndex = 0;
 
   // Delivery icon state: when true, delivery results appear as avatar badges
   // rather than the _NudgeStatus text widget.
@@ -137,6 +134,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     _deliverySub = AndroidVoiceNudgeBridge.deliveryResults.listen(
       _onDeliveryResult,
     );
+    _selectedUserIds.addAll(_nudgeableFriends.map((f) => f.userId));
     _restorePersistedFailures();
     _restoreLastNudgeStatus();
   }
@@ -168,6 +166,31 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   void _restoreLastNudgeStatus() {
     final last = NudgeStatusMemory.instance.forGroup(widget.group.groupId);
     if (last == null) return;
+    _lastSentNudgeKind = last.kind;
+    if (last.signifiers.isNotEmpty &&
+        last.status != LastNudgeStatus.sent &&
+        last.status != LastNudgeStatus.waiting) {
+      _showDeliveryBadges = true;
+      for (final signifier in last.signifiers) {
+        _expectedRecipients[signifier.userId] = _PendingRecipient(
+          userId: signifier.userId,
+          displayName: signifier.displayName,
+        );
+        _resultsByUserId[signifier.userId] = NudgeDeliveryResult(
+          eventId: last.eventId,
+          status: signifier.failed ? 'failed' : 'played',
+          attention: switch (signifier.band) {
+            MediaVolumeBand.muted => 'volume_muted',
+            MediaVolumeBand.veryLow => 'volume_very_low',
+            MediaVolumeBand.low => 'volume_low',
+            MediaVolumeBand.ok => null,
+            null => null,
+          },
+          recipientUserId: signifier.userId,
+          recipientName: signifier.displayName,
+        );
+      }
+    }
     switch (last.status) {
       case LastNudgeStatus.sent:
       case LastNudgeStatus.waiting:
@@ -177,17 +200,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _messagePending = true;
         break;
       case LastNudgeStatus.played:
-        _message = last.message;
-        _messageIsError = false;
-        _messageIsWarning = false;
-        _messagePending = false;
-        break;
       case LastNudgeStatus.volumeLow:
       case LastNudgeStatus.volumeMuted:
-        _message = last.message;
-        _messageIsError = false;
-        _messageIsWarning = true;
-        _messagePending = false;
+        // Delivery outcome is restored as avatar signifiers, not text.
         break;
       case LastNudgeStatus.failed:
         _message = last.message;
@@ -198,7 +213,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     }
   }
 
-  void _recordLastStatus(LastNudgeStatus status, String message) {
+  void _recordLastStatus(
+    LastNudgeStatus status,
+    String message, {
+    List<LastNudgeRecipientSignifier>? signifiers,
+  }) {
     NudgeStatusMemory.instance.record(
       widget.group.groupId,
       LastNudgeState(
@@ -206,6 +225,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         status: status,
         message: message,
         at: DateTime.now(),
+        kind: _lastSentNudgeKind,
+        signifiers: signifiers ?? const [],
       ),
     );
   }
@@ -225,6 +246,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   bool get _canSend =>
       _nudgeableFriends.isNotEmpty &&
+      _selectedUserIds.isNotEmpty &&
       !_busy &&
       !_startingRecording &&
       !_finishingRecording &&
@@ -234,6 +256,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   @override
   void dispose() {
     _recordingTimer?.cancel();
+    _recordingCapTimer?.cancel();
     _cooldownTicker?.cancel();
     _deliveryTimeoutTimer?.cancel();
     _autoDismissTimer?.cancel();
@@ -244,24 +267,41 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   }
 
   List<_PendingRecipient> _recipientsForTarget() {
-    if (_target.targetScope == 'single_friend') {
-      final id = _target.targetUserId;
-      if (id == null) return const [];
-      final friend = _friends.where((f) => f.userId == id).firstOrNull;
-      if (friend == null || _isOnline(friend.userId)) return const [];
-      return [
-        _PendingRecipient(
-          userId: friend.userId,
-          displayName: friend.displayName,
-        ),
-      ];
-    }
-    return _nudgeableFriends
+    final selected = _nudgeableFriends
+        .where((f) => _selectedUserIds.contains(f.userId))
+        .toList(growable: false);
+    return selected
         .map(
           (f) =>
               _PendingRecipient(userId: f.userId, displayName: f.displayName),
         )
         .toList(growable: false);
+  }
+
+  bool get _isEveryoneSelected {
+    final nudgeable = _nudgeableFriends;
+    return nudgeable.isNotEmpty &&
+        nudgeable.every((f) => _selectedUserIds.contains(f.userId));
+  }
+
+  void _selectEveryone() {
+    setState(() {
+      _selectedUserIds
+        ..clear()
+        ..addAll(_nudgeableFriends.map((f) => f.userId));
+    });
+  }
+
+  void _toggleFriend(String userId) {
+    if (_isOnline(userId)) return;
+    setState(() {
+      if (_selectedUserIds.contains(userId)) {
+        if (_selectedUserIds.length == 1) return;
+        _selectedUserIds.remove(userId);
+      } else {
+        _selectedUserIds.add(userId);
+      }
+    });
   }
 
   List<MediaVolumeRecipient> _volumeRecipients(
@@ -502,16 +542,26 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
     // Record status to memory for sheet reopen restoration.
     final summaryMessage = _buildDeliveryMessage(partial: false);
+    final signifiers = _snapshotSignifiers();
     if (failed.isNotEmpty) {
-      _recordLastStatus(LastNudgeStatus.failed, summaryMessage);
+      _recordLastStatus(
+        LastNudgeStatus.failed,
+        summaryMessage,
+        signifiers: signifiers,
+      );
     } else if (volumeWarnings.isNotEmpty) {
       final allMuted = volumeWarnings.every((l) => l.contains(' is muted'));
       _recordLastStatus(
         allMuted ? LastNudgeStatus.volumeMuted : LastNudgeStatus.volumeLow,
         summaryMessage,
+        signifiers: signifiers,
       );
     } else {
-      _recordLastStatus(LastNudgeStatus.played, summaryMessage);
+      _recordLastStatus(
+        LastNudgeStatus.played,
+        summaryMessage,
+        signifiers: signifiers,
+      );
     }
 
     // Steps 3 & 4: delivery state is communicated entirely through profile
@@ -654,6 +704,29 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     return 'Nudge wasn\u2019t delivered to $failedCount of $totalRecipients people.';
   }
 
+  List<LastNudgeRecipientSignifier> _snapshotSignifiers() {
+    return [
+      for (final pending in _expectedRecipients.values)
+        LastNudgeRecipientSignifier(
+          userId: pending.userId,
+          displayName: pending.displayName,
+          failed: _resultsByUserId[pending.userId]?.played == false,
+          band: _snapshotBandFor(pending.userId),
+        ),
+    ];
+  }
+
+  MediaVolumeBand? _snapshotBandFor(String userId) {
+    final result = _resultsByUserId[userId];
+    if (result != null && !result.played) return null;
+    if (_lastSentNudgeKind != NudgeKind.voice) return null;
+    if (result != null && result.played) {
+      return MediaVolumeBandX.fromAttention(result.attention) ??
+          MediaVolumeBand.ok;
+    }
+    return _rtdbVolumeFeedback.bandsByUserId[userId];
+  }
+
   Duration _cooldownRemaining(NudgeKind kind) => _cooldowns.remaining(kind);
 
   String _cooldownLabel(Duration remaining) {
@@ -664,7 +737,14 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   void _scheduleAutoDismiss() {
     _autoDismissTimer?.cancel();
     _autoDismissTimer = Timer(_autoDismissDelay, () {
-      if (mounted && _canSend && Navigator.of(context).canPop()) {
+      if (!mounted) return;
+      if (_recording ||
+          _startingRecording ||
+          _finishingRecording ||
+          _awaitingEventId != null) {
+        return;
+      }
+      if (Navigator.of(context).canPop()) {
         Navigator.of(context).pop();
       }
     });
@@ -672,30 +752,22 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   // ── Ring ─────────────────────────────────────────────────────────────────
 
-  /// Sends a ring nudge at the currently shown duration, then cycles to the
-  /// next duration for the following tap (3 → 6 → 9 → 3…).
+  /// Single tap rings for 5s; double tap rings for 10s.
   /// Ring skips the "Confirming…" text step and shows results as avatar badges.
-  Future<void> _sendRingAtCurrentDuration() async {
+  Future<void> _sendRing({required int durationSeconds}) async {
     if (_cooldownRemaining(NudgeKind.ring) > Duration.zero) return;
-    final seconds = _ringDurations[_ringDurationIndex];
     _lastSentNudgeKind = NudgeKind.ring;
     _showConfirmingText = false; // ring skips step 2 text
     await _send(
       () => _repository.sendRing(
         groupId: widget.group.groupId,
         target: _effectiveTarget(),
-        durationSeconds: seconds,
+        durationSeconds: durationSeconds,
       ),
       kind: NudgeKind.ring,
       awaitsDeliveryConfirmation: true,
       waitingMessage: '',
     );
-    // Advance to the next duration for the next tap.
-    if (mounted) {
-      setState(() {
-        _ringDurationIndex = (_ringDurationIndex + 1) % _ringDurations.length;
-      });
-    }
   }
 
   // ── Push ─────────────────────────────────────────────────────────────────
@@ -717,16 +789,17 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   }
 
   NudgeTarget _effectiveTarget() {
-    if (_target.targetScope == 'single_friend') {
-      final id = _target.targetUserId;
-      if (id != null && _isOnline(id)) return const NudgeTarget.allFriends();
-      return _target;
+    final selected = _nudgeableFriends
+        .where((f) => _selectedUserIds.contains(f.userId))
+        .map((f) => f.userId)
+        .toList(growable: false);
+    if (selected.isEmpty || selected.length == _nudgeableFriends.length) {
+      return const NudgeTarget.allFriends();
     }
-    final nudgeable = _nudgeableFriends;
-    if (nudgeable.length == 1) {
-      return NudgeTarget.singleFriend(nudgeable.first.userId);
+    if (selected.length == 1) {
+      return NudgeTarget.singleFriend(selected.first);
     }
-    return _target;
+    return NudgeTarget.selectedFriends(selected);
   }
 
   Future<void> _send(
@@ -741,16 +814,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     if (expected.isEmpty) {
       setState(() {
         _message = 'Everyone is already online.';
-        _messageIsError = true;
-        _messageIsWarning = false;
-      });
-      return;
-    }
-    if (_target.targetScope == 'single_friend' &&
-        _target.targetUserId != null &&
-        _isOnline(_target.targetUserId!)) {
-      setState(() {
-        _message = 'They\u2019re already online.';
         _messageIsError = true;
         _messageIsWarning = false;
       });
@@ -959,18 +1022,24 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         await _recorder.stop();
         return;
       }
-      if (widget.hapticsEnabled) unawaited(HapticFeedback.mediumImpact());
       _recordingWatch
         ..reset()
         ..start();
       _recordingTimer?.cancel();
+      _recordingCapTimer?.cancel();
+      _recordingCapTimer = Timer(VoiceNudgeAudio.maxRecordingDuration, () {
+        unawaited(_finishRecording(send: true));
+      });
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'Voice recording start capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds}',
+        groupId: widget.group.groupId,
+      );
+      if (widget.hapticsEnabled) unawaited(HapticFeedback.mediumImpact());
       _recordingTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
         if (!mounted || !_recording) return;
-        final elapsed = _recordingWatch.elapsed;
-        setState(() => _elapsed = elapsed);
-        if (elapsed >= _maxVoiceDuration) {
-          unawaited(_finishRecording(send: true));
-        }
+        setState(() => _elapsed = _recordingWatch.elapsed);
       });
       setState(() {
         _recording = true;
@@ -999,10 +1068,19 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     if (!_recording || _finishingRecording) return;
     _finishingRecording = true;
     _recordingTimer?.cancel();
+    _recordingCapTimer?.cancel();
     _recordingWatch.stop();
-    final durationMs = _recordingWatch.elapsedMilliseconds.clamp(
+    final actualDurationMs = _recordingWatch.elapsedMilliseconds;
+    final durationMs = actualDurationMs.clamp(
       0,
-      _maxVoiceDuration.inMilliseconds,
+      VoiceNudgeAudio.maxAcceptedDurationMs,
+    );
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Voice recording end durationMs=$actualDurationMs '
+          'send=$send capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds}',
+      groupId: widget.group.groupId,
     );
     if (mounted) {
       setState(() {
@@ -1020,7 +1098,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     String? path;
     var sent = false;
     String? voiceEventId;
-    final uploadReservation = send && durationMs >= 250
+    final minMs = VoiceNudgeAudio.minRecordingDuration.inMilliseconds;
+    final uploadReservation = send && durationMs >= minMs
         ? _repository.initiateVoiceUpload(
             groupId: widget.group.groupId,
             target: _effectiveTarget(),
@@ -1028,9 +1107,17 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           )
         : null;
     try {
+      final stopWatch = Stopwatch()..start();
       path = await _recorder.stop();
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'Voice recorder flush elapsedMs=${stopWatch.elapsedMilliseconds} '
+            'path=${path != null}',
+        groupId: widget.group.groupId,
+      );
       if (!send || path == null) return;
-      if (durationMs < 250) {
+      if (durationMs < minMs) {
         if (mounted) {
           setState(() {
             _message = 'Hold a little longer to record.';
@@ -1130,7 +1217,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     final pushEnabled = actionEnabled && pushCooldown <= Duration.zero;
     final voiceEnabled = _canSend && voiceCooldown <= Duration.zero;
     final recordingProgress =
-        (_elapsed.inMilliseconds / _maxVoiceDuration.inMilliseconds).clamp(
+        (_elapsed.inMilliseconds /
+                VoiceNudgeAudio.maxRecordingDuration.inMilliseconds)
+            .clamp(
           0.0,
           1.0,
         );
@@ -1157,7 +1246,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         color: const Color(0xff141414),
         borderRadius: BorderRadius.vertical(top: Radius.circular(28.r)),
         clipBehavior: Clip.antiAlias,
-        child: ConstrainedBox(
+        child: BottomSystemSafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 15),
+            child: ConstrainedBox(
           constraints: BoxConstraints(
             maxHeight: MediaQuery.sizeOf(context).height * 0.88,
           ),
@@ -1228,21 +1321,20 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
                 // ── Recipient picker (with delivery state badges) ──
                 SizedBox(
-                  height: 88.h,
+                  height: 100.h,
                   child: ListView(
                     scrollDirection: Axis.horizontal,
+                    clipBehavior: Clip.none,
                     padding: EdgeInsets.symmetric(horizontal: 20.w),
                     children: [
                       // "Everyone" group chip — no delivery badge (not a user)
                       _NudgeRecipient(
                         label: 'Everyone',
-                        selected: _target.targetScope == 'all_friends',
+                        selected: _isEveryoneSelected,
                         accent: accent,
                         enabled: actionEnabled && _nudgeableFriends.isNotEmpty,
                         onTap: actionEnabled && _nudgeableFriends.isNotEmpty
-                            ? () => setState(
-                                () => _target = const NudgeTarget.allFriends(),
-                              )
+                            ? _selectEveryone
                             : null,
                         avatar: Container(
                           color: accent.withValues(alpha: 0.18),
@@ -1254,7 +1346,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                         ),
                       ),
                       for (final friend in _friends) ...[
-                        SizedBox(width: 10.w),
+                        SizedBox(width: 14.w),
                         Builder(
                           builder: (context) {
                             final online = _isOnline(friend.userId);
@@ -1265,19 +1357,13 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                               subtitle: online ? 'already online' : null,
                               selected:
                                   !online &&
-                                  _target.targetUserId == friend.userId,
+                                  _selectedUserIds.contains(friend.userId),
                               accent: accent,
                               enabled: actionEnabled && !online,
                               dimmed: online,
                               onTap: actionEnabled && !online
-                                  ? () => setState(
-                                      () => _target = NudgeTarget.singleFriend(
-                                        friend.userId,
-                                      ),
-                                    )
+                                  ? () => _toggleFriend(friend.userId)
                                   : null,
-                              // Delivery badge: volume icon or null.
-                              // Skull state is embedded inside the avatar widget.
                               deliveryBadge: (!failed && volumeBand != null)
                                   ? _VolumeBadgeIcon(band: volumeBand)
                                   : null,
@@ -1309,13 +1395,20 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                     children: [
                       // Left: Ring duration selector
                       _RingActionButton(
-                        durationSeconds: _ringDurations[_ringDurationIndex],
-                        accent: accent,
                         enabled: ringEnabled,
                         cooldownLabel: ringCooldown > Duration.zero
                             ? _cooldownLabel(ringCooldown)
                             : null,
-                        onTap: _sendRingAtCurrentDuration,
+                        onTap: () => unawaited(
+                          _sendRing(
+                            durationSeconds: _ringTapDurationSeconds,
+                          ),
+                        ),
+                        onDoubleTap: () => unawaited(
+                          _sendRing(
+                            durationSeconds: _ringDoubleTapDurationSeconds,
+                          ),
+                        ),
                       ),
 
                       // Center: Voice mic (press-and-hold, unchanged behavior)
@@ -1367,6 +1460,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                 SizedBox(height: 32.h),
               ],
             ),
+          ),
+        ),
           ),
         ),
       ),
@@ -1619,81 +1714,58 @@ class _SheetDivider extends StatelessWidget {
 
 // ── Ring action button ─────────────────────────────────────────────────────
 //
-// Circular button on the left of the three-element row. A single tap fires the
-// ring nudge at the displayed duration, then cycles to the next duration so
-// successive taps escalate intensity (3 s → 6 s → 9 s → 3 s…).
+// Circular button on the left of the three-element row. Matches the notify
+// button chrome (not the accent). Single tap sends a 5s ring; double tap
+// sends a 10s ring.
 
 class _RingActionButton extends StatelessWidget {
   const _RingActionButton({
-    required this.durationSeconds,
-    required this.accent,
     required this.enabled,
     required this.onTap,
+    required this.onDoubleTap,
     this.cooldownLabel,
   });
 
-  final int durationSeconds;
-  final Color accent;
   final bool enabled;
   final VoidCallback onTap;
+  final VoidCallback onDoubleTap;
   final String? cooldownLabel;
 
   @override
   Widget build(BuildContext context) {
-    final label = cooldownLabel ?? '${durationSeconds}s';
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         GestureDetector(
           onTap: enabled ? onTap : null,
+          onDoubleTap: enabled ? onDoubleTap : null,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 160),
             width: 72.r,
             height: 72.r,
             decoration: BoxDecoration(
               color: enabled
-                  ? accent.withValues(alpha: 0.12)
+                  ? const Color(0xff232323)
                   : const Color(0xff1a1a1a),
               shape: BoxShape.circle,
               border: Border.all(
                 color: enabled
-                    ? accent.withValues(alpha: 0.45)
-                    : Colors.white.withValues(alpha: 0.07),
+                    ? Colors.white.withValues(alpha: 0.18)
+                    : Colors.white.withValues(alpha: 0.06),
                 width: 1.5,
               ),
-              boxShadow: enabled
-                  ? [
-                      BoxShadow(
-                        color: accent.withValues(alpha: 0.12),
-                        blurRadius: 16.r,
-                      ),
-                    ]
-                  : null,
             ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.vibration_rounded,
-                  color: enabled ? accent : Colors.white24,
-                  size: 22.sp,
-                ),
-                SizedBox(height: 3.h),
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: enabled ? accent : Colors.white24,
-                    fontSize: 12.sp,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ],
+            child: Icon(
+              Icons.vibration_rounded,
+              color: enabled ? Colors.white70 : Colors.white24,
+              size: 30.sp,
             ),
           ),
         ),
         SizedBox(height: 8.h),
         Text(
-          'Ring',
+          cooldownLabel ?? 'Double tap',
+          textAlign: TextAlign.center,
           style: TextStyle(
             color: enabled ? Colors.white54 : Colors.white24,
             fontSize: 11.sp,
@@ -1752,7 +1824,8 @@ class _PushActionButton extends StatelessWidget {
         ),
         SizedBox(height: 8.h),
         Text(
-          cooldownLabel ?? 'Notify',
+          cooldownLabel ?? 'Tap to poke',
+          textAlign: TextAlign.center,
           style: TextStyle(
             color: enabled ? Colors.white54 : Colors.white24,
             fontSize: 11.sp,
@@ -1790,17 +1863,17 @@ class _VolumeBadgeIcon extends StatelessWidget {
       MediaVolumeBand.ok => (LucideIcons.volume2, const Color(0xff4caf50)),
     };
     return Container(
-      width: 18.r,
-      height: 18.r,
+      width: 26.r,
+      height: 26.r,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: const Color(0xff141414),
+        color: const Color(0xff1c1c1c),
         border: Border.all(
-          color: Colors.white.withValues(alpha: 0.18),
-          width: 1,
+          color: Colors.white.withValues(alpha: 0.28),
+          width: 1.2,
         ),
       ),
-      child: Center(child: Icon(icon, size: 10.sp, color: color)),
+      child: Center(child: Icon(icon, size: 15.sp, color: color)),
     );
   }
 }
@@ -1852,7 +1925,7 @@ class _NudgeRecipient extends StatelessWidget {
         onTap: tap,
         borderRadius: BorderRadius.circular(18.r),
         child: SizedBox(
-          width: 60.w,
+          width: 68.w,
           child: Column(
             children: [
               Stack(
@@ -1879,8 +1952,8 @@ class _NudgeRecipient extends StatelessWidget {
                   ),
                   if (deliveryBadge != null)
                     Positioned(
-                      right: -2,
-                      bottom: -2,
+                      right: -6,
+                      bottom: -6,
                       child: deliveryBadge!,
                     ),
                 ],

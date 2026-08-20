@@ -242,6 +242,48 @@ class LogManager {
     return File('${directory.path}/${LogLine.dailyFileName(DateTime.now())}');
   }
 
+  static Future<void> flush() async {
+    await initialize();
+    await _writeChain;
+  }
+
+  static Future<List<File>> retainedLogFiles() async {
+    await flush();
+    final directory = _directory;
+    if (directory == null || !directory.existsSync()) return const [];
+    final files = <File>[];
+    await for (final entity in directory.list()) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      if (!name.startsWith('oneone_logs_') || !name.endsWith('.txt')) continue;
+      files.add(entity);
+    }
+    files.sort((a, b) => a.path.compareTo(b.path));
+    return files;
+  }
+
+  static String get userId => _userId;
+  static String get groupId => _groupId;
+  static String get deviceModel => _deviceModel;
+  static String get androidVersion => _androidVersion;
+  static String get appVersion => _appVersion;
+
+  static Map<String, String> reportTags({
+    String? userId,
+    String? groupId,
+  }) {
+    return {
+      'userId': (userId != null && userId.trim().isNotEmpty) ? userId.trim() : _userId,
+      'groupId': (groupId != null && groupId.trim().isNotEmpty)
+          ? groupId.trim()
+          : _groupId,
+      'appVersion': _appVersion,
+      'deviceModel': _deviceModel,
+      'androidVersion': _androidVersion,
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
+    };
+  }
+
   static Future<String> readTodayText() async {
     await initialize();
     await _writeChain;

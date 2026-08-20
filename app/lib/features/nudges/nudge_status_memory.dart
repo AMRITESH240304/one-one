@@ -1,3 +1,21 @@
+import 'models/media_volume_reading.dart';
+import 'nudge_cooldowns.dart';
+
+/// Per-recipient delivery signifier restored when the sheet is reopened.
+class LastNudgeRecipientSignifier {
+  const LastNudgeRecipientSignifier({
+    required this.userId,
+    required this.displayName,
+    required this.failed,
+    this.band,
+  });
+
+  final String userId;
+  final String displayName;
+  final bool failed;
+  final MediaVolumeBand? band;
+}
+
 /// Lifecycle stage of the most recently sent nudge in a group.
 ///
 /// Unlike [NudgeErrorSeverity]/[NudgeFailureMemory], which only record delivery
@@ -14,12 +32,16 @@ class LastNudgeState {
     required this.status,
     required this.message,
     required this.at,
+    this.kind,
+    this.signifiers = const [],
   });
 
   final String eventId;
   final LastNudgeStatus status;
   final String message;
   final DateTime at;
+  final NudgeKind? kind;
+  final List<LastNudgeRecipientSignifier> signifiers;
 }
 
 /// In-memory (per app process) record of the most recently sent nudge **per

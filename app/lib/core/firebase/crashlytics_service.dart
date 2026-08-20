@@ -104,6 +104,16 @@ class CrashlyticsService {
     );
   }
 
+  /// True when the previous process terminated from an unhandled crash.
+  static Future<bool> didCrashOnPreviousExecution() async {
+    try {
+      return await _crashlytics.didCrashOnPreviousExecution();
+    } catch (error) {
+      debugPrint('[Crashlytics] didCrashOnPreviousExecution failed: $error');
+      return false;
+    }
+  }
+
   static Future<void> _primeSessionKeys() async {
     try {
       final package = await PackageInfo.fromPlatform();

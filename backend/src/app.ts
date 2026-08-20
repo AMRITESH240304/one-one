@@ -10,6 +10,7 @@ import { createLiveKitRoutes } from "./routes/liveKitRoutes.js";
 import { createNotificationRoutes } from "./routes/notificationRoutes.js";
 import { createSubscriptionRoutes } from "./routes/subscriptionRoutes.js";
 import { createWellKnownRoutes } from "./routes/wellKnownRoutes.js";
+import { createDeviceLogRoutes } from "./routes/deviceLogRoutes.js";
 
 export function createApp() {
   const app = express();
@@ -35,6 +36,7 @@ export function createApp() {
   app.use(createLiveKitRoutes());
   app.use(createNotificationRoutes());
   app.use(createSubscriptionRoutes());
+  app.use(createDeviceLogRoutes());
 
   app.use((_request, response) => {
     response.status(404).json({

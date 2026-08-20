@@ -74,7 +74,7 @@ object VoiceNudgeNotifications {
             senderUserId,
             VoiceNudgeNotifications.idFor(eventId),
         )
-        val contentIntent = PendingIntent.getActivity(
+        val contentIntent = BrandedSplashIntents.mainActivity(
             context,
             requestCode(eventId, "open"),
             openIntent,
@@ -156,7 +156,7 @@ object VoiceNudgeNotifications {
             senderUserId,
             notificationId,
         )
-        val contentIntent = PendingIntent.getActivity(
+        val contentIntent = BrandedSplashIntents.mainActivity(
             context,
             requestCode(eventId, "open"),
             openIntent,
@@ -219,7 +219,7 @@ object VoiceNudgeNotifications {
                 putExtra(VoiceNudgeContract.extraNotificationId, idFor(eventId))
             }
         }
-        val contentIntent = PendingIntent.getActivity(
+        val contentIntent = BrandedSplashIntents.mainActivity(
             context,
             requestCode(eventId, "response"),
             openIntent,
@@ -256,7 +256,7 @@ object VoiceNudgeNotifications {
         val openIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        val contentIntent = PendingIntent.getActivity(
+        val contentIntent = BrandedSplashIntents.mainActivity(
             context,
             7002,
             openIntent,
@@ -302,7 +302,7 @@ object VoiceNudgeNotifications {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(VoiceNudgeContract.extraGroupId, groupId)
         }
-        val contentIntent = PendingIntent.getActivity(
+        val contentIntent = BrandedSplashIntents.mainActivity(
             context,
             requestCode("chat_$groupId", "open"),
             openIntent,
@@ -371,7 +371,7 @@ object VoiceNudgeNotifications {
     ): Notification.Builder {
         if (responseUrl.isNullOrBlank()) return this
         val notificationId = idFor(eventId)
-        val acceptPendingIntent = PendingIntent.getActivity(
+        val acceptPendingIntent = BrandedSplashIntents.mainActivity(
             context,
             requestCode(eventId, "accept"),
             acceptIntent(context, eventId, groupId, notificationId),

@@ -15,12 +15,14 @@ void main() {
 
   test('speech-tuned AAC is about half the previous 64 kbps payload', () {
     const shortMs = 1500;
-    const longMs = 6000;
+    final longMs = VoiceNudgeAudio.maxRecordingDuration.inMilliseconds;
 
+    expect(VoiceNudgeAudio.maxRecordingDuration, const Duration(seconds: 5));
+    expect(VoiceNudgeAudio.maxAcceptedDurationMs, 6000);
     expect(VoiceNudgeAudio.expectedPayloadBytes(shortMs), 8048);
     expect(VoiceNudgeAudio.legacyPayloadBytes(shortMs), 14048);
-    expect(VoiceNudgeAudio.expectedPayloadBytes(longMs), 26048);
-    expect(VoiceNudgeAudio.legacyPayloadBytes(longMs), 50048);
+    expect(VoiceNudgeAudio.expectedPayloadBytes(longMs), 22048);
+    expect(VoiceNudgeAudio.legacyPayloadBytes(longMs), 42048);
 
     final shortReduction =
         1 -

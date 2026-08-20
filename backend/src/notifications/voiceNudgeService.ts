@@ -25,7 +25,7 @@ import {
 // ---------------------------------------------------------------------------
 
 type NudgeTarget = {
-  targetScope: "single_friend" | "all_friends";
+  targetScope: "single_friend" | "all_friends" | "selected_friends";
   targetUserId?: string;
 };
 
@@ -525,7 +525,7 @@ async function writeNudgeNotificationEvent(input: {
   eventId: string;
   senderUserId: string;
   eventType: "ring_nudge" | "voice_nudge";
-  targetScope: "single_friend" | "all_friends";
+  targetScope: "single_friend" | "all_friends" | "selected_friends";
   targetUserId?: string;
   targetUserIds: string[];
   createdAt: number;

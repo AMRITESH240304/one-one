@@ -65,6 +65,7 @@ dependencies:
   purchases_flutter: ^10.8.0
   purchases_ui_flutter: ^10.8.0
   lucide_flutter: ^1.33.0
+  archive: ^4.0.7
 
 dev_dependencies:
   flutter_test:

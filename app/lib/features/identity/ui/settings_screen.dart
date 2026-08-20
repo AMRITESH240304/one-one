@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../../app/accent_theme.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/logging/debug_logs_sheet.dart';
+import '../../../core/logging/send_feedback_sheet.dart';
 import '../../../core/ui/bottom_system_inset.dart';
 import '../../groups/models/group_summary.dart';
 import '../../subscriptions/eleven_pro_paywall_screen.dart';
@@ -987,6 +988,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _SettingsSurface(
                 padding: EdgeInsets.zero,
                 children: [
+                  _NavigationRow(
+                    icon: Icons.feedback_outlined,
+                    label: 'Send Feedback',
+                    onTap: () => showSendFeedbackSheet(
+                      context,
+                      userId: _session.userId,
+                    ),
+                  ),
+                  const _SurfaceDivider(indent: 52),
                   _NavigationRow(
                     icon: Icons.bug_report_outlined,
                     label: 'Debug Logs',

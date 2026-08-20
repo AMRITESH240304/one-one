@@ -27,8 +27,9 @@ export type FriendLiveInput = {
 export type NudgeInput = {
   groupId: string;
   senderUserId: string;
-  targetScope: "single_friend" | "all_friends";
+  targetScope: "single_friend" | "all_friends" | "selected_friends";
   targetUserId?: string;
+  targetUserIds?: string[];
 };
 
 export type GoneOfflineReason =
@@ -265,11 +266,23 @@ export async function sendNudgeNotification(input: NudgeInput) {
     await requireActiveGroupMember(input.groupId, input.targetUserId);
   }
 
+  if (input.targetScope === "selected_friends") {
+    const selected = uniqueRecipientIds(input.targetUserIds, input.senderUserId);
+    if (selected.length === 0) {
+      throw new HttpError(400, "target_users_required", "targetUserIds is required.");
+    }
+    for (const userId of selected) {
+      await requireActiveGroupMember(input.groupId, userId);
+    }
+  }
+
   const now = nowSeconds();
   const recipientUserIds =
     input.targetScope === "single_friend"
       ? [input.targetUserId!].filter((userId) => userId !== input.senderUserId)
-      : await activeRecipientUserIds(input.groupId, input.senderUserId);
+      : input.targetScope === "selected_friends"
+        ? uniqueRecipientIds(input.targetUserIds, input.senderUserId)
+        : await activeRecipientUserIds(input.groupId, input.senderUserId);
   await enforceNudgeRateLimits({
     groupId: input.groupId,
     senderUserId: input.senderUserId,
@@ -616,6 +629,10 @@ function isNotificationEvent(value: unknown): value is NotificationEventRecord {
     typeof value.createdAt === "number" &&
     Array.isArray(value.targetUserIds)
   );
+}
+
+function uniqueRecipientIds(userIds: string[] | undefined, senderUserId: string) {
+  return [...new Set(userIds ?? [])].filter((userId) => userId !== senderUserId);
 }
 
 function nowSeconds() {

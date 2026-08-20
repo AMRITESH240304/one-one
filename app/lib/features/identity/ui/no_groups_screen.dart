@@ -3,12 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
+import '../../../core/logging/post_crash_report_dialog.dart';
 import '../data/identity_repository.dart';
 import '../models/identity_session.dart';
 import 'group_action_screen.dart';
 import 'settings_screen.dart';
 
-class NoGroupsScreen extends StatelessWidget {
+class NoGroupsScreen extends StatefulWidget {
   const NoGroupsScreen({
     super.key,
     required this.session,
@@ -18,6 +19,25 @@ class NoGroupsScreen extends StatelessWidget {
   final IdentitySession session;
   final IdentityRepository identityRepository;
 
+  @override
+  State<NoGroupsScreen> createState() => _NoGroupsScreenState();
+}
+
+class _NoGroupsScreenState extends State<NoGroupsScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        showPostCrashReportDialogIfNeeded(
+          context,
+          userId: widget.session.userId,
+        ),
+      );
+    });
+  }
+
   Route<void> _slideUpRoute(GroupActionMode mode) {
     return PageRouteBuilder<void>(
       transitionDuration: const Duration(milliseconds: 320),
@@ -25,8 +45,8 @@ class NoGroupsScreen extends StatelessWidget {
       pageBuilder: (context, animation, secondaryAnimation) {
         return GroupActionScreen(
           mode: mode,
-          session: session,
-          identityRepository: identityRepository,
+          session: widget.session,
+          identityRepository: widget.identityRepository,
         );
       },
       transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -66,8 +86,8 @@ class NoGroupsScreen extends StatelessWidget {
             unawaited(
               SettingsScreen.open(
                 context,
-                session: session,
-                identityRepository: identityRepository,
+                session: widget.session,
+                identityRepository: widget.identityRepository,
               ),
             );
           },

@@ -13,6 +13,17 @@
              too. Default behavior skips the icon for those starts, which
              looks like a blank yellow screen before the first Flutter frame. -->
         <item name="android:windowSplashScreenBehavior">icon_preferred</item>
+        <!-- Starting window / notification cold start. Theme.SplashScreen
+             attributes are not applied to the first frame of a
+             notification-started activity, so this is the actual first
+             paint — yellow + centered logo, matching the splash. -->
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <!-- Platform API 31+ copies of the AndroidX splash attrs. Needed
+             so the system splash (not just the compat library) uses yellow
+             instead of the default light/white window. -->
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_icon</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/splash_background</item>
     </style>
     <!-- Applied once the splash is dismissed; keeps the same background so
          there is no flash while Flutter's first real frame composites in. -->

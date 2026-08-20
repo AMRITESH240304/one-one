@@ -149,8 +149,10 @@ class ApiClient {
     String absoluteUrl,
     List<int> bytes, {
     required Map<String, String> headers,
+    Duration? timeout,
   }) async {
     final uri = Uri.parse(absoluteUrl);
+    final requestTimeout = timeout ?? _requestTimeout;
     final response = await _tracedRequest(
       url: uri.toString(),
       method: HttpMethod.Put,
@@ -161,7 +163,7 @@ class ApiClient {
                 body: bytes,
               ) ??
               http.put(uri, headers: headers, body: bytes))
-          .timeout(_requestTimeout),
+          .timeout(requestTimeout),
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ApiException(

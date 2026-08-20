@@ -33,19 +33,26 @@ const goneOfflineSchema = z.object({
   reason: z.enum(["peer_left", "inactivity", "daily_usage_cap", "network_loss"])
 });
 
-const nudgeSchema = z.discriminatedUnion("targetScope", [
+const nudgeTargetSchema = z.discriminatedUnion("targetScope", [
   z.object({
     targetScope: z.literal("single_friend"),
     targetUserId: z.string().min(1)
   }),
   z.object({
     targetScope: z.literal("all_friends")
+  }),
+  z.object({
+    targetScope: z.literal("selected_friends"),
+    targetUserIds: z.array(z.string().min(1)).min(1)
   })
 ]);
 
+const nudgeSchema = nudgeTargetSchema;
+
 const voiceNudgeQuerySchema = z.object({
-  targetScope: z.enum(["single_friend", "all_friends"]),
-  targetUserId: z.string().min(1).optional()
+  targetScope: z.enum(["single_friend", "all_friends", "selected_friends"]),
+  targetUserId: z.string().min(1).optional(),
+  targetUserIds: z.union([z.string().min(1), z.array(z.string().min(1))]).optional()
 });
 
 const recipientDeviceSchema = z.object({
@@ -55,36 +62,30 @@ const recipientDeviceSchema = z.object({
   displayName: z.string().min(1).optional()
 });
 
-const voiceNudgeUploadSchema = z.discriminatedUnion("targetScope", [
+const voiceNudgeUploadSchema = z.intersection(
+  nudgeTargetSchema,
   z.object({
-    targetScope: z.literal("single_friend"),
-    targetUserId: z.string().min(1),
     durationMs: z.number().int().positive(),
     // New fields — client provides these when reading RTDB directly.
     // Optional during migration; backend falls back to RTDB reads if missing.
     recipientDevices: z.array(recipientDeviceSchema).min(1).optional(),
     senderName: z.string().min(1).optional()
-  }),
-  z.object({
-    targetScope: z.literal("all_friends"),
-    durationMs: z.number().int().positive(),
-    recipientDevices: z.array(recipientDeviceSchema).min(1).optional(),
-    senderName: z.string().min(1).optional()
   })
-]);
+);
 
 const voiceNudgeCompleteSchema = z.object({
   uploadTicket: z.string().min(1).optional()
 });
 
-const ringNudgeSchema = z.object({
-  targetScope: z.enum(["single_friend", "all_friends"]),
-  targetUserId: z.string().min(1).optional(),
-  durationSeconds: z.union([z.literal(3), z.literal(5), z.literal(10)]),
-  // Optional during migration; backend falls back to RTDB reads if missing.
-  recipientDevices: z.array(recipientDeviceSchema).min(1).optional(),
-  senderName: z.string().min(1).optional()
-});
+const ringNudgeSchema = z.intersection(
+  nudgeTargetSchema,
+  z.object({
+    durationSeconds: z.union([z.literal(3), z.literal(5), z.literal(10)]),
+    // Optional during migration; backend falls back to RTDB reads if missing.
+    recipientDevices: z.array(recipientDeviceSchema).min(1).optional(),
+    senderName: z.string().min(1).optional()
+  })
+);
 
 const voiceNudgeAckSchema = z.object({
   status: z.enum(["played", "failed"])
@@ -160,7 +161,8 @@ export function createNotificationRoutes() {
         groupId,
         senderUserId: authRequest.auth.uid,
         targetScope: body.targetScope,
-        targetUserId: "targetUserId" in body ? body.targetUserId : undefined
+        targetUserId: "targetUserId" in body ? body.targetUserId : undefined,
+        targetUserIds: "targetUserIds" in body ? body.targetUserIds : undefined
       });
 
       response.status(200).json(result);
@@ -217,27 +219,16 @@ export function createNotificationRoutes() {
       if (!recipientDevices || !senderName) {
         const db = getRealtimeDatabase();
 
-        const targetUserId = body.targetUserId;
-        let recipientUserIds: string[];
-        if (body.targetScope === "single_friend" && targetUserId) {
-          recipientUserIds = targetUserId !== authRequest.auth.uid
-            ? [targetUserId] : [];
-        } else {
-          const snap = await db.ref(`groupMembers/${groupId}`).get();
-          recipientUserIds = [];
-          if (snap.exists()) {
-            const members = snap.val() as Record<string, unknown>;
-            for (const [uid, val] of Object.entries(members)) {
-              if (
-                uid !== authRequest.auth.uid &&
-                typeof val === "object" && val !== null &&
-                (val as Record<string, unknown>).memberState === "active"
-              ) {
-                recipientUserIds.push(uid);
-              }
-            }
-          }
-        }
+        const targetUserId = "targetUserId" in body ? body.targetUserId : undefined;
+        const targetUserIds = "targetUserIds" in body ? body.targetUserIds : undefined;
+        const recipientUserIds = await resolveFallbackRecipientUserIds({
+          db,
+          groupId,
+          senderUserId: authRequest.auth.uid,
+          targetScope: body.targetScope,
+          targetUserId,
+          targetUserIds
+        });
 
         const devices: Array<{ userId: string; deviceId: string; fcmToken: string; displayName?: string }> = [];
         for (const uid of recipientUserIds) {
@@ -268,7 +259,7 @@ export function createNotificationRoutes() {
         groupId,
         senderUserId: authRequest.auth.uid,
         targetScope: body.targetScope,
-        targetUserId: body.targetUserId,
+        targetUserId: "targetUserId" in body ? body.targetUserId : undefined,
         durationSeconds: body.durationSeconds,
         recipientDevices: recipientDevices!,
         senderName: senderName!
@@ -297,27 +288,16 @@ export function createNotificationRoutes() {
         // Resolve recipients
         const targetUserId =
           "targetUserId" in body ? body.targetUserId : undefined;
-        let recipientUserIds: string[];
-        if (targetUserId) {
-          recipientUserIds = targetUserId !== authRequest.auth.uid
-            ? [targetUserId]
-            : [];
-        } else {
-          const memberSnap = await db.ref(`groupMembers/${groupId}`).get();
-          recipientUserIds = [];
-          if (memberSnap.exists()) {
-            const members = memberSnap.val() as Record<string, unknown>;
-            for (const [uid, val] of Object.entries(members)) {
-              if (
-                uid !== authRequest.auth.uid &&
-                typeof val === "object" && val !== null &&
-                (val as Record<string, unknown>).memberState === "active"
-              ) {
-                recipientUserIds.push(uid);
-              }
-            }
-          }
-        }
+        const targetUserIds =
+          "targetUserIds" in body ? body.targetUserIds : undefined;
+        const recipientUserIds = await resolveFallbackRecipientUserIds({
+          db,
+          groupId,
+          senderUserId: authRequest.auth.uid,
+          targetScope: body.targetScope,
+          targetUserId,
+          targetUserIds
+        });
 
         // Read recipient devices (FCM tokens) from RTDB
         const devices: Array<{ userId: string; deviceId: string; fcmToken: string; displayName?: string }> = [];
@@ -547,6 +527,40 @@ export function createNotificationRoutes() {
   );
 
   return router;
+}
+
+async function resolveFallbackRecipientUserIds(input: {
+  db: ReturnType<typeof getRealtimeDatabase>;
+  groupId: string;
+  senderUserId: string;
+  targetScope: "single_friend" | "all_friends" | "selected_friends";
+  targetUserId?: string;
+  targetUserIds?: string[];
+}): Promise<string[]> {
+  if (input.targetScope === "single_friend" && input.targetUserId) {
+    return input.targetUserId !== input.senderUserId ? [input.targetUserId] : [];
+  }
+  if (input.targetScope === "selected_friends") {
+    return [...new Set(input.targetUserIds ?? [])].filter(
+      (userId) => userId !== input.senderUserId
+    );
+  }
+  const snap = await input.db.ref(`groupMembers/${input.groupId}`).get();
+  const recipientUserIds: string[] = [];
+  if (snap.exists()) {
+    const members = snap.val() as Record<string, unknown>;
+    for (const [uid, val] of Object.entries(members)) {
+      if (
+        uid !== input.senderUserId &&
+        typeof val === "object" &&
+        val !== null &&
+        (val as Record<string, unknown>).memberState === "active"
+      ) {
+        recipientUserIds.push(uid);
+      }
+    }
+  }
+  return recipientUserIds;
 }
 
 async function readDisplayNameForAck(

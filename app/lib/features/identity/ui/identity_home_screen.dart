@@ -19,9 +19,11 @@ import '../../../core/firebase/app_database.dart';
 import '../../../core/firebase/app_telemetry.dart';
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/firebase/firebase_analytics_service.dart';
+import '../../../core/logging/device_log_report.dart';
 import '../../../core/logging/livekit_lifecycle_logger.dart';
 import '../../../core/logging/log_level.dart';
 import '../../../core/logging/log_manager.dart';
+import '../../../core/logging/post_crash_report_dialog.dart';
 import '../../../core/logging/user_facing_copy.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/storage/cloudinary_delivery.dart';
@@ -280,6 +282,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       AccentThemeController.setAccentKey(_session.settings.accentColorKey);
+      unawaited(
+        showPostCrashReportDialogIfNeeded(
+          context,
+          userId: _session.userId,
+          groupId: _selectedGroup?.groupId,
+        ),
+      );
     });
     unawaited(
       AnalyticsService.logScreenView(
@@ -308,7 +317,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       (nudge) {
         _nudgeInbox.upsert(nudge);
         if (_appLifecycle == AppLifecycleState.resumed &&
-            !_incomingPromptBusy) {
+            !_incomingPromptBusy &&
+            !DeviceLogReport.uiBlocking) {
           unawaited(_presentIncomingNudgePrompt());
         }
       },
@@ -1127,7 +1137,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     String? preferNudgeId,
     bool ignoreInFlight = false,
   }) async {
-    if (!mounted || _inPictureInPicture || _loadingGroups) return;
+    if (!mounted ||
+        _inPictureInPicture ||
+        _loadingGroups ||
+        DeviceLogReport.uiBlocking) {
+      return;
+    }
     if (!ignoreInFlight && (_nudgeActionInFlight || _incomingPromptBusy)) {
       return;
     }
