@@ -914,6 +914,12 @@ class VoiceNudgePlaybackService : Service() {
                 VoiceNudgeDiagnostics.tag,
                 "[FCM-D] acknowledge: missing ack URL/token, skipping network ack",
             )
+            DeviceLog.warn(
+                "NudgeService",
+                "Delivery ack skipped: missing ackUrl/token status=$status " +
+                    "eventId=${request.eventId}",
+                groupId = request.groupId,
+            )
             mainHandler.post(after)
             return
         }
@@ -925,6 +931,12 @@ class VoiceNudgePlaybackService : Service() {
                 VoiceNudgeDiagnostics.tag,
                 "[FCM-W9] Delivery ack skipped — executor is shut down " +
                     "eventSuffix=${request.eventId.takeLast(6)}",
+            )
+            DeviceLog.warn(
+                "NudgeService",
+                "Delivery ack skipped: executor shut down status=$status " +
+                    "eventId=${request.eventId}",
+                groupId = request.groupId,
             )
             mainHandler.post(after)
             return
@@ -960,8 +972,21 @@ class VoiceNudgePlaybackService : Service() {
                     "[FCM-16] Delivery acknowledgement status=$status " +
                         "reason=${reason ?: "none"} HTTP=$responseCode",
                 )
+                DeviceLog.info(
+                    "NudgeService",
+                    "Delivery ack sent status=$status reason=${reason ?: "none"} " +
+                        "attention=${attention ?: "-"} HTTP=$responseCode " +
+                        "eventId=${request.eventId}",
+                    groupId = request.groupId,
+                )
             } catch (error: Exception) {
                 VoiceNudgeDiagnostics.logFailure("[FCM-E7] Delivery acknowledgement", error)
+                DeviceLog.warn(
+                    "NudgeService",
+                    "Delivery ack failed status=$status reason=${reason ?: "none"} " +
+                        "eventId=${request.eventId} detail=${error.message ?: "-"}",
+                    groupId = request.groupId,
+                )
             } finally {
                 connection?.disconnect()
                 mainHandler.post(after)
