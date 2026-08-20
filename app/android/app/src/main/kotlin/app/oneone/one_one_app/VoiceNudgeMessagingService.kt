@@ -176,12 +176,15 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             kind == VoiceNudgeContract.kindPush
         ) {
             MediaVolume.report(this, data["groupId"])
+            // Note: do NOT pass userId=data["senderUserId"] here. The structured
+            // context field must reflect *this* device (the receiver), not the
+            // sender — otherwise the log looks like the sender received it.
             DeviceLog.info(
                 "NudgeService",
                 "FCM trigger received kind=$kind eventId=${data["eventId"] ?: "-"} " +
-                    "sender=${data["senderName"] ?: "-"}",
+                    "sender=${data["senderName"] ?: "-"} " +
+                    "senderUserId=${data["senderUserId"] ?: "-"}",
                 groupId = data["groupId"],
-                userId = data["senderUserId"],
             )
         }
         if (kind == null) {
@@ -689,6 +692,14 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             VoiceNudgeDiagnostics.tag,
             "[NUDGE-DELIVERY-02] sender received status=$status " +
                 "eventSuffix=${eventId.takeLast(6)} reason=${data["reason"].orEmpty()}",
+        )
+        DeviceLog.info(
+            "NudgeService",
+            "Delivery result received status=$status eventId=$eventId " +
+                "reason=${data["reason"] ?: "-"} attention=${data["attention"] ?: "-"} " +
+                "recipientUserId=${data["recipientUserId"] ?: "-"} " +
+                "recipientName=${data["recipientName"] ?: "-"}",
+            groupId = data["groupId"],
         )
         NudgeDeliveryResultDispatcher.signal(
             mapOf(

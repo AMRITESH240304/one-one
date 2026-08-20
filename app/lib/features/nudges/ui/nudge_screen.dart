@@ -5,9 +5,12 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+import 'package:lucide_icons/lucide_icons.dart';
 import 'package:record/record.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../../core/logging/log_level.dart';
+import '../../../core/logging/log_manager.dart';
 import '../../../core/logging/user_facing_copy.dart';
 import '../../../core/network/api_client.dart';
 import '../../groups/models/group_member_summary.dart';
@@ -21,6 +24,41 @@ import '../models/media_volume_reading.dart';
 import '../nudge_cooldowns.dart';
 import '../nudge_failure_memory.dart';
 import '../nudge_status_memory.dart';
+
+/// Redesigned 4-step send flow (Prompt 1).
+///
+/// Voice walks the full flow: `sendingVoice` (1) → `confirmingVoice` (2) →
+/// `awaitingVoice` (3, live per-recipient signifiers) → final signifiers (4).
+/// Ring and push skip the "confirming"/live steps and go straight from
+/// `sendingRing`/`sendingPush` to the final signifier state (4), with no
+/// low-volume step.
+enum _SendFlow {
+  idle,
+  sendingVoice,
+  confirmingVoice,
+  awaitingVoice,
+  sendingRing,
+  sendingPush,
+}
+
+/// Lucide icon + color mapping for per-participant volume signifiers.
+/// >50% → green Volume2 · <50% → yellow Volume1 · <25% → red Volume ·
+/// muted → red VolumeX (iOS speaker-with-X).
+extension _VolumeBandSignifierX on MediaVolumeBand {
+  IconData get lucideIcon => switch (this) {
+    MediaVolumeBand.ok => LucideIcons.volume2,
+    MediaVolumeBand.low => LucideIcons.volume1,
+    MediaVolumeBand.veryLow => LucideIcons.volume,
+    MediaVolumeBand.muted => LucideIcons.volumeX,
+  };
+
+  Color get badgeColor => switch (this) {
+    MediaVolumeBand.ok => const Color(0xff9bdc28),
+    MediaVolumeBand.low => const Color(0xffe0a83c),
+    MediaVolumeBand.veryLow => const Color(0xffff6b6f),
+    MediaVolumeBand.muted => const Color(0xffff6b6f),
+  };
+}
 
 Future<void> showNudgeBottomSheet(
   BuildContext context, {
@@ -69,7 +107,10 @@ class _QuickNudgeSheet extends StatefulWidget {
 }
 
 class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
-  static const _maxVoiceDuration = Duration(seconds: 6);
+  // Reduced from 6s to 5s (Prompt 10). Configurable: change this single
+  // constant to 4 or 5 seconds and the recording cap, progress ring and
+  // copy all follow. Receiver-side playback is unaffected.
+  static const _maxVoiceDuration = Duration(seconds: 5);
   static const _autoDismissDelay = Duration(seconds: 5);
 
   final NudgeRepository _repository = NudgeRepository();
@@ -104,6 +145,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   final Map<String, NudgeDeliveryResult> _resultsByUserId = {};
   MediaVolumeFeedback _rtdbVolumeFeedback = MediaVolumeFeedback.none;
 
+  // Redesigned send flow (Prompt 1) and ring duration selector state.
+  _SendFlow _flow = _SendFlow.idle;
+  int _ringDurationSeconds = 3;
+  Timer? _volumeRefreshTimer;
+
   static const _deliveryConfirmationTimeout = Duration(seconds: 12);
 
   @override
@@ -119,6 +165,29 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     );
     _restorePersistedFailures();
     _restoreLastNudgeStatus();
+    // Live volume signifiers (Prompt 2): load once now, then refresh on a
+    // cadence so the badges track each participant's current volume.
+    unawaited(_refreshVolumeFeedback());
+    _volumeRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_refreshVolumeFeedback());
+    });
+  }
+
+  Future<void> _refreshVolumeFeedback() async {
+    final friends = _friends;
+    if (friends.isEmpty) return;
+    final feedback = await MediaVolumeStore.instance.feedbackFor(
+      groupId: widget.group.groupId,
+      recipients: [
+        for (final friend in friends)
+          MediaVolumeRecipient(
+            userId: friend.userId,
+            displayName: friend.displayName,
+          ),
+      ],
+    );
+    if (!mounted) return;
+    setState(() => _rtdbVolumeFeedback = feedback);
   }
 
   /// Re-surface the latest failure reason for anyone who didn't receive the
@@ -208,6 +277,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   bool _isOnline(String userId) => widget.onlineUserIds.contains(userId);
 
+  /// Fresh per-participant volume band for the picker/status signifiers.
+  MediaVolumeBand? _volumeBandFor(String userId) =>
+      _rtdbVolumeFeedback.bandsByUserId[userId];
+
   /// Friends who can actually be nudged (not already in the live session).
   List<GroupMemberSummary> get _nudgeableFriends =>
       _friends.where((f) => !_isOnline(f.userId)).toList(growable: false);
@@ -226,6 +299,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     _cooldownTicker?.cancel();
     _deliveryTimeoutTimer?.cancel();
     _autoDismissTimer?.cancel();
+    _volumeRefreshTimer?.cancel();
     unawaited(_deliverySub?.cancel());
     if (_recording) unawaited(_recorder.stop());
     unawaited(_recorder.dispose());
@@ -371,6 +445,13 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     required List<_PendingRecipient> expected,
   }) {
     if (eventId == null || eventId.isEmpty) return;
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Awaiting delivery confirmation eventId=$eventId '
+          'expected=[${expected.map((e) => '${e.displayName}:${e.userId}').join(', ')}]',
+      groupId: widget.group.groupId,
+    );
     _deliveryTimeoutTimer?.cancel();
     _autoDismissTimer?.cancel();
     setState(() {
@@ -392,7 +473,26 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   }
 
   void _onDeliveryResult(NudgeDeliveryResult result) {
-    if (!mounted || result.eventId != _awaitingEventId) return;
+    if (!mounted) return;
+    if (result.eventId != _awaitingEventId) {
+      LogManager.log(
+        LogLevel.warn,
+        'NudgeService',
+        'Delivery result ignored: eventId mismatch result=${result.eventId} '
+            'awaiting=${_awaitingEventId} status=${result.status}',
+        groupId: widget.group.groupId,
+      );
+      return;
+    }
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Delivery result matched eventId=${result.eventId} status=${result.status} '
+          'reason=${result.reason ?? '-'} attention=${result.attention ?? '-'} '
+          'recipientUserId=${result.recipientUserId ?? '-'} '
+          'recipientName=${result.recipientName ?? '-'}',
+      groupId: widget.group.groupId,
+    );
 
     // Match result to an expected recipient by userId first, then by name.
     String? matchedId = result.recipientUserId;
@@ -440,10 +540,25 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   void _finalizeDeliverySummary({required bool timedOut}) {
     if (!mounted) return;
+    LogManager.log(
+      timedOut ? LogLevel.warn : LogLevel.info,
+      'NudgeService',
+      'Finalizing delivery summary timedOut=$timedOut '
+          'results=[${_resultsByUserId.entries.map((e) => '${e.key}:${e.value.status}').join(', ')}] '
+          'expected=[${_expectedRecipients.keys.join(', ')}]',
+      groupId: widget.group.groupId,
+    );
     final expected = _expectedRecipients.values.toList(growable: false);
     // Synthesize timeout failures for anyone without a result.
     for (final pending in expected) {
       if (!_resultsByUserId.containsKey(pending.userId)) {
+        LogManager.log(
+          LogLevel.warn,
+          'NudgeService',
+          'No delivery result for ${pending.displayName} (${pending.userId}); '
+              'synthesizing failed/${timedOut ? 'timeout' : 'unknown'}',
+          groupId: widget.group.groupId,
+        );
         _resultsByUserId[pending.userId] = NudgeDeliveryResult(
           eventId: _awaitingEventId ?? '',
           status: 'failed',
@@ -693,8 +808,21 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     return seconds <= 1 ? 'wait 1s' : 'wait ${seconds.ceil()}s';
   }
 
+  /// Cycles the ring duration selector 3s \u2192 6s \u2192 9s \u2192 3s (Prompt 1).
+  void _cycleRingDuration() {
+    const durations = [3, 6, 9];
+    final next = durations[(durations.indexOf(_ringDurationSeconds) + 1) %
+        durations.length];
+    setState(() => _ringDurationSeconds = next);
+    if (widget.hapticsEnabled) {
+      unawaited(HapticFeedback.selectionClick());
+    }
+  }
+
   Future<void> _sendRing(int seconds) async {
     if (_cooldownRemaining(NudgeKind.ring) > Duration.zero) return;
+    // Ring skips the "confirming"/live steps and has no low-volume step \u2014
+    // it resolves straight to the final signifier state (Prompt 1).
     await _send(
       () => _repository.sendRing(
         groupId: widget.group.groupId,
@@ -702,8 +830,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         durationSeconds: seconds,
       ),
       kind: NudgeKind.ring,
-      awaitsDeliveryConfirmation: true,
-      waitingMessage: 'Ringing\u2026 confirming it played',
+      sendingFlow: _SendFlow.sendingRing,
     );
   }
 
@@ -715,6 +842,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         target: _effectiveTarget(),
       ),
       kind: NudgeKind.push,
+      sendingFlow: _SendFlow.sendingPush,
     );
   }
 
