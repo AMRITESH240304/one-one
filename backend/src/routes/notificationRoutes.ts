@@ -1,6 +1,7 @@
 import express, { Router } from "express";
 import { z } from "zod";
 import { getRealtimeDatabase } from "../firebase/database.js";
+import { filterActiveAccountUserIds } from "../groups/groupService.js";
 import { requireFirebaseAuth, type AuthenticatedRequest } from "../firebase/auth.js";
 import { asyncHandler } from "../http/asyncHandler.js";
 import {
@@ -175,9 +176,17 @@ export function createNotificationRoutes() {
     asyncHandler(async (request, response) => {
       const authRequest = request as AuthenticatedRequest;
       const groupId = z.string().min(1).parse(request.params.groupId);
+      const body = z
+        .object({
+          messageId: z.string().min(1).max(64).optional(),
+          text: z.string().min(1).max(240).optional()
+        })
+        .parse(request.body ?? {});
       const result = await sendChatMessageNotification({
         groupId,
-        senderUserId: authRequest.auth.uid
+        senderUserId: authRequest.auth.uid,
+        messageId: body.messageId,
+        text: body.text
       });
 
       response.status(200).json(result);
@@ -537,30 +546,32 @@ async function resolveFallbackRecipientUserIds(input: {
   targetUserId?: string;
   targetUserIds?: string[];
 }): Promise<string[]> {
+  let recipientUserIds: string[] = [];
   if (input.targetScope === "single_friend" && input.targetUserId) {
-    return input.targetUserId !== input.senderUserId ? [input.targetUserId] : [];
-  }
-  if (input.targetScope === "selected_friends") {
-    return [...new Set(input.targetUserIds ?? [])].filter(
+    recipientUserIds =
+      input.targetUserId !== input.senderUserId ? [input.targetUserId] : [];
+  } else if (input.targetScope === "selected_friends") {
+    recipientUserIds = [...new Set(input.targetUserIds ?? [])].filter(
       (userId) => userId !== input.senderUserId
     );
-  }
-  const snap = await input.db.ref(`groupMembers/${input.groupId}`).get();
-  const recipientUserIds: string[] = [];
-  if (snap.exists()) {
-    const members = snap.val() as Record<string, unknown>;
-    for (const [uid, val] of Object.entries(members)) {
-      if (
-        uid !== input.senderUserId &&
-        typeof val === "object" &&
-        val !== null &&
-        (val as Record<string, unknown>).memberState === "active"
-      ) {
-        recipientUserIds.push(uid);
+  } else {
+    const snap = await input.db.ref(`groupMembers/${input.groupId}`).get();
+    if (snap.exists()) {
+      const members = snap.val() as Record<string, unknown>;
+      for (const [uid, val] of Object.entries(members)) {
+        if (
+          uid !== input.senderUserId &&
+          typeof val === "object" &&
+          val !== null &&
+          (val as Record<string, unknown>).memberState === "active"
+        ) {
+          recipientUserIds.push(uid);
+        }
       }
     }
   }
-  return recipientUserIds;
+  // Account deletion removes users/{uid}; app uninstall does not.
+  return filterActiveAccountUserIds(recipientUserIds);
 }
 
 async function readDisplayNameForAck(

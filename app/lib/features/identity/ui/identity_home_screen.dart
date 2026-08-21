@@ -11,9 +11,11 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:livekit_noise_filter/livekit_noise_filter.dart';
+import 'package:lucide_flutter/lucide_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../../app/accent_theme.dart';
+import '../../../app/one_one_app.dart';
 import '../../../app/startup_performance.dart';
 import '../../../core/firebase/app_database.dart';
 import '../../../core/firebase/app_telemetry.dart';
@@ -41,6 +43,7 @@ import '../../groups/models/group_summary.dart';
 import '../../groups/ui/group_management_screen.dart';
 import '../../online/data/active_online_session_store.dart';
 import '../../online/data/online_repository.dart';
+import '../../online/live_session_overlay_controller.dart';
 import '../../online/livekit_connection_warmer.dart';
 import '../../online/livekit_status.dart';
 import '../../online/models/member_availability.dart';
@@ -49,6 +52,7 @@ import '../../online/peer_reconnect_coordinator.dart';
 import '../../online/presence_config.dart';
 import '../../online/solo_participant_guard.dart';
 import '../../online/audio_output_bridge.dart';
+import '../../online/call_audio_route_controller.dart';
 import '../../online/voice_overlay_bridge.dart';
 import '../../online/voice_pip_bridge.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
@@ -68,6 +72,7 @@ import '../../talk/ui/emoji_burst_overlay.dart';
 import '../data/identity_home_bootstrap.dart';
 import '../data/identity_repository.dart';
 import '../data/last_active_group_store.dart';
+import '../home_visual_variant.dart';
 import '../models/identity_session.dart';
 import 'group_action_screen.dart';
 import 'lucide_audio_icons.dart';
@@ -112,7 +117,7 @@ class IdentityHomeScreen extends StatefulWidget {
 }
 
 class _IdentityHomeScreenState extends State<IdentityHomeScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, RouteAware {
   final GroupRepository _groupRepository = GroupRepository();
   final OnlineRepository _onlineRepository = OnlineRepository();
   final TalkRepository _talkRepository = TalkRepository();
@@ -157,6 +162,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   StreamSubscription<ActiveNudge>? _incomingNudgeSubscription;
   StreamSubscription<IncomingNudgeStatusUpdate>?
   _incomingNudgeStatusSubscription;
+  StreamSubscription<NudgeRecipientResponse>? _nudgeResponseSubscription;
   StreamSubscription<void>? _registrationRenewalSubscription;
   StreamSubscription<void>? _inviteLinkSubscription;
   StreamSubscription<VoicePipAction>? _voicePipActionSubscription;
@@ -216,12 +222,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   bool _busy = false;
   bool _audioOutputBusy = false;
   bool _audioMuteBusy = false;
-  AudioOutputRoute _audioRoute = AudioOutputRoute.speaker;
-  bool _softwareMuted = false;
-  bool _nativeMuted = false;
+  final CallAudioRouteController _callAudio = CallAudioRouteController();
+  AudioOutputRoute get _audioRoute => _callAudio.displayRoute;
+  bool get _audioMuted => _callAudio.muted;
   StreamSubscription<AudioOutputState>? _audioOutputSubscription;
   StreamSubscription<List<MediaDevice>>? _hardwareAudioDeviceSubscription;
-  bool get _audioMuted => _softwareMuted || _nativeMuted;
   bool _talkBusy = false;
   bool _talkPressed = false;
   // Per-user connection style for the *local* user's own connection — never
@@ -269,9 +274,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     WidgetsBinding.instance.addObserver(this);
     _session =
         widget.identityRepository.currentSession ?? widget.initialSession;
-    _audioRoute = _session.settings.audioOutputPreference == 'earpiece'
-        ? AudioOutputRoute.earpiece
-        : AudioOutputRoute.speaker;
+    unawaited(HomeVisualVariantController.ensureLoaded());
     _preferredGroupId = widget.initialGroupId;
     widget.identityRepository.sessionListenable.addListener(
       _onIdentitySessionChanged,
@@ -335,6 +338,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           );
           unawaited(_presentIncomingNudgePrompt());
         });
+    _nudgeResponseSubscription = AndroidVoiceNudgeBridge.recipientResponses
+        .listen(_onSenderNudgeResponse);
     _registrationRenewalSubscription = AndroidVoiceNudgeBridge
         .registrationSignals
         .listen((_) {
@@ -409,7 +414,67 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   @override
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route != null) {
+      appRouteObserver.subscribe(this, route);
+    }
+  }
+
+  // ── RouteAware callbacks ─────────────────────────────────────────────────
+
+  /// Home screen is the active top-level route — hide the in-app PiP overlay.
+  @override
+  void didPush() => _hidePipOverlay();
+
+  /// A route above home was popped — home is active again, hide PiP.
+  @override
+  void didPopNext() => _hidePipOverlay();
+
+  /// Another route was pushed on top of home — show PiP if currently live.
+  @override
+  void didPushNext() => _showPipOverlayIfLive();
+
+  // ── In-app PiP overlay helpers ───────────────────────────────────────────
+
+  /// Show the floating live-session PiP (called when user navigates away
+  /// from home while in an active live session).
+  void _showPipOverlayIfLive() {
+    if (!_isOnline) return;
+    LiveSessionOverlayController.instance.setSession(
+      LiveSessionOverlayData(
+        activeSpeaker: _pictureInPictureMember,
+        isMuted: _audioMuted,
+        onToggleMute: _toggleAudioMute,
+        accentColor: accentColorForKey(_session.settings.accentColorKey),
+      ),
+    );
+  }
+
+  /// Refresh the PiP data (speaker / mute state) while the overlay is live.
+  void _updatePipOverlay() {
+    if (LiveSessionOverlayController.instance.state.value == null) return;
+    LiveSessionOverlayController.instance.updateSession(
+      LiveSessionOverlayData(
+        activeSpeaker: _pictureInPictureMember,
+        isMuted: _audioMuted,
+        onToggleMute: _toggleAudioMute,
+        accentColor: accentColorForKey(_session.settings.accentColorKey),
+      ),
+    );
+  }
+
+  /// Hide and clear the in-app PiP when home is active or session ends.
+  void _hidePipOverlay() {
+    LiveSessionOverlayController.instance.clearSession();
+  }
+
+  @override
   void dispose() {
+    appRouteObserver.unsubscribe(this);
+    LiveSessionOverlayController.instance.clearSession();
     WidgetsBinding.instance.removeObserver(this);
     widget.identityRepository.sessionListenable.removeListener(
       _onIdentitySessionChanged,
@@ -429,12 +494,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _nudgeReceivedSubscription?.cancel();
     _incomingNudgeSubscription?.cancel();
     _incomingNudgeStatusSubscription?.cancel();
+    _nudgeResponseSubscription?.cancel();
     _registrationRenewalSubscription?.cancel();
     _inviteLinkSubscription?.cancel();
     _voicePipActionSubscription?.cancel();
     _processTeardownSubscription?.cancel();
     _audioOutputSubscription?.cancel();
     _hardwareAudioDeviceSubscription?.cancel();
+    unawaited(AudioOutputBridge.setProximityMonitoring(false));
     _peerReconnect.clear();
     _voicePipBridge.isInPictureInPicture.removeListener(_onPipModeChanged);
     unawaited(_voicePipBridge.setSessionState(active: false, isTalking: false));
@@ -545,6 +612,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         session: _onlineSession,
       ),
     );
+    // Keep the in-app floating PiP in sync with the same state changes that
+    // drive the OS-level PiP — going away clears it, going live updates it.
+    if (_onlineSession == null) {
+      _hidePipOverlay();
+    } else {
+      _updatePipOverlay();
+    }
   }
 
   Future<void> _refreshDeviceRegistration({bool force = false}) async {
@@ -579,9 +653,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   void _onIdentitySessionChanged() {
     final next = widget.identityRepository.currentSession;
     if (!mounted || next == null || next.userId != _session.userId) return;
-    final audioRouteChanged =
-        next.settings.audioOutputPreference !=
-        _session.settings.audioOutputPreference;
     // Defer two frames so Settings / edit-profile modal pop + deactivate can
     // settle first. Same-frame setState under a deactivating modal races the
     // framework as `_dependents.isEmpty`.
@@ -591,18 +662,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         if (!mounted) return;
         final latest = widget.identityRepository.currentSession;
         if (latest == null || latest.userId != _session.userId) return;
-        setState(() {
-          _session = latest;
-          if (audioRouteChanged &&
-              _audioRoute != AudioOutputRoute.headset &&
-              _audioRoute != AudioOutputRoute.bluetooth) {
-            _audioRoute = latest.settings.audioOutputPreference == 'earpiece'
-                ? AudioOutputRoute.earpiece
-                : AudioOutputRoute.speaker;
-          }
-        });
+        setState(() => _session = latest);
         AccentThemeController.setAccentKey(latest.settings.accentColorKey);
-        if (audioRouteChanged) unawaited(_applyPreferredAudioRoute());
       });
     });
   }
@@ -917,12 +978,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// connecting. Best-effort: any failure here is ignored because the real
   /// go-online path still performs a synchronous fallback.
   Future<void> _prefetchLiveKit({required GroupSummary group}) async {
-    final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    // Warm rooms always default to speaker; session connect reasserts this (E1).
     await LiveKitConnectionWarmer.instance.prefetch(
       repository: _onlineRepository,
       identity: _session,
       group: group,
-      speakerOn: speakerOn,
+      speakerOn: true,
     );
   }
 
@@ -979,6 +1040,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // The receiver accepted the nudge (or this device accepted one) — the
     // last sent nudge is no longer the active pending state.
     NudgeStatusMemory.instance.clear(action.groupId);
+    if (mounted) setState(() {});
     if (action.action != 'accept') return;
     await _nudgeInbox.mark(
       nudgeId: action.eventId,
@@ -1022,6 +1084,33 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         groupId: action.groupId,
       );
     }
+  }
+
+  /// Sender-side: decline/snooze (and accept) replies update profile signifiers
+  /// even when the nudge sheet is closed.
+  void _onSenderNudgeResponse(NudgeRecipientResponse response) {
+    final updated = NudgeStatusMemory.instance.applyRecipientResponse(
+      eventId: response.eventId,
+      groupId: response.groupId,
+      responderUserId: response.responderUserId ?? '',
+      responderName: response.responderName ?? 'Friend',
+      action: response.action,
+    );
+    if (!updated) return;
+    if (!mounted) return;
+    if (_selectedGroup?.groupId == response.groupId) {
+      setState(() {});
+    }
+  }
+
+  Map<String, NudgeRecipientReply> _nudgeRepliesForGroup(String? groupId) {
+    if (groupId == null || groupId.isEmpty) return const {};
+    final entry = NudgeStatusMemory.instance.forGroup(groupId);
+    if (entry == null) return const {};
+    return {
+      for (final signifier in entry.signifiers)
+        if (signifier.reply != null) signifier.userId: signifier.reply!,
+    };
   }
 
   /// After the receiver is already live, accept any other still-pending
@@ -1990,6 +2079,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _carouselIndex = index;
   }
 
+  // C4 decision: creating or joining a group while live keeps the existing
+  // session active. The new group is created/joined independently; the user
+  // can switch to it from the carousel on the home screen, which goes away
+  // from the current group and joins the new one. The in-app PiP overlay
+  // (visible on the GroupActionScreen) lets the user return directly to the
+  // home/live screen without losing context.
   void _openCreateGroup() {
     _openGroupAction(GroupActionMode.createGroup);
   }
@@ -2271,7 +2366,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         : MemberAvailability.walkieTalkieMode;
 
     OnlineSession? createdSession;
-    final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    // E1: live sessions always warm/connect on speaker regardless of settings.
+    const speakerOn = true;
     final preparedToken = LiveKitConnectionWarmer.instance.takeToken(
       group.groupId,
     );
@@ -2768,7 +2864,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
 
     await _disconnectLiveKit();
-    final speakerOn = _session.settings.audioOutputPreference != 'earpiece';
+    // E1: every live session starts in speaker mode (loud/hands-free).
+    const speakerOn = true;
 
     // Reuse a pre-warmed Room (noise filter + audio route already built)
     // when available; otherwise build one now. Neither path connects here —
@@ -2859,14 +2956,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
 
     try {
-      await room.setSpeakerOn(speakerOn);
+      await room.setSpeakerOn(true);
     } catch (_) {
       // Non-fatal. LiveKit can still use the platform default route.
     }
+    // E1/E3: explicit connect defaults — speaker, unmuted. Do not inherit
+    // native volume=0 as "muted" (STREAM_MUSIC is often 0 in voice mode).
+    _callAudio.onSessionConnected();
+    unawaited(AudioOutputBridge.setMuted(false));
+    unawaited(AudioOutputBridge.applyRemotePlaybackMute(room, false));
     unawaited(_refreshAudioOutputState());
-    if (_audioMuted) {
-      unawaited(AudioOutputBridge.applyRemotePlaybackMute(room, true));
-    }
+    unawaited(_syncProximityMonitoring());
 
     final localParticipant = room.localParticipant;
     if (localParticipant == null) {
@@ -2905,58 +3005,49 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     );
   }
 
-  Future<void> _applyPreferredAudioRoute() async {
+  /// Applies the explicit user mode to LiveKit (speaker vs earpiece).
+  /// Headphones, when connected, continue to take priority at the OS level.
+  Future<void> _applyUserAudioRoute() async {
     final room = _room;
     if (room == null) return;
-    final preference =
-        widget
-            .identityRepository
-            .currentSession
-            ?.settings
-            .audioOutputPreference ??
-        _session.settings.audioOutputPreference;
+    if (_callAudio.muted) return;
     try {
-      await room.setSpeakerOn(preference != 'earpiece');
+      await room.setSpeakerOn(_callAudio.speakerOn);
     } catch (_) {
       // Route changes are best effort on devices without a separate earpiece.
     }
     await _refreshAudioOutputState();
+    await _syncProximityMonitoring();
+  }
+
+  Future<void> _syncProximityMonitoring() async {
+    await AudioOutputBridge.setProximityMonitoring(_callAudio.proximityEnabled);
   }
 
   Future<void> _toggleAudioOutput() async {
     if (_audioOutputBusy) return;
-    final current =
-        widget
-            .identityRepository
-            .currentSession
-            ?.settings
-            .audioOutputPreference ??
-        _session.settings.audioOutputPreference;
-    final next = current == 'earpiece' ? 'speaker' : 'earpiece';
     _audioOutputBusy = true;
     if (_liveHapticsEnabled) {
       unawaited(HapticFeedback.selectionClick());
     }
-    setState(() {
-      _session = IdentitySession(
-        user: _session.user,
-        device: _session.device,
-        settings: _session.settings.copyWith(audioOutputPreference: next),
-      );
-      if (_audioRoute != AudioOutputRoute.headset &&
-          _audioRoute != AudioOutputRoute.bluetooth) {
-        _audioRoute = next == 'earpiece'
-            ? AudioOutputRoute.earpiece
-            : AudioOutputRoute.speaker;
-      }
-    });
+
+    final previousMode = _callAudio.userMode;
+    final wasMuted = previousMode == CallAudioUserMode.muted;
+    _callAudio.onTap();
+    setState(() {});
+
     try {
-      await _room?.setSpeakerOn(next != 'earpiece');
-      await widget.identityRepository.updateSettings(
-        accentColorKey: _session.settings.accentColorKey,
-        hapticsEnabled: _session.settings.hapticsEnabled,
-        audioOutputPreference: next,
-      );
+      if (wasMuted) {
+        // Tap after mute → speaker (E1).
+        await AudioOutputBridge.applyRemotePlaybackMute(_room, false);
+        await AudioOutputBridge.setMuted(false);
+        await _room?.setSpeakerOn(true);
+        if (!mounted) return;
+        unawaited(_reportMediaVolume());
+        _showPresenceSnackbar('Volume unmuted');
+      } else {
+        await _room?.setSpeakerOn(_callAudio.speakerOn);
+      }
     } catch (error, stack) {
       unawaited(
         CrashlyticsService.recordError(
@@ -2966,42 +3057,37 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         ),
       );
       if (!mounted) return;
-      setState(() {
-        _session = IdentitySession(
-          user: _session.user,
-          device: _session.device,
-          settings: _session.settings.copyWith(audioOutputPreference: current),
-        );
-        if (_audioRoute != AudioOutputRoute.headset &&
-            _audioRoute != AudioOutputRoute.bluetooth) {
-          _audioRoute = current == 'earpiece'
-              ? AudioOutputRoute.earpiece
-              : AudioOutputRoute.speaker;
-        }
-      });
-      await _applyPreferredAudioRoute();
+      _callAudio.restoreMode(previousMode);
+      setState(() {});
+      await _applyUserAudioRoute();
     } finally {
       _audioOutputBusy = false;
       unawaited(_refreshAudioOutputState());
+      unawaited(_syncProximityMonitoring());
     }
   }
 
   Future<void> _toggleAudioMute() async {
     if (_audioMuteBusy) return;
     _audioMuteBusy = true;
-    final nextMuted = !_audioMuted;
     if (_liveHapticsEnabled) {
       unawaited(HapticFeedback.mediumImpact());
     }
-    _softwareMuted = nextMuted;
-    if (!nextMuted) _nativeMuted = false;
+    final previousMode = _callAudio.userMode;
+    final nextMode = _callAudio.onLongPress();
+    final nextMuted = nextMode == CallAudioUserMode.muted;
     setState(() {});
     try {
       await AudioOutputBridge.applyRemotePlaybackMute(_room, nextMuted);
       await AudioOutputBridge.setMuted(nextMuted);
+      if (!nextMuted) {
+        await _room?.setSpeakerOn(true);
+        if (!mounted) return;
+      }
       if (!mounted) return;
       unawaited(_reportMediaVolume());
       _showPresenceSnackbar(nextMuted ? 'Volume muted' : 'Volume unmuted');
+      await _syncProximityMonitoring();
     } catch (error, stack) {
       unawaited(
         CrashlyticsService.recordError(
@@ -3011,9 +3097,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         ),
       );
       if (!mounted) return;
-      _softwareMuted = !nextMuted;
+      _callAudio.restoreMode(previousMode);
       setState(() {});
       await AudioOutputBridge.applyRemotePlaybackMute(_room, _audioMuted);
+      await _syncProximityMonitoring();
     } finally {
       _audioMuteBusy = false;
     }
@@ -3021,12 +3108,18 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   void _handleAudioOutputState(AudioOutputState next) {
     if (!mounted) return;
-    final previousMuted = _audioMuted;
-    _nativeMuted = next.muted;
-    setState(() => _audioRoute = next.route);
-    if (_audioMuted != previousMuted) {
-      unawaited(AudioOutputBridge.applyRemotePlaybackMute(_room, _audioMuted));
-      unawaited(_reportMediaVolume());
+    // Device route (especially headset/bluetooth) is observational only —
+    // never let native volume-muted flip the explicit user mute state (E3).
+    final previousHeadphones = _callAudio.headphonesConnected;
+    _callAudio.onDeviceRouteChanged(next.route);
+    setState(() {});
+    if (previousHeadphones != _callAudio.headphonesConnected) {
+      // Reassert speaker/earpiece after unplug; headphones win while plugged.
+      if (!_callAudio.headphonesConnected && !_callAudio.muted) {
+        unawaited(_applyUserAudioRoute());
+      } else {
+        unawaited(_syncProximityMonitoring());
+      }
     }
   }
 
@@ -3037,17 +3130,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _handleAudioOutputState(native);
       return;
     }
-    final speakerOn =
-        Hardware.instance.speakerOn ??
-        (_session.settings.audioOutputPreference != 'earpiece');
-    setState(() {
-      if (_audioRoute != AudioOutputRoute.headset &&
-          _audioRoute != AudioOutputRoute.bluetooth) {
-        _audioRoute = speakerOn
-            ? AudioOutputRoute.speaker
-            : AudioOutputRoute.earpiece;
-      }
-    });
+    setState(() {});
   }
 
   void _listenToHardwareAudioDevices() {
@@ -3067,9 +3150,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     await TalkFeedback.remoteSpeakerStarted(
       hapticsEnabled: _liveHapticsEnabled,
     );
-    // Some audio-feedback implementations briefly alter the platform audio
-    // session. Reassert the user's route after the tone completes.
-    await _applyPreferredAudioRoute();
+    // Do NOT reassert audio route here — routing is user-driven only (E1).
   }
 
   String? _participantUserIdFromIdentity(String identity) {
@@ -3264,10 +3345,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             }
             if (newlySpeakingRemote && _talkSession != null) {
               unawaited(_handleRemoteSpeakerStarted());
-            } else if (speaking.any((id) => id != _session.userId)) {
-              // Never let active-speaker auto-routing override the stored choice.
-              unawaited(_applyPreferredAudioRoute());
             }
+            // E1: never reassert speaker/earpiece from active-speaker events —
+            // routing changes only on explicit user action (or headphones).
             setState(() {
               _speakingUserIds = speaking;
               final remoteSpeaking = speaking.any(
@@ -3277,6 +3357,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 _message = LiveKitStatus.receivingVoice;
               }
             });
+            // Reflect the new active speaker in the in-app PiP overlay.
+            _updatePipOverlay();
           });
   }
 
@@ -3457,6 +3539,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _soloGuard = null;
     _speakingUserIds = const {};
     _clearConnectionQualities();
+    _callAudio.onSessionEnded();
+    unawaited(AudioOutputBridge.setProximityMonitoring(false));
 
     if (room != null) {
       debugPrint(
@@ -3691,7 +3775,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         currentUserId: _session.userId,
         members: _displayMembers,
         accent: accentColorForKey(_session.settings.accentColorKey),
-        hapticsEnabled: _session.settings.hapticsEnabled,
+        hapticsIntensity: _session.settings.hapticsIntensity,
         onlineUserIds: onlineUserIds,
       ),
     );
@@ -3973,6 +4057,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // can sit above the system nav without touching the top inset.
     final bottomSystemInset = bottomSystemInsetOf(context);
 
+    // When the chat keyboard is open, temporarily collapse and fade the
+    // friends/presence strip, the status-hint notifier, and the
+    // join/create carousel row so the message feed has the full available
+    // space above the keyboard — consistent with a standard chat UX.
+    final keyboardOpen = MediaQuery.of(context).viewInsets.bottom > 100;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -4003,21 +4093,42 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                   enabled: _serviceReady,
                   onTogglePresence: _togglePresence,
                   showAudioOutput: _isOnline,
-                  speakerOn:
-                      _session.settings.audioOutputPreference != 'earpiece',
+                  speakerOn: _callAudio.speakerOn,
                   audioRoute: _audioRoute,
                   audioMuted: _audioMuted,
                   onToggleAudioOutput: _toggleAudioOutput,
                   onToggleAudioMute: _toggleAudioMute,
                 ),
-                SizedBox(height: 8.h),
-                _FriendsStrip(
-                  groupName: focusedGroup?.name,
-                  friends: _friends,
-                  availability: _availability,
-                  speakingUserIds: _speakingUserIds,
-                  connectionQualityByUserId: _remoteConnectionQualityByUserId,
-                  onInvite: inviteAction,
+                AnimatedOpacity(
+                  duration: const Duration(milliseconds: 180),
+                  opacity: keyboardOpen ? 0.0 : 1.0,
+                  child: AnimatedAlign(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    alignment: Alignment.topCenter,
+                    heightFactor: keyboardOpen ? 0.0 : 1.0,
+                    child: IgnorePointer(
+                      ignoring: keyboardOpen,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(height: 8.h),
+                          _FriendsStrip(
+                            groupName: focusedGroup?.name,
+                            friends: _friends,
+                            availability: _availability,
+                            speakingUserIds: _speakingUserIds,
+                            connectionQualityByUserId:
+                                _remoteConnectionQualityByUserId,
+                            nudgeRepliesByUserId: _nudgeRepliesForGroup(
+                              focusedGroup?.groupId,
+                            ),
+                            onInvite: inviteAction,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
                 if (_isOnline &&
                     (_effectiveLocalConnectionQuality ==
@@ -4076,33 +4187,42 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     ),
                   ),
                 ),
-                // Status hint stays full-width and optically centered;
-                // edge actions sit above the create-group side of the
-                // row (not over it).
-                Padding(
-                  padding: EdgeInsets.fromLTRB(24.w, 0, 24.w, 6.h),
-                  child: Text(
-                    _isSessionConnecting
-                        ? (_state == 'reconnecting'
-                              ? LiveKitStatus.reconnecting
-                              : LiveKitStatus.connecting)
-                        : viewingActiveGroup
-                        ? (_isCallMode
-                              ? 'In a call — mic always on'
-                              : 'Tap to Talk')
-                        : _isOnline
-                        ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
-                        : !_serviceReady
-                        ? 'invite a friend to enable voice service'
-                        : 'send a nudge to go online together',
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: const Color.fromRGBO(255, 255, 255, 0.55),
-                      fontSize: 13.sp,
-                      fontWeight: FontWeight.w500,
-                      height: 1.3,
+                // Status hint: collapsed when keyboard is open so the
+                // message feed gets more space above the keyboard.
+                AnimatedOpacity(
+                  duration: const Duration(milliseconds: 180),
+                  opacity: keyboardOpen ? 0.0 : 1.0,
+                  child: AnimatedAlign(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    alignment: Alignment.topCenter,
+                    heightFactor: keyboardOpen ? 0.0 : 1.0,
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(24.w, 0, 24.w, 6.h),
+                      child: Text(
+                        _isSessionConnecting
+                            ? (_state == 'reconnecting'
+                                  ? LiveKitStatus.reconnecting
+                                  : LiveKitStatus.connecting)
+                            : viewingActiveGroup
+                            ? (_isCallMode
+                                  ? 'In a call — mic always on'
+                                  : 'Tap to Talk')
+                            : _isOnline
+                            ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
+                            : !_serviceReady
+                            ? 'invite a friend to enable voice service'
+                            : 'send a nudge to go online together',
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: const Color.fromRGBO(255, 255, 255, 0.55),
+                          fontSize: 13.sp,
+                          fontWeight: FontWeight.w500,
+                          height: 1.3,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -4126,37 +4246,50 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                       ),
                     ),
                   ),
-                SizedBox(
-                  height: 160.h,
-                  child: _ExperienceCarousel(
-                    items: items,
-                    index: _carouselIndex,
-                    connectedGroupId: _onlineSession?.groupId,
-                    connecting: _isSessionConnecting,
-                    talkEnabled:
-                        viewingActiveGroup &&
-                        !_busy &&
-                        !_isCallMode &&
-                        !_isSessionConnecting,
-                    talkActive:
-                        _talkSession != null ||
-                        (_isCallMode &&
-                            _speakingUserIds.contains(_session.userId)),
-                    talkBusy: _talkBusy,
-                    callMode: _isCallMode,
-                    accent: accent,
-                    nudgeGroupId: groupAllOffline
-                        ? focusedGroup?.groupId
-                        : null,
-                    onNudge: _busy ? null : _openNudges,
-                    onSelected: (index) {
-                      unawaited(_onGroupCarouselChanged(index));
-                    },
-                    onTalkStart: _startTalking,
-                    onTalkStop: () => _stopTalking(),
-                    onJoinVoiceGroup: _togglePresence,
-                    onCreateGroup: _openCreateGroup,
-                    onJoinGroup: _openJoinGroup,
+                AnimatedOpacity(
+                  duration: const Duration(milliseconds: 180),
+                  opacity: keyboardOpen ? 0.0 : 1.0,
+                  child: AnimatedAlign(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    alignment: Alignment.topCenter,
+                    heightFactor: keyboardOpen ? 0.0 : 1.0,
+                    child: IgnorePointer(
+                      ignoring: keyboardOpen,
+                      child: SizedBox(
+                        height: 160.h,
+                        child: _ExperienceCarousel(
+                          items: items,
+                          index: _carouselIndex,
+                          connectedGroupId: _onlineSession?.groupId,
+                          connecting: _isSessionConnecting,
+                          talkEnabled:
+                              viewingActiveGroup &&
+                              !_busy &&
+                              !_isCallMode &&
+                              !_isSessionConnecting,
+                          talkActive:
+                              _talkSession != null ||
+                              (_isCallMode &&
+                                  _speakingUserIds.contains(_session.userId)),
+                          talkBusy: _talkBusy,
+                          callMode: _isCallMode,
+                          accent: accent,
+                          nudgeGroupId: groupAllOffline
+                              ? focusedGroup?.groupId
+                              : null,
+                          onNudge: _busy ? null : _openNudges,
+                          onSelected: (index) {
+                            unawaited(_onGroupCarouselChanged(index));
+                          },
+                          onTalkStart: _startTalking,
+                          onTalkStop: () => _stopTalking(),
+                          onJoinVoiceGroup: _togglePresence,
+                          onCreateGroup: _openCreateGroup,
+                          onJoinGroup: _openJoinGroup,
+                        ),
+                      ),
+                    ),
                   ),
                 ),
                 if (focusedGroup != null) ...[
@@ -4343,46 +4476,59 @@ class _HomeBackdrop extends StatelessWidget {
         (fallbackAvatarAsset?.trim().isNotEmpty ?? false);
     final showCollage = members.isNotEmpty ? true : hasFallbackPhoto;
 
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        const ColoredBox(color: Colors.black),
-        if (showCollage)
-          Opacity(
-            opacity: hasMemberPhotos || hasFallbackPhoto ? 0.35 : 0.2,
-            child: ImageFiltered(
-              imageFilter: ImageFilter.blur(sigmaX: 40, sigmaY: 40),
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: SizedBox(
-                  width: 400,
-                  height: 800,
-                  child: _BackdropMemberCollage(
-                    members: members,
-                    fallbackPhotoUrl: fallbackPhotoUrl,
-                    fallbackPhotoBase64: fallbackPhotoBase64,
-                    fallbackAvatarAsset: fallbackAvatarAsset,
+    return ValueListenableBuilder<HomeVisualVariant>(
+      valueListenable: HomeVisualVariantController.current,
+      builder: (context, variant, _) {
+        final baseOpacity = hasMemberPhotos || hasFallbackPhoto
+            ? variant.backdropOpacity
+            : 0.2;
+        final overlay = (1.15 - variant.backdropOpacity).clamp(0.42, 0.92);
+
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            const ColoredBox(color: Colors.black),
+            if (showCollage)
+              Opacity(
+                opacity: baseOpacity,
+                child: ImageFiltered(
+                  imageFilter: ImageFilter.blur(
+                    sigmaX: variant.blurSigma,
+                    sigmaY: variant.blurSigma,
+                  ),
+                  child: FittedBox(
+                    fit: BoxFit.cover,
+                    child: SizedBox(
+                      width: 400,
+                      height: 800,
+                      child: _BackdropMemberCollage(
+                        members: members,
+                        fallbackPhotoUrl: fallbackPhotoUrl,
+                        fallbackPhotoBase64: fallbackPhotoBase64,
+                        fallbackAvatarAsset: fallbackAvatarAsset,
+                      ),
+                    ),
                   ),
                 ),
               ),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: overlay * 0.34),
+                    Colors.black.withValues(alpha: overlay * 0.62),
+                    Colors.black.withValues(alpha: overlay),
+                    Color.lerp(Colors.black, accent, 0.14)!,
+                  ],
+                  stops: const [0, 0.35, 0.72, 1],
+                ),
+              ),
             ),
-          ),
-        DecoratedBox(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [
-                Colors.black.withValues(alpha: 0.3),
-                Colors.black.withValues(alpha: 0.55),
-                Colors.black.withValues(alpha: 0.88),
-                Color.lerp(Colors.black, accent, 0.14)!,
-              ],
-              stops: const [0, 0.35, 0.72, 1],
-            ),
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
   }
 }
@@ -4609,21 +4755,21 @@ class _StatusToggle extends StatelessWidget {
             ? 'Tap to go away'
             : 'Go online when someone is already live, or send a nudge to go together',
         child: SizedBox(
-          width: 66.w,
-          height: 40,
+          width: 56.w,
+          height: 44,
           child: Material(
             color: Colors.transparent,
             child: InkWell(
               onTap: busy || !enabled ? null : onToggle,
-              borderRadius: BorderRadius.circular(20),
+              borderRadius: BorderRadius.circular(22),
               child: Center(
                 child: Container(
                   width: double.infinity,
-                  height: 24.h,
-                  padding: EdgeInsets.all(2.w),
+                  height: 30.h,
+                  padding: EdgeInsets.all(3.w),
                   decoration: BoxDecoration(
                     color: const Color.fromRGBO(255, 255, 255, 0.12),
-                    borderRadius: BorderRadius.circular(14.r),
+                    borderRadius: BorderRadius.circular(15.r),
                     border: Border.all(
                       color: const Color.fromRGBO(255, 255, 255, 0.22),
                     ),
@@ -4637,13 +4783,13 @@ class _StatusToggle extends StatelessWidget {
                             ? Alignment.centerRight
                             : Alignment.centerLeft,
                         child: Container(
-                          width: 30.w,
+                          width: 20.w,
                           height: double.infinity,
                           decoration: BoxDecoration(
                             color: online
                                 ? const Color(0xff7CFF6B)
                                 : Colors.white,
-                            borderRadius: BorderRadius.circular(11.r),
+                            borderRadius: BorderRadius.circular(12.r),
                           ),
                         ),
                       ),
@@ -4745,6 +4891,7 @@ class _FriendsStrip extends StatelessWidget {
     required this.availability,
     required this.speakingUserIds,
     required this.connectionQualityByUserId,
+    required this.nudgeRepliesByUserId,
     required this.onInvite,
   });
 
@@ -4753,6 +4900,7 @@ class _FriendsStrip extends StatelessWidget {
   final Map<String, MemberAvailability> availability;
   final Set<String> speakingUserIds;
   final Map<String, ConnectionQuality> connectionQualityByUserId;
+  final Map<String, NudgeRecipientReply> nudgeRepliesByUserId;
   final VoidCallback? onInvite;
 
   @override
@@ -4797,6 +4945,7 @@ class _FriendsStrip extends StatelessWidget {
                   connectionQuality:
                       connectionQualityByUserId[friend.userId] ??
                       ConnectionQuality.unknown,
+                  nudgeReply: nudgeRepliesByUserId[friend.userId],
                 ),
                 SizedBox(width: 12.w),
               ],
@@ -4819,6 +4968,7 @@ class _FriendChip extends StatelessWidget {
     required this.availability,
     required this.isSpeaking,
     required this.connectionQuality,
+    this.nudgeReply,
   });
 
   final String name;
@@ -4828,6 +4978,7 @@ class _FriendChip extends StatelessWidget {
   final MemberAvailability availability;
   final bool isSpeaking;
   final ConnectionQuality connectionQuality;
+  final NudgeRecipientReply? nudgeReply;
 
   @override
   Widget build(BuildContext context) {
@@ -4886,14 +5037,11 @@ class _FriendChip extends StatelessWidget {
             Positioned(
               right: -4,
               bottom: -2,
-              // Away state uses a Material "dark mode" glyph inside a
-              // circular badge (subtle shadow) instead of the old 🌙 emoji.
-              // NOTE: no HTML/CSS reference file was available in this
-              // session, so colors are mapped to existing app tokens
-              // (avatar-chip background + white70 icon) rather than the
-              // exact reference values — adjust here if the reference
-              // surfaces later.
-              child: live
+              // Prefer decline/snooze reply badge over the live/away glyph
+              // while a recent nudge response is still active.
+              child: nudgeReply != null
+                  ? _NudgeReplyBadge(reply: nudgeReply!)
+                  : live
                   ? Text('🟢', style: TextStyle(fontSize: 14.sp))
                   : Container(
                       width: 20.w,
@@ -4953,6 +5101,47 @@ class _FriendChip extends StatelessWidget {
           ),
         ],
       ],
+    );
+  }
+}
+
+class _NudgeReplyBadge extends StatelessWidget {
+  const _NudgeReplyBadge({required this.reply});
+
+  final NudgeRecipientReply reply;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, color) = switch (reply) {
+      NudgeRecipientReply.declined => (
+        LucideIcons.moon,
+        const Color(0xff8e9aaf),
+      ),
+      NudgeRecipientReply.snoozed => (
+        LucideIcons.timer,
+        const Color(0xffe0a83c),
+      ),
+    };
+    return Container(
+      width: 22.w,
+      height: 22.w,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: const Color(0xff1c1c1c),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.28),
+          width: 1,
+        ),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black45,
+            blurRadius: 3,
+            offset: Offset(0, 1),
+          ),
+        ],
+      ),
+      child: Icon(icon, color: color, size: 13.sp),
     );
   }
 }

@@ -32,6 +32,9 @@ import UIKit
       case "setMuted":
         controller.setMuted(call.arguments as? Bool ?? false)
         result(controller.stateMap())
+      case "setProximityMonitoring":
+        controller.setProximityMonitoring(call.arguments as? Bool ?? false)
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -83,6 +86,13 @@ final class AudioOutputController: NSObject {
       setSystemVolume(restored)
     }
     emitState()
+  }
+
+  /// Blank the screen when the phone is held to the ear (earpiece mode).
+  func setProximityMonitoring(_ enabled: Bool) {
+    DispatchQueue.main.async {
+      UIDevice.current.isProximityMonitoringEnabled = enabled
+    }
   }
 
   @objc private func handleRouteChange(_ notification: Notification) {

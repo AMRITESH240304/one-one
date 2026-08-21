@@ -53,6 +53,8 @@ class VoiceNudgePlaybackService : Service() {
     private var ackedEventId: String? = null
     private var lastPosted: PostedNotification? = null
     private var activeTimeout: Runnable? = null
+    private var hapticCloseRunnable: Runnable? = null
+    private var hapticStopRunnable: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -352,6 +354,9 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-11] Processing queued nudge kind=${request.kind}",
         )
         logNudgeHealthGates(request)
+        if (!enforceHealthGates(request)) {
+            return
+        }
         holdWakeLock()
         scheduleActiveTimeout(request)
         val initialStatus = when {
@@ -1077,14 +1082,9 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     /**
-     * Haptic feedback: one long vibration when the nudge starts playing,
-     * and one long vibration when it finishes.  No vibration in between
-     * so the buzz does not interfere with listening to the voice message.
-     *
-     * Timing:
-     *   - opening burst: ~600 ms (two taps: 150 ms on / 100 ms off / 150 ms on,
-     *     repeated twice for a longer-feeling single pulse)
-     *   - closing burst: same pattern, scheduled after the audio duration
+     * Haptic feedback for incoming voice / ring / notification nudges.
+     * Intensity comes from Settings (Light / Pulse / Wild) via
+     * [HapticsPreferenceStore]. Light is the historical default.
      */
     private fun triggerReceiptHaptics(durationMs: Long) {
         Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] triggerReceiptHaptics durationMs=$durationMs")
@@ -1098,38 +1098,46 @@ class VoiceNudgePlaybackService : Service() {
             ) ?: return
         if (!vibrator.hasVibrator()) return
 
-        // A longer-feeling opening burst: two quick taps repeated so the
-        // user unmistakably feels "something started playing".  Total ~600 ms.
-        val openBurst = longArrayOf(0, 150, 100, 150, 100, 150) // wait, buzz, pause, buzz, pause, buzz
+        cancelHaptics()
 
-        // Closing burst: identical pattern so the user feels "playback is done".
-        val closeBurst = longArrayOf(0, 150, 100, 150, 100, 150)
-
-        // With no sustained middle phase, the closing burst delay is simply
-        // the audio duration (minus the tiny opening overhead so timing feels
-        // exact).  Floor of 500 ms so very short nudges still get a distinct
-        // closing pulse.
-        val openDurationMs = openBurst.fold(0L) { acc, v -> acc + v }
+        val intensity = HapticsPreferenceStore.read(this)
+        val openBurst = when (intensity) {
+            HapticsPreferenceStore.medium -> NudgeHapticsWaveforms.mediumBurst
+            else -> NudgeHapticsWaveforms.lightBurst
+        }
+        val closeBurst = openBurst
+        val openDurationMs = NudgeHapticsWaveforms.totalMs(openBurst)
         val closeDelayMs = (durationMs - openDurationMs).coerceAtLeast(500L)
 
         try {
-            // Phase 1 — Opening long burst
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator.vibrate(
-                    VibrationEffect.createWaveform(openBurst, -1),
+            if (intensity == HapticsPreferenceStore.wild) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                        VibrationEffect.createWaveform(NudgeHapticsWaveforms.wildLoop, 0),
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(NudgeHapticsWaveforms.wildLoop, 0)
+                }
+                hapticStopRunnable = Runnable { vibrator.cancel() }
+                mainHandler.postDelayed(
+                    hapticStopRunnable!!,
+                    durationMs.coerceAtMost(30_000L).coerceAtLeast(400L),
                 )
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createWaveform(openBurst, -1))
             } else {
                 @Suppress("DEPRECATION")
                 vibrator.vibrate(openBurst, -1)
             }
 
-            // Phase 2 — Closing long burst (fires after audio finishes)
-            mainHandler.postDelayed({
+            hapticCloseRunnable = Runnable {
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        vibrator.vibrate(
-                            VibrationEffect.createWaveform(closeBurst, -1),
-                        )
+                        vibrator.vibrate(VibrationEffect.createWaveform(closeBurst, -1))
                     } else {
                         @Suppress("DEPRECATION")
                         vibrator.vibrate(closeBurst, -1)
@@ -1140,12 +1148,14 @@ class VoiceNudgePlaybackService : Service() {
                         error,
                     )
                 }
-            }, closeDelayMs)
+            }
+            mainHandler.postDelayed(hapticCloseRunnable!!, closeDelayMs)
 
-            // Cancel any leftover haptics after the full envelope.
-            val totalEnvelopeMs = openDurationMs + closeDelayMs + closeBurst.fold(0L) { acc, v -> acc + v }
+            hapticStopRunnable = Runnable { vibrator.cancel() }
+            val totalEnvelopeMs =
+                openDurationMs + closeDelayMs + NudgeHapticsWaveforms.totalMs(closeBurst)
             mainHandler.postDelayed(
-                { vibrator.cancel() },
+                hapticStopRunnable!!,
                 totalEnvelopeMs.coerceAtMost(30_000L),
             )
         } catch (error: RuntimeException) {
@@ -1154,6 +1164,10 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun cancelHaptics() {
+        hapticCloseRunnable?.let(mainHandler::removeCallbacks)
+        hapticStopRunnable?.let(mainHandler::removeCallbacks)
+        hapticCloseRunnable = null
+        hapticStopRunnable = null
         try {
             val vibrator = (
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1186,6 +1200,7 @@ class VoiceNudgePlaybackService : Service() {
         val streamMuted: Boolean,
         val ringerMode: Int,
         val notificationsEnabled: Boolean,
+        val batteryOptimizationIgnored: Boolean,
         val dndActive: Boolean,
     ) {
         /**
@@ -1217,6 +1232,7 @@ class VoiceNudgePlaybackService : Service() {
             put("streamMuted", streamMuted)
             put("ringerMode", ringerMode)
             put("notificationsEnabled", notificationsEnabled)
+            put("batteryOptimizationIgnored", batteryOptimizationIgnored)
             put("volumeLevel", volumeLevel)
             put("volumePercent", volumePercent)
             put("dndActive", dndActive)
@@ -1229,6 +1245,7 @@ class VoiceNudgePlaybackService : Service() {
             "streamMuted" to streamMuted.toString(),
             "ringerMode" to ringerMode.toString(),
             "notificationsEnabled" to notificationsEnabled.toString(),
+            "batteryOptimizationIgnored" to batteryOptimizationIgnored.toString(),
             "volumeLevel" to volumeLevel,
             "volumePercent" to volumePercent.toString(),
             "dndActive" to dndActive.toString(),
@@ -1248,6 +1265,13 @@ class VoiceNudgePlaybackService : Service() {
         } else {
             true
         }
+        val powerManager = getSystemService(PowerManager::class.java)
+        val batteryOptimizationIgnored =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                powerManager.isIgnoringBatteryOptimizations(packageName)
+            } else {
+                true
+            }
         val dndActive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val filter = notificationManager.currentInterruptionFilter
             filter == NotificationManager.INTERRUPTION_FILTER_NONE ||
@@ -1262,6 +1286,7 @@ class VoiceNudgePlaybackService : Service() {
             streamMuted = muted,
             ringerMode = audioManager.ringerMode,
             notificationsEnabled = notificationsEnabled,
+            batteryOptimizationIgnored = batteryOptimizationIgnored,
             dndActive = dndActive,
         )
         Log.d(
@@ -1269,7 +1294,9 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-D] captureHealthSnapshot streamType=$streamType " +
                 "volume=${snapshot.streamVolume}/${snapshot.streamMaxVolume} " +
                 "muted=${snapshot.streamMuted} ringerMode=${snapshot.ringerMode} " +
-                "notificationsEnabled=${snapshot.notificationsEnabled} volumeLevel=${snapshot.volumeLevel}",
+                "notificationsEnabled=${snapshot.notificationsEnabled} " +
+                "batteryOptimizationIgnored=${snapshot.batteryOptimizationIgnored} " +
+                "volumeLevel=${snapshot.volumeLevel}",
         )
         return snapshot
     }
@@ -1293,6 +1320,14 @@ class VoiceNudgePlaybackService : Service() {
                 groupId = request.groupId,
             )
         }
+        if (!health.batteryOptimizationIgnored) {
+            DeviceLog.warn(
+                "NudgeService",
+                "Nudge reliability warning: battery optimization active " +
+                    "eventId=${request.eventId}",
+                groupId = request.groupId,
+            )
+        }
         if (dndActive) {
             DeviceLog.warn(
                 "NudgeService",
@@ -1307,6 +1342,34 @@ class VoiceNudgePlaybackService : Service() {
                     "(${health.volumeLevel}) eventId=${request.eventId}",
                 groupId = request.groupId,
             )
+        }
+    }
+
+    /**
+     * Hard receiver-side gates: when notifications are off, report a specific
+     * failure reason to the sender instead of timing out ambiguously.
+     */
+    private fun enforceHealthGates(request: NudgeRequest): Boolean {
+        val health = activeHealth ?: return true
+        if (!health.notificationsEnabled) {
+            failHealthGate(request, "permission_denied_notifications")
+            return false
+        }
+        return true
+    }
+
+    private fun failHealthGate(request: NudgeRequest, reason: String) {
+        VoiceNudgeDiagnostics.recordNudgeFailure(
+            reason = reason,
+            eventId = request.eventId,
+            kind = request.kind,
+            groupId = request.groupId,
+            senderUserId = request.senderUserId,
+            senderName = request.senderName,
+            health = activeHealth?.toCrashlyticsMap().orEmpty(),
+        )
+        acknowledge(request, "failed", reason, activeHealth) {
+            finishActive(success = false)
         }
     }
 

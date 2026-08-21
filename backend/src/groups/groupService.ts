@@ -7,7 +7,7 @@ import { getVoiceNudgeBucket } from "../firebase/storage.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
 
-const maxMembers = 100;
+const maxMembers = 6;
 const defaultMaxTalkMs = 60_000;
 
 export type CreateGroupInput = {
@@ -656,6 +656,26 @@ export async function purgeUserAccount(userId: string) {
     "account fully purged"
   );
   return { purged: true, groupsTouched: groupIds.size };
+}
+
+/**
+ * Keep only user ids that still have an active `users/{uid}` record.
+ *
+ * Missing `users/{uid}` means the account was deleted (account deletion wipes
+ * that path). App uninstall does not — uninstall leaves `users/{uid}` intact,
+ * so those members are correctly retained here.
+ */
+export async function filterActiveAccountUserIds(userIds: string[]) {
+  if (userIds.length === 0) return [];
+  const db = getRealtimeDatabase();
+  const active: string[] = [];
+  for (const userId of userIds) {
+    const snapshot = await db.ref(`users/${userId}`).get();
+    if (!snapshot.exists()) continue;
+    if ((snapshot.child("accountState").val() ?? "active") !== "active") continue;
+    active.push(userId);
+  }
+  return active;
 }
 
 export async function requireActiveUser(userId: string) {

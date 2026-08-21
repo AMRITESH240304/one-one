@@ -22,7 +22,7 @@ const ackTicketSecret = (() => {
   return randomBytes(32);
 })();
 
-export type NudgeKind = "ring_nudge" | "voice_nudge";
+export type NudgeKind = "ring_nudge" | "voice_nudge" | "nudge";
 
 export type AckTicket = {
   eventId: string;
@@ -74,7 +74,7 @@ function isAckTicket(value: unknown): value is AckTicket {
   return (
     typeof v.eventId === "string" &&
     typeof v.groupId === "string" &&
-    (v.kind === "ring_nudge" || v.kind === "voice_nudge") &&
+    (v.kind === "ring_nudge" || v.kind === "voice_nudge" || v.kind === "nudge") &&
     typeof v.senderUserId === "string" &&
     typeof v.recipientUserId === "string" &&
     typeof v.recipientName === "string" &&
@@ -84,9 +84,9 @@ function isAckTicket(value: unknown): value is AckTicket {
 
 // ---------------------------------------------------------------------------
 // recordNudgeDelivery — called once the receiver's device has genuinely
-// started playing the nudge (or definitively failed to). Persists the
-// outcome for later debugging and pushes a real-time result back to the
-// sender so they see accurate delivery confirmation, not just "sent".
+// started playing a ring/voice nudge, posted a notify/push notification,
+// or definitively failed to. Persists the outcome and pushes a real-time
+// result back to the sender so they see "received", not just "sent".
 // ---------------------------------------------------------------------------
 
 export type NudgeDeliveryStatus = "played" | "failed";

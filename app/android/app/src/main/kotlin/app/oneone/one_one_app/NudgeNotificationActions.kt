@@ -118,6 +118,29 @@ object NudgeDeliveryResultDispatcher {
 }
 
 /**
+ * Forwards accept/decline/snooze responses to Flutter so the sender can show
+ * profile signifiers (and connect on accept) while the app is alive.
+ */
+object NudgeResponseDispatcher {
+    @Volatile
+    private var channel: MethodChannel? = null
+
+    fun attach(methodChannel: MethodChannel) {
+        channel = methodChannel
+    }
+
+    fun detach(methodChannel: MethodChannel) {
+        if (channel === methodChannel) channel = null
+    }
+
+    fun signal(result: Map<String, String?>) {
+        Handler(Looper.getMainLooper()).post {
+            channel?.invokeMethod("onNudgeResponse", result)
+        }
+    }
+}
+
+/**
  * Signals Flutter that a nudge has *arrived* on this device (FCM received and
  * native playback is starting), before the user has tapped accept. This lets
  * the app prefetch/warm the LiveKit connection while the user is still

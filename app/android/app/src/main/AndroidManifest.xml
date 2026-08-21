@@ -121,6 +121,9 @@
             android:name=".NudgeNotificationActionReceiver"
             android:exported="false" />
         <receiver
+            android:name=".ChatReplyReceiver"
+            android:exported="false" />
+        <receiver
             android:name=".VoiceNudgeCacheDismissReceiver"
             android:exported="false" />
         <receiver

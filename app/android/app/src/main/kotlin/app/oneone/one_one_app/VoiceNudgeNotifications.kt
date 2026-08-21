@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Person
 import android.app.RemoteInput
 import android.content.Context
 import android.content.Intent
@@ -103,6 +104,13 @@ object VoiceNudgeNotifications {
         if (largeIcon != null) {
             configured.setLargeIcon(largeIcon)
         }
+        configured.addNudgeActions(
+            context = context,
+            eventId = eventId,
+            groupId = groupId,
+            responseUrl = responseUrl,
+            senderName = senderName,
+        )
         if (cachedAudioAvailable) {
             configured
                 .addAction(
@@ -125,15 +133,7 @@ object VoiceNudgeNotifications {
                 )
                 .setDeleteIntent(cacheDeleteIntent(context, eventId))
         }
-        return configured
-            .addNudgeActions(
-                context = context,
-                eventId = eventId,
-                groupId = groupId,
-                responseUrl = responseUrl,
-                senderName = senderName,
-            )
-            .build()
+        return configured.build()
     }
 
     fun buildActionable(
@@ -286,17 +286,15 @@ object VoiceNudgeNotifications {
     }
 
     /**
-     * WhatsApp-style pile: one notification per group that updates in place
-     * ("5 new messages") instead of a new alert per bubble.
+     * WhatsApp-style conversation: one shade notification per group that lists
+     * each message separately (MessagingStyle) and supports inline reply.
      */
-    fun buildChatPile(
+    fun buildChatConversation(
         context: Context,
-        groupId: String,
-        title: String,
-        body: String,
-        unreadCount: Int,
+        conversation: ChatConversation,
     ): Notification {
         ensureChannels(context)
+        val groupId = conversation.groupId
         val openIntent = Intent(context, MainActivity::class.java).apply {
             action = VoiceNudgeContract.actionOpenChatPile
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -314,20 +312,17 @@ object VoiceNudgeNotifications {
             @Suppress("DEPRECATION")
             Notification.Builder(context)
         }
+        val latest = conversation.messages.lastOrNull()
+        val preview = if (latest == null) {
+            conversation.groupName
+        } else {
+            "${latest.senderName}: ${latest.text}"
+        }
         val configured = builder
             .setSmallIcon(appSmallIcon)
             .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
-            .setContentTitle(sanitizeNotificationCopy(title, "Duo"))
-            .setContentText(
-                sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
-            )
-            .setStyle(
-                Notification.BigTextStyle().bigText(
-                    sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
-                ),
-            )
-            .setNumber(unreadCount.coerceAtLeast(1))
-            .setOnlyAlertOnce(unreadCount > 1)
+            .setContentTitle(sanitizeNotificationCopy(conversation.groupName, "Duo"))
+            .setContentText(sanitizeNotificationCopy(preview, FCM_USER_DELIVERY_FAILURE))
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -335,12 +330,94 @@ object VoiceNudgeNotifications {
             .setContentIntent(contentIntent)
             .setGroup(groupKey(groupId))
             .setAutoCancel(true)
-        // Drop the shade notification once bubbles have vanished (10 min
-        // lifetime + 2 min fade). Updating the pile resets this window.
+            .setOnlyAlertOnce(false)
+        applyChatMessagingStyle(configured, conversation)
+        addChatReplyAction(configured, context, conversation)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             configured.setTimeoutAfter(ChatPileStore.ttlMs)
         }
         return configured.build()
+    }
+
+    private fun applyChatMessagingStyle(
+        builder: Notification.Builder,
+        conversation: ChatConversation,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            val body = conversation.messages.joinToString("\n") { "${it.senderName}: ${it.text}" }
+            builder.setStyle(
+                Notification.BigTextStyle().bigText(
+                    sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
+                ),
+            )
+            return
+        }
+        val style = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val user = Person.Builder().setName("You").build()
+            Notification.MessagingStyle(user)
+                .setConversationTitle(conversation.groupName)
+                .setGroupConversation(true)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.MessagingStyle("You")
+                .setConversationTitle(conversation.groupName)
+                .setGroupConversation(true)
+        }
+        for (line in conversation.messages) {
+            val text = sanitizeNotificationCopy(line.text, FCM_USER_DELIVERY_FAILURE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val sender = Person.Builder()
+                    .setName(if (line.fromSelf) "You" else line.senderName)
+                    .setKey(line.senderUserId.ifBlank { line.senderName })
+                    .build()
+                style.addMessage(
+                    Notification.MessagingStyle.Message(text, line.timestampMs, sender),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                style.addMessage(
+                    text,
+                    line.timestampMs,
+                    if (line.fromSelf) "You" else line.senderName,
+                )
+            }
+        }
+        builder.setStyle(style)
+    }
+
+    private fun addChatReplyAction(
+        builder: Notification.Builder,
+        context: Context,
+        conversation: ChatConversation,
+    ) {
+        val replyFlags = PendingIntent.FLAG_UPDATE_CURRENT or if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        ) {
+            PendingIntent.FLAG_MUTABLE
+        } else {
+            0
+        }
+        val replyIntent = Intent(context, ChatReplyReceiver::class.java).apply {
+            action = VoiceNudgeContract.actionReplyChat
+            putExtra(VoiceNudgeContract.extraGroupId, conversation.groupId)
+            putExtra(VoiceNudgeContract.extraGroupName, conversation.groupName)
+            putExtra(VoiceNudgeContract.extraNotifyUrl, conversation.notifyUrl)
+        }
+        val replyPendingIntent = PendingIntent.getBroadcast(
+            context,
+            requestCode(conversation.groupId, "chat_reply"),
+            replyIntent,
+            replyFlags,
+        )
+        val remoteInput = RemoteInput.Builder(VoiceNudgeContract.extraChatReply)
+            .setLabel("Reply")
+            .setAllowFreeFormInput(true)
+            .build()
+        builder.addAction(
+            Notification.Action.Builder(0, "Reply", replyPendingIntent)
+                .addRemoteInput(remoteInput)
+                .build(),
+        )
     }
 
     fun chatPileId(groupId: String): Int = idFor("chat_pile_$groupId")
@@ -349,6 +426,12 @@ object VoiceNudgeNotifications {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.cancel(chatPileId(groupId))
         ChatPileStore.reset(context, groupId)
+    }
+
+    fun refreshChatConversation(context: Context, groupId: String) {
+        val conversation = ChatPileStore.conversation(context, groupId) ?: return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.notify(chatPileId(groupId), buildChatConversation(context, conversation))
     }
 
     /** Drops shade piles whose bubbles have already vanished. */
@@ -390,38 +473,7 @@ object VoiceNudgeNotifications {
             ),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val snoozePendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT or if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-        ) {
-            PendingIntent.FLAG_MUTABLE
-        } else {
-            0
-        }
-        val snoozePendingIntent = PendingIntent.getBroadcast(
-            context,
-            requestCode(eventId, "snooze"),
-            responseIntent(
-                context,
-                VoiceNudgeContract.actionSnooze,
-                eventId,
-                responseUrl,
-                senderName,
-                notificationId,
-            ),
-            snoozePendingIntentFlags,
-        )
-        val snoozeDuration = RemoteInput.Builder(VoiceNudgeContract.extraSnoozeMinutes)
-            .setLabel("Snooze for")
-            .setChoices(arrayOf("5 minutes", "15 minutes"))
-            .setAllowFreeFormInput(false)
-            .build()
-        val snoozeAction = Notification.Action.Builder(
-            0,
-            "Snooze",
-            snoozePendingIntent,
-        ).addRemoteInput(snoozeDuration).build()
         return addAction(Notification.Action.Builder(0, "Accept", acceptPendingIntent).build())
-            .addAction(snoozeAction)
             .addAction(Notification.Action.Builder(0, "Decline", declinePendingIntent).build())
     }
 
@@ -529,10 +581,29 @@ object VoiceNudgeNotifications {
         "$eventId:$action".hashCode() and 0x7fffffff
 }
 
+data class ChatLine(
+    val messageId: String,
+    val senderUserId: String,
+    val senderName: String,
+    val text: String,
+    val timestampMs: Long,
+    val fromSelf: Boolean = false,
+)
+
+data class ChatConversation(
+    val groupId: String,
+    val groupName: String,
+    val notifyUrl: String?,
+    val messages: List<ChatLine>,
+)
+
 object ChatPileStore {
     private const val prefsName = "one_one_chat_pile"
     private const val openedPrefsName = "one_one_chat_pile_opened"
     private const val openedGroupIdKey = "group_id"
+    private const val messagesSuffix = "_msgs"
+    private const val nameSuffix = "_name"
+    private const val notifySuffix = "_notify"
     private const val atSuffix = "_at"
 
     /** Matches Flutter `ChatMessageRepository.visibleLimit`. */
@@ -541,21 +612,51 @@ object ChatPileStore {
     /** Matches Flutter lifetime + fade (10 + 2 minutes). */
     const val ttlMs = 12 * 60 * 1000L
 
-    fun resolveCount(context: Context, groupId: String, serverCount: Int?): Int {
+    fun append(
+        context: Context,
+        groupId: String,
+        groupName: String,
+        messageId: String,
+        senderUserId: String,
+        senderName: String,
+        text: String,
+        notifyUrl: String?,
+        fromSelf: Boolean = false,
+        timestampMs: Long = System.currentTimeMillis(),
+    ) {
         val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        val now = System.currentTimeMillis()
-        val lastAt = prefs.getLong(groupId + atSuffix, 0L)
-        val stale = lastAt <= 0L || now - lastAt >= ttlMs
-        val resolved = when {
-            serverCount != null && serverCount > 0 -> serverCount
-            stale -> 1
-            else -> prefs.getInt(groupId, 0) + 1
-        }.coerceIn(1, maxCount)
+        val existing = conversation(context, groupId)?.messages.orEmpty()
+        if (existing.any { it.messageId == messageId }) return
+        val next = (existing + ChatLine(
+            messageId = messageId,
+            senderUserId = senderUserId,
+            senderName = senderName,
+            text = text,
+            timestampMs = timestampMs,
+            fromSelf = fromSelf,
+        )).takeLast(maxCount)
         prefs.edit()
-            .putInt(groupId, resolved)
-            .putLong(groupId + atSuffix, now)
+            .putString(groupId + messagesSuffix, encodeMessages(next))
+            .putString(groupId + nameSuffix, groupName)
+            .putString(groupId + notifySuffix, notifyUrl)
+            .putLong(groupId + atSuffix, timestampMs)
             .apply()
-        return resolved
+    }
+
+    fun conversation(context: Context, groupId: String): ChatConversation? {
+        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val lastAt = prefs.getLong(groupId + atSuffix, 0L)
+        if (lastAt <= 0L || System.currentTimeMillis() - lastAt >= ttlMs) {
+            return null
+        }
+        val messages = decodeMessages(prefs.getString(groupId + messagesSuffix, null))
+        if (messages.isEmpty()) return null
+        return ChatConversation(
+            groupId = groupId,
+            groupName = prefs.getString(groupId + nameSuffix, null)?.ifBlank { null } ?: "Duo",
+            notifyUrl = prefs.getString(groupId + notifySuffix, null),
+            messages = messages,
+        )
     }
 
     fun reset(context: Context, groupId: String) {
@@ -563,14 +664,23 @@ object ChatPileStore {
             .edit()
             .remove(groupId)
             .remove(groupId + atSuffix)
+            .remove(groupId + messagesSuffix)
+            .remove(groupId + nameSuffix)
+            .remove(groupId + notifySuffix)
             .apply()
     }
 
     fun staleGroupIds(context: Context): List<String> {
         val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
-        val groupIds = prefs.all.keys.map { key ->
-            if (key.endsWith(atSuffix)) key.removeSuffix(atSuffix) else key
+        val groupIds = prefs.all.keys.mapNotNull { key ->
+            when {
+                key.endsWith(atSuffix) -> key.removeSuffix(atSuffix)
+                key.endsWith(messagesSuffix) -> key.removeSuffix(messagesSuffix)
+                key.endsWith(nameSuffix) -> key.removeSuffix(nameSuffix)
+                key.endsWith(notifySuffix) -> key.removeSuffix(notifySuffix)
+                else -> key
+            }
         }.filter { it.isNotBlank() }.toSet()
         return groupIds.filter { groupId ->
             val lastAt = prefs.getLong(groupId + atSuffix, 0L)
@@ -590,5 +700,49 @@ object ChatPileStore {
         val groupId = prefs.getString(openedGroupIdKey, null)?.takeIf { it.isNotBlank() }
         if (groupId != null) prefs.edit().remove(openedGroupIdKey).apply()
         return groupId
+    }
+
+    private fun encodeMessages(messages: List<ChatLine>): String {
+        val array = org.json.JSONArray()
+        for (line in messages) {
+            array.put(
+                org.json.JSONObject().apply {
+                    put("messageId", line.messageId)
+                    put("senderUserId", line.senderUserId)
+                    put("senderName", line.senderName)
+                    put("text", line.text)
+                    put("timestampMs", line.timestampMs)
+                    put("fromSelf", line.fromSelf)
+                },
+            )
+        }
+        return array.toString()
+    }
+
+    private fun decodeMessages(raw: String?): List<ChatLine> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return try {
+            val array = org.json.JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val obj = array.optJSONObject(index) ?: continue
+                    val text = obj.optString("text").trim()
+                    val messageId = obj.optString("messageId").trim()
+                    if (text.isEmpty() || messageId.isEmpty()) continue
+                    add(
+                        ChatLine(
+                            messageId = messageId,
+                            senderUserId = obj.optString("senderUserId"),
+                            senderName = obj.optString("senderName").ifBlank { "Someone" },
+                            text = text,
+                            timestampMs = obj.optLong("timestampMs", System.currentTimeMillis()),
+                            fromSelf = obj.optBoolean("fromSelf", false),
+                        ),
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 }

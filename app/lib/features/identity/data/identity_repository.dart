@@ -22,6 +22,7 @@ import '../../../core/network/api_client.dart';
 import '../../../core/storage/profile_photo_storage.dart';
 import '../../nudges/data/android_voice_nudge_bridge.dart';
 import '../models/app_user_profile.dart';
+import '../models/haptics_intensity.dart';
 import '../models/identity_session.dart';
 import '../models/user_device_record.dart';
 import '../models/user_settings_record.dart';
@@ -307,30 +308,31 @@ class IdentityRepository {
   }
 
   Future<IdentitySession> updateSettings({
-    required String accentColorKey,
-    required bool hapticsEnabled,
-    required String audioOutputPreference,
+    String? accentColorKey,
+    HapticsIntensity? hapticsIntensity,
+    String? audioOutputPreference,
   }) async {
     final user = _auth.currentUser;
     if (user == null) {
       throw StateError('Cannot update settings before sign-in.');
     }
 
-    final cleanAccentKey =
-        accentOptions.any((option) => option.key == accentColorKey)
-        ? accentColorKey
-        : 'coral';
-    final cleanAudioPreference = audioOutputPreference == 'earpiece'
-        ? 'earpiece'
-        : 'speaker';
     final now = _nowSeconds();
-    final settings =
-        (_cachedSession?.settings ?? UserSettingsRecord.defaults(now)).copyWith(
-          accentColorKey: cleanAccentKey,
-          hapticsEnabled: hapticsEnabled,
-          audioOutputPreference: cleanAudioPreference,
-          updatedAt: now,
-        );
+    final current = _cachedSession?.settings ?? UserSettingsRecord.defaults(now);
+    final cleanAccentKey = accentColorKey == null
+        ? current.accentColorKey
+        : (accentOptions.any((option) => option.key == accentColorKey)
+              ? accentColorKey
+              : 'coral');
+    final cleanAudioOutput = audioOutputPreference == null
+        ? null
+        : (audioOutputPreference == 'earpiece' ? 'earpiece' : 'speaker');
+    final settings = current.copyWith(
+      accentColorKey: cleanAccentKey,
+      hapticsIntensity: hapticsIntensity,
+      audioOutputPreference: cleanAudioOutput,
+      updatedAt: now,
+    );
 
     await _database.ref('userSettings/${user.uid}').update(settings.toJson());
 
@@ -806,6 +808,11 @@ class IdentityRepository {
     if (!_disposed) {
       _sessionNotifier.value = session;
     }
+    unawaited(
+      AndroidVoiceNudgeBridge.setHapticsIntensity(
+        session.settings.hapticsIntensity,
+      ),
+    );
     unawaited(
       AppTelemetry.identifyUser(
         userId: session.userId,

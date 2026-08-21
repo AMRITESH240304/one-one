@@ -14,6 +14,7 @@ object AudioOutputContract {
     const val flutterChannel = "app.oneone/audio_output"
     const val methodGetState = "getState"
     const val methodSetMuted = "setMuted"
+    const val methodSetProximityMonitoring = "setProximityMonitoring"
     const val methodOnStateChanged = "onStateChanged"
 }
 

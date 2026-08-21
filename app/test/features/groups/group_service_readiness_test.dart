@@ -101,6 +101,12 @@ void main() {
       'owner': {'role': 'owner', 'memberState': 'active'},
       'friend': {'role': 'member', 'memberState': 'removed'},
     };
+    // Historical removed rows must not invalidate an otherwise-matching active set.
+    final withHistoricalRemoved = {
+      'owner': {'role': 'owner', 'memberState': 'active'},
+      'friend': {'role': 'member', 'memberState': 'active'},
+      'ex': {'role': 'member', 'memberState': 'removed'},
+    };
 
     expect(
       groupMembershipMatchesSnapshot(
@@ -115,6 +121,13 @@ void main() {
         snapshotValue: changed,
       ),
       isFalse,
+    );
+    expect(
+      groupMembershipMatchesSnapshot(
+        members: members,
+        snapshotValue: withHistoricalRemoved,
+      ),
+      isTrue,
     );
   });
 }

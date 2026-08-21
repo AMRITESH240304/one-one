@@ -16,6 +16,7 @@ import 'firebase_analytics_service.dart';
 abstract final class NudgeFailureReason {
   static const permissionDeniedMicrophone = 'permission_denied_microphone';
   static const permissionDeniedFirebase = 'permission_denied_firebase';
+  static const permissionDeniedNotifications = 'permission_denied_notifications';
   static const fcmNotDelivered = 'fcm_not_delivered';
   static const downloadFailed = 'download_failed';
   static const playbackFailed = 'playback_failed';
@@ -28,6 +29,7 @@ abstract final class NudgeFailureReason {
   static const Set<String> all = {
     permissionDeniedMicrophone,
     permissionDeniedFirebase,
+    permissionDeniedNotifications,
     fcmNotDelivered,
     downloadFailed,
     playbackFailed,
@@ -42,6 +44,7 @@ abstract final class NudgeFailureReason {
     switch (reason) {
       case permissionDeniedMicrophone:
       case permissionDeniedFirebase:
+      case permissionDeniedNotifications:
       case fcmNotDelivered:
       case downloadFailed:
       case playbackFailed:
@@ -72,6 +75,7 @@ String _deviceLogReason(String reason) {
   switch (reason) {
     case NudgeFailureReason.permissionDeniedMicrophone:
     case NudgeFailureReason.permissionDeniedFirebase:
+    case NudgeFailureReason.permissionDeniedNotifications:
     case NudgeFailureReason.backgroundFgServiceBlocked:
       return 'permission denied';
     case NudgeFailureReason.volumeTooLow:

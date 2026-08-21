@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
+import '../../identity/models/haptics_intensity.dart';
 import '../models/active_nudge.dart';
 
 class AndroidVoiceNudgeBridge {
@@ -15,6 +16,8 @@ class AndroidVoiceNudgeBridge {
       StreamController<void>.broadcast();
   static final StreamController<NudgeDeliveryResult> _deliveryResults =
       StreamController<NudgeDeliveryResult>.broadcast();
+  static final StreamController<NudgeRecipientResponse> _recipientResponses =
+      StreamController<NudgeRecipientResponse>.broadcast();
   static final StreamController<String> _receivedSignals =
       StreamController<String>.broadcast();
   static final StreamController<ActiveNudge> _incomingSignals =
@@ -61,6 +64,12 @@ class AndroidVoiceNudgeBridge {
   static Stream<NudgeDeliveryResult> get deliveryResults {
     _installHandler();
     return _deliveryResults.stream;
+  }
+
+  /// Accept / decline / snooze replies for nudges this device sent.
+  static Stream<NudgeRecipientResponse> get recipientResponses {
+    _installHandler();
+    return _recipientResponses.stream;
   }
 
   static void _installHandler() {
@@ -140,6 +149,14 @@ class AndroidVoiceNudgeBridge {
           raw.map((key, value) => MapEntry(key.toString(), value)),
         );
         if (result != null) _deliveryResults.add(result);
+      }
+    } else if (call.method == 'onNudgeResponse') {
+      final raw = call.arguments;
+      if (raw is Map) {
+        final response = NudgeRecipientResponse.tryParse(
+          raw.map((key, value) => MapEntry(key.toString(), value)),
+        );
+        if (response != null) _recipientResponses.add(response);
       }
     }
   }
@@ -296,6 +313,20 @@ class AndroidVoiceNudgeBridge {
     }
   }
 
+  /// Pushes the Settings haptic tier to native so incoming nudge playback
+  /// (which can run with Flutter paused) uses the same pattern.
+  static Future<void> setHapticsIntensity(HapticsIntensity intensity) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<void>(
+        'setHapticsIntensity',
+        intensity.storageKey,
+      );
+    } catch (_) {
+      // Native sync is best-effort; Light remains the native default.
+    }
+  }
+
   /// Shared instance so multiple widgets can call platform methods without
   /// re-creating the channel handler.
   static final AndroidVoiceNudgeBridge shared = AndroidVoiceNudgeBridge();
@@ -409,6 +440,59 @@ ActiveNudge? parseIncomingNudge(Map<String, dynamic> raw) {
   );
 }
 
+/// Sender-facing reply from a recipient (accept / decline / snooze).
+class NudgeRecipientResponse {
+  const NudgeRecipientResponse({
+    required this.eventId,
+    required this.groupId,
+    required this.action,
+    this.responderUserId,
+    this.responderName,
+    this.snoozeMinutes,
+  });
+
+  final String eventId;
+  final String groupId;
+
+  /// `accept`, `decline`, or `snooze`.
+  final String action;
+  final String? responderUserId;
+  final String? responderName;
+  final int? snoozeMinutes;
+
+  bool get isDecline => action == 'decline';
+  bool get isSnooze => action == 'snooze';
+  bool get isAccept => action == 'accept';
+
+  static NudgeRecipientResponse? tryParse(Map<String, dynamic> raw) {
+    final eventId = raw['eventId']?.toString().trim() ?? '';
+    final groupId = raw['groupId']?.toString().trim() ?? '';
+    final action = raw['responseAction']?.toString().trim() ?? '';
+    if (eventId.isEmpty ||
+        groupId.isEmpty ||
+        !const {'accept', 'decline', 'snooze'}.contains(action)) {
+      return null;
+    }
+    final snoozeMinutes = int.tryParse(
+      raw['snoozeMinutes']?.toString().trim() ?? '',
+    );
+    final responderUserId = raw['responderUserId']?.toString().trim();
+    final responderName = raw['responderName']?.toString().trim();
+    return NudgeRecipientResponse(
+      eventId: eventId,
+      groupId: groupId,
+      action: action,
+      responderUserId: responderUserId == null || responderUserId.isEmpty
+          ? null
+          : responderUserId,
+      responderName: responderName == null || responderName.isEmpty
+          ? null
+          : responderName,
+      snoozeMinutes: snoozeMinutes,
+    );
+  }
+}
+
 /// Outcome of a ring/voice nudge this device sent, reported once the
 /// receiver's device genuinely started (or failed to start) playback.
 class NudgeDeliveryResult {
@@ -455,24 +539,43 @@ class NudgeDeliveryResult {
     };
   }
 
+  /// Machine-readable failure reasons where the recipient's own device/OS
+  /// blocked delivery (permissions revoked, app force-stopped, battery policy,
+  /// etc.). Used for the lock signifier on the sender UI.
+  static const Set<String> receiverDeviceReasons = {
+    'permission_denied_foreground_service',
+    'background_fg_service_blocked',
+    'permission_denied_notifications',
+    'permission_denied_microphone',
+    'fcm_not_delivered',
+    'app_force_stopped',
+    'battery_optimization_active',
+    'timeout',
+  };
+
   /// Classifies a failed nudge into where the fault lies:
   /// - `duo`             -> a bug on Duo's end (reportable; prompt the sender)
   /// - `receiver_device` -> the recipient's device/OS/permissions blocked it
   /// - `unknown`         -> not enough signal to attribute the failure
   String? get failureSource {
     if (played) return null;
-    switch (reason) {
-      case 'permission_denied_foreground_service':
-        return 'receiver_device';
+    final normalized = NudgeDeliveryFailure.canonicalReason(reason);
+    if (NudgeDeliveryFailure.isReceiverDeviceBlocked(normalized)) {
+      return 'receiver_device';
+    }
+    switch (normalized) {
       case 'playback_error':
       case 'playback_service_start_error':
       case 'download_error':
-      case 'timeout':
+      case 'download_failed':
         return 'duo';
       default:
         return 'unknown';
     }
   }
+
+  /// True when the recipient's phone settings or OS policy blocked delivery.
+  bool get isReceiverDeviceBlocked => failureSource == 'receiver_device';
 
   /// True when playback genuinely failed due to a Duo-side bug (as opposed to
   /// a receiver-device condition like muted volume or a blocked FGS). These
@@ -501,6 +604,29 @@ class NudgeDeliveryResult {
           ? null
           : raw['recipientUserId'].toString().trim(),
     );
+  }
+}
+
+/// Shared delivery-failure normalization and receiver-device classification.
+abstract final class NudgeDeliveryFailure {
+  static String? canonicalReason(String? reason) {
+    if (reason == null || reason.trim().isEmpty) return null;
+    switch (reason.trim()) {
+      case 'permission_denied_foreground_service':
+        return 'background_fg_service_blocked';
+      case 'download_error':
+        return 'download_failed';
+      case 'playback_service_start_error':
+        return 'playback_error';
+      default:
+        return reason.trim();
+    }
+  }
+
+  static bool isReceiverDeviceBlocked(String? reason) {
+    final normalized = canonicalReason(reason);
+    if (normalized == null) return false;
+    return NudgeDeliveryResult.receiverDeviceReasons.contains(normalized);
   }
 }
 

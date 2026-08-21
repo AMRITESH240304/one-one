@@ -56,7 +56,7 @@ void main() {
         kind: AudioOutputGlyphKind.muted,
         speakerPreferenceOn: true,
       ),
-      contains('unmute'),
+      contains('tap to return to speaker'),
     );
   });
 }

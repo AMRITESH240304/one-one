@@ -20,7 +20,17 @@ import '../core/firebase/firebase_bootstrap.dart';
 import '../core/logging/log_level.dart';
 import '../core/logging/log_manager.dart';
 import '../core/ui/bottom_system_inset.dart';
+import '../features/online/live_session_overlay_controller.dart';
 import '../features/service_status/service_status_gate.dart';
+
+/// Global navigator key used by the in-app live-session PiP overlay to pop
+/// back to the home screen from any route without requiring a BuildContext.
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
+
+/// Route observer shared by all screens that need to react to push/pop events
+/// (e.g. the home screen showing/hiding the in-app live-session PiP overlay).
+final RouteObserver<ModalRoute<void>> appRouteObserver =
+    RouteObserver<ModalRoute<void>>();
 
 const SystemUiOverlayStyle _systemOverlayStyle = SystemUiOverlayStyle(
   statusBarColor: Colors.transparent,
@@ -65,7 +75,8 @@ class OneOneApp extends StatelessWidget {
       child: MaterialApp(
         title: 'Duo',
         debugShowCheckedModeBanner: false,
-        navigatorObservers: [AnalyticsService.observer],
+        navigatorKey: appNavigatorKey,
+        navigatorObservers: [AnalyticsService.observer, appRouteObserver],
         routes: {
           '/auth': (_) => const WithForegroundTask(
             child: _AuthSessionLifecycle(child: _FirebaseGate()),
@@ -87,7 +98,14 @@ class OneOneApp extends StatelessWidget {
                     designSize: const Size(393, 873),
                     minTextAdapt: true,
                     splitScreenMode: true,
-                    child: child,
+                    // Stack the in-app live-session PiP overlay on top of
+                    // all routes so it persists during in-app navigation.
+                    child: Stack(
+                      children: [
+                        child!,
+                        LiveSessionFloatingPip(navigatorKey: appNavigatorKey),
+                      ],
+                    ),
                   ),
                 );
               },

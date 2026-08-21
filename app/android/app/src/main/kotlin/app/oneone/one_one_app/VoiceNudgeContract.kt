@@ -31,6 +31,11 @@ object VoiceNudgeContract {
     const val extraAction = "nudgeAction"
     const val extraNotificationId = "notificationId"
     const val extraSnoozeMinutes = "snoozeMinutes"
+    const val extraMessageId = "messageId"
+    const val extraMessageText = "messageText"
+    const val extraGroupName = "groupName"
+    const val extraNotifyUrl = "notifyUrl"
+    const val extraChatReply = "chatReply"
 
     const val kindVoice = "voice_nudge"
     const val kindRing = "ring_nudge"
@@ -45,6 +50,7 @@ object VoiceNudgeContract {
     const val actionConnect = "app.oneone.action.CONNECT_NUDGE"
     const val actionOpenNudge = "app.oneone.action.OPEN_NUDGE"
     const val actionOpenChatPile = "app.oneone.action.OPEN_CHAT_PILE"
+    const val actionReplyChat = "app.oneone.action.REPLY_CHAT"
     const val actionDecline = "app.oneone.action.DECLINE_NUDGE"
     const val actionSnooze = "app.oneone.action.SNOOZE_NUDGE"
     const val actionPlayCachedAudio = "app.oneone.action.PLAY_CACHED_NUDGE"
@@ -84,7 +90,20 @@ object VoiceNudgeTokenStore {
 object VoiceNudgeDeliveryAck {
     private val executor = Executors.newSingleThreadExecutor()
 
+    fun postPlayed(ackUrl: String?, deliveryToken: String?) {
+        post(ackUrl, deliveryToken, status = "played", reason = null)
+    }
+
     fun postFailure(ackUrl: String?, deliveryToken: String?, reason: String) {
+        post(ackUrl, deliveryToken, status = "failed", reason = reason)
+    }
+
+    private fun post(
+        ackUrl: String?,
+        deliveryToken: String?,
+        status: String,
+        reason: String?,
+    ) {
         if (ackUrl.isNullOrBlank() || deliveryToken.isNullOrBlank()) return
         executor.execute {
             var connection: HttpURLConnection? = null
@@ -98,19 +117,19 @@ object VoiceNudgeDeliveryAck {
                 opened.setRequestProperty("content-type", "application/json")
                 opened.setRequestProperty("x-one-one-delivery-token", deliveryToken)
                 val body = JSONObject().apply {
-                    put("status", "failed")
-                    put("reason", reason)
+                    put("status", status)
+                    if (!reason.isNullOrBlank()) put("reason", reason)
                 }
                 opened.outputStream.use { it.write(body.toString().toByteArray()) }
                 val responseCode = opened.responseCode
                 Log.i(
                     VoiceNudgeDiagnostics.tag,
-                    "[FCM-E3-ACK] Reported failure before playback started " +
-                        "reason=$reason HTTP=$responseCode",
+                    "[FCM-E3-ACK] Reported $status before/without playback " +
+                        "reason=${reason ?: "none"} HTTP=$responseCode",
                 )
             } catch (error: Exception) {
                 VoiceNudgeDiagnostics.logFailure(
-                    "[FCM-E3-ACK] Reporting failure before playback started",
+                    "[FCM-E3-ACK] Reporting $status",
                     error,
                 )
             } finally {
@@ -164,6 +183,9 @@ object VoiceNudgeDiagnostics {
         "livekit_session_failed" -> "livekit_session_failed"
         "background_fg_service_blocked", "permission_denied_foreground_service" ->
             "background_fg_service_blocked"
+        "permission_denied_notifications" -> "permission_denied_notifications"
+        "battery_optimization_active" -> "battery_optimization_active"
+        "app_force_stopped" -> "app_force_stopped"
         else -> "unknown"
     }
 

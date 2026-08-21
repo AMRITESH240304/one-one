@@ -467,24 +467,35 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             return
         }
         val groupName = message.data["groupName"]?.takeIf { it.isNotBlank() } ?: "your group"
-        val serverCount = message.data["unreadCount"]?.toIntOrNull()
-        val count = ChatPileStore.resolveCount(this, groupId, serverCount)
-        val title = if (count <= 1) {
-            "💬 New message in $groupName"
-        } else {
-            "💬 $count new messages"
-        }
-        val body = message.data["body"]?.takeIf { it.isNotBlank() }
-            ?: "You can only check the last 5 messages, see them before they fade away"
+        val senderName = message.data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
+        val senderUserId = message.data["senderUserId"].orEmpty()
+        val text = message.data["messageText"]?.takeIf { it.isNotBlank() }
+            ?: message.data["body"]?.takeIf { it.isNotBlank() }
+            ?: "$senderName sent a message"
+        val messageId = message.data["messageId"]?.takeIf { it.isNotBlank() }
+            ?: message.messageId
+            ?: "${System.currentTimeMillis()}"
+        ChatPileStore.append(
+            this,
+            groupId = groupId,
+            groupName = groupName,
+            messageId = messageId,
+            senderUserId = senderUserId,
+            senderName = senderName,
+            text = text,
+            notifyUrl = message.data["notifyUrl"],
+        )
+        val conversation = ChatPileStore.conversation(this, groupId) ?: return
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         try {
             manager.notify(
                 VoiceNudgeNotifications.chatPileId(groupId),
-                VoiceNudgeNotifications.buildChatPile(this, groupId, title, body, count),
+                VoiceNudgeNotifications.buildChatConversation(this, conversation),
             )
             Log.i(
                 VoiceNudgeDiagnostics.tag,
-                "[FCM-08] Chat pile notification displayed groupSuffix=${groupId.takeLast(6)} count=$count",
+                "[FCM-08] Chat notification displayed groupSuffix=${groupId.takeLast(6)} " +
+                    "messages=${conversation.messages.size}",
             )
         } catch (error: SecurityException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
@@ -599,8 +610,25 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 "channel=${VoiceNudgeContract.generalNotificationChannelId} " +
                 "importance=${channelImportance ?: "legacy"}",
         )
+        if (!notificationsEnabled) {
+            VoiceNudgeDeliveryAck.postFailure(
+                data["ackUrl"],
+                data["deliveryToken"],
+                "permission_denied_notifications",
+            )
+            return
+        }
         try {
             val notificationId = VoiceNudgeNotifications.idFor(eventId)
+            var acked = false
+            fun ackPlayedOnce() {
+                if (acked) return
+                acked = true
+                VoiceNudgeDeliveryAck.postPlayed(
+                    data["ackUrl"],
+                    data["deliveryToken"],
+                )
+            }
             NotificationAvatarHelper.applyLargeIcon(
                 this,
                 data["senderPhotoUrl"],
@@ -617,13 +645,21 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                             data["responseUrl"],
                             senderName,
                             "👋 $senderName nudged you",
-                            "Accept, snooze, or decline ✨",
+                            "Accept or decline ✨",
                             largeIcon = largeIcon,
                             senderUserId = data["senderUserId"],
                         ),
                     )
+                    ackPlayedOnce()
                 } catch (error: SecurityException) {
                     VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
+                    if (!acked) {
+                        VoiceNudgeDeliveryAck.postFailure(
+                            data["ackUrl"],
+                            data["deliveryToken"],
+                            "permission_denied_notifications",
+                        )
+                    }
                 }
             }
             Log.i(
@@ -632,6 +668,11 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             )
         } catch (error: SecurityException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
+            VoiceNudgeDeliveryAck.postFailure(
+                data["ackUrl"],
+                data["deliveryToken"],
+                "permission_denied_notifications",
+            )
         }
     }
 
@@ -641,6 +682,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         val groupId = data["groupId"] ?: return
         val responseAction = data["responseAction"] ?: return
         val snoozeMinutes = data["snoozeMinutes"]?.toIntOrNull()
+        val responderUserId = data["responderUserId"]
         val responderName = data["responderName"]?.take(80).orEmpty().ifBlank { "Your friend" }
         // B5: Nudge response arrived — cancel sender's expiry alarm.
         NudgeExpiryTracker.cancelExpiry(this, eventId)
@@ -658,6 +700,19 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 NudgeActionDispatcher.signal()
             }
         }
+        // Always forward to Flutter so the sender sheet / friend profiles can
+        // show decline & snooze signifiers (and accept can clear pending state).
+        NudgeResponseDispatcher.signal(
+            mapOf(
+                "eventId" to eventId,
+                "groupId" to groupId,
+                "responseAction" to responseAction,
+                "responderUserId" to responderUserId,
+                "responderName" to responderName,
+                "snoozeMinutes" to snoozeMinutes?.toString(),
+                "snoozedUntil" to data["snoozedUntil"],
+            ),
+        )
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         manager.notify(
             VoiceNudgeNotifications.idFor(eventId),

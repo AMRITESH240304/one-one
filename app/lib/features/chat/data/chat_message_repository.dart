@@ -107,7 +107,7 @@ class ChatMessageRepository {
       );
     }
 
-    unawaited(_notifyGroup(groupId));
+    unawaited(_notifyGroup(groupId, messageId: messageId, text: sanitized));
   }
 
   /// Clears the collapsing chat notification pile when the group is opened.
@@ -127,11 +127,15 @@ class ChatMessageRepository {
 
   /// Best-effort push fan-out — the bubble is already live in-app via RTDB,
   /// so a failed/slow notification call must never block or fail sendMessage.
-  Future<void> _notifyGroup(String groupId) async {
+  Future<void> _notifyGroup(
+    String groupId, {
+    required String messageId,
+    required String text,
+  }) async {
     try {
       await _apiClient.postJson(
         '/v1/groups/$groupId/chat-messages/notify',
-        const {},
+        {'messageId': messageId, 'text': text},
       );
     } catch (_) {
       // Non-fatal — see doc comment above.

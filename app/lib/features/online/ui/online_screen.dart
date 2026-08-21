@@ -114,7 +114,7 @@ class _OnlineScreenState extends State<OnlineScreen> {
     }
 
     OnlineSession? createdSession;
-    final speakerOn = widget.identity.settings.audioOutputPreference != 'earpiece';
+    final speakerOn = true;
     final preparedToken = LiveKitConnectionWarmer.instance.takeToken(
       widget.group.groupId,
     );

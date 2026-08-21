@@ -9,6 +9,8 @@ class AudioOutputContract {
   static const String flutterChannel = 'app.oneone/audio_output';
   static const String methodGetState = 'getState';
   static const String methodSetMuted = 'setMuted';
+  static const String methodSetProximityMonitoring =
+      'setProximityMonitoring';
   static const String methodOnStateChanged = 'onStateChanged';
 }
 
@@ -72,7 +74,7 @@ String audioOutputTooltip({
   required bool speakerPreferenceOn,
 }) {
   return switch (kind) {
-    AudioOutputGlyphKind.muted => 'Muted — hold to unmute',
+    AudioOutputGlyphKind.muted => 'Muted — tap to return to speaker',
     AudioOutputGlyphKind.headset =>
       speakerPreferenceOn
           ? 'Headphones — tap to prefer speaker after unplug, hold to mute'
@@ -150,6 +152,22 @@ class AudioOutputBridge {
       debugPrint('AudioOutput setMuted failed: $error\n$stack');
     }
     return null;
+  }
+
+  /// Enable OS proximity screen-off while the phone is held to the ear
+  /// (earpiece mode only). No-op on platforms without a proximity sensor.
+  static Future<void> setProximityMonitoring(bool enabled) async {
+    _ensureHandler();
+    try {
+      await _channel.invokeMethod<void>(
+        AudioOutputContract.methodSetProximityMonitoring,
+        enabled,
+      );
+    } on MissingPluginException {
+      // Older builds / desktop without the native plugin.
+    } catch (error, stack) {
+      debugPrint('AudioOutput setProximityMonitoring failed: $error\n$stack');
+    }
   }
 
   /// Silence (or restore) remote LiveKit audio independently of the speaker

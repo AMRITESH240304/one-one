@@ -28,6 +28,7 @@ class MainActivity : FlutterFragmentActivity() {
     private lateinit var voicePipChannel: MethodChannel
     private var audioOutputChannel: MethodChannel? = null
     private var audioOutputMonitor: AudioOutputMonitor? = null
+    private var proximityScreenControl: ProximityScreenControl? = null
     private var voiceOverlayAnnouncer: VoiceOverlayAnnouncer? = null
     private var voiceSessionActive = false
     private var voiceSessionTalking = false
@@ -81,11 +82,14 @@ class MainActivity : FlutterFragmentActivity() {
 
     private fun attachAudioOutputChannel(flutterEngine: FlutterEngine) {
         audioOutputMonitor?.stop()
+        proximityScreenControl?.setEnabled(false)
         val channel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             AudioOutputContract.flutterChannel,
         )
         audioOutputChannel = channel
+        val proximity = ProximityScreenControl(this)
+        proximityScreenControl = proximity
         val monitor = AudioOutputMonitor(this) {
             channel.invokeMethod(
                 AudioOutputContract.methodOnStateChanged,
@@ -101,6 +105,10 @@ class MainActivity : FlutterFragmentActivity() {
                 AudioOutputContract.methodSetMuted -> {
                     MediaVolume.setMuted(this, call.arguments == true)
                     result.success(AudioOutput.readState(this))
+                }
+                AudioOutputContract.methodSetProximityMonitoring -> {
+                    proximity.setEnabled(call.arguments == true)
+                    result.success(null)
                 }
                 else -> result.notImplemented()
             }
@@ -131,6 +139,7 @@ class MainActivity : FlutterFragmentActivity() {
         )
         NudgeActionDispatcher.attach(voiceNudgeChannel)
         NudgeDeliveryResultDispatcher.attach(voiceNudgeChannel)
+        NudgeResponseDispatcher.attach(voiceNudgeChannel)
         NudgeReceivedDispatcher.attach(voiceNudgeChannel)
         IncomingNudgeDispatcher.attach(voiceNudgeChannel)
         captureNudgeAction(intent)
@@ -344,6 +353,14 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(null)
                 }
 
+                "setHapticsIntensity" -> {
+                    HapticsPreferenceStore.save(
+                        this,
+                        call.arguments?.toString().orEmpty(),
+                    )
+                    result.success(null)
+                }
+
                 else -> result.notImplemented()
             }
         }
@@ -426,6 +443,7 @@ class MainActivity : FlutterFragmentActivity() {
         if (::voiceNudgeChannel.isInitialized) {
             NudgeActionDispatcher.detach(voiceNudgeChannel)
             NudgeDeliveryResultDispatcher.detach(voiceNudgeChannel)
+            NudgeResponseDispatcher.detach(voiceNudgeChannel)
             NudgeReceivedDispatcher.detach(voiceNudgeChannel)
             IncomingNudgeDispatcher.detach(voiceNudgeChannel)
         }
@@ -435,6 +453,8 @@ class MainActivity : FlutterFragmentActivity() {
         }
         voiceOverlayAnnouncer?.shutdown()
         voiceOverlayAnnouncer = null
+        proximityScreenControl?.setEnabled(false)
+        proximityScreenControl = null
         audioOutputMonitor?.stop()
         audioOutputMonitor = null
         audioOutputChannel?.setMethodCallHandler(null)

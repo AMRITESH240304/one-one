@@ -6,6 +6,7 @@ import {
 } from "../firebase/messaging.js";
 import { config } from "../config.js";
 import {
+  filterActiveAccountUserIds,
   requireActiveGroup,
   requireActiveGroupMember,
   requireActiveUser,
@@ -14,6 +15,7 @@ import {
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
 import { chatUnreadTtlSeconds, nextChatUnread } from "./chatUnread.js";
+import { createAckTicket } from "./nudgeDeliveryService.js";
 import { enforceNudgeRateLimits } from "./nudgeRateLimiter.js";
 
 export type FriendLiveInput = {
@@ -48,6 +50,8 @@ export type GoneOfflineInput = {
 export type ChatMessageInput = {
   groupId: string;
   senderUserId: string;
+  messageId?: string;
+  text?: string;
 };
 
 type RecipientDevice = {
@@ -293,6 +297,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
   const senderPhotoUrl = await readProfilePhotoUrl(input.senderUserId);
   const senderAvatarAsset = await readAvatarAsset(input.senderUserId);
   const recipientDevices = await collectRecipientDevices(recipientUserIds);
+  const recipientNames = await readDisplayNames(recipientUserIds);
   const notificationEventId = await createNotificationEvent({
     groupId: input.groupId,
     senderUserId: input.senderUserId,
@@ -304,6 +309,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
   });
 
   const baseUrl = config.PUBLIC_API_BASE_URL.replace(/\/$/, "");
+  const ackUrl = `${baseUrl}/v1/nudges/${notificationEventId}/ack`;
   const pushResult = await sendAndroidDataPushes(
     recipientDevices.map((device) => ({
       token: device.fcmToken,
@@ -316,6 +322,15 @@ export async function sendNudgeNotification(input: NudgeInput) {
         ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         ...(senderAvatarAsset ? { senderAvatarAsset } : {}),
         responseUrl: `${baseUrl}/v1/groups/${input.groupId}/nudges/${notificationEventId}/respond`,
+        ackUrl,
+        deliveryToken: createAckTicket({
+          eventId: notificationEventId,
+          groupId: input.groupId,
+          kind: "nudge",
+          senderUserId: input.senderUserId,
+          recipientUserId: device.userId,
+          recipientName: recipientNames.get(device.userId)?.trim() || "your friend"
+        }),
         deepLink: `walkie://group/${input.groupId}`
       }
     })),
@@ -348,19 +363,19 @@ export async function sendNudgeNotification(input: NudgeInput) {
 }
 
 const chatMessageTtlMs = chatUnreadTtlSeconds * 1000;
-const chatPileHint =
-  "You can only check the last 5 messages, see them before they fade away";
+const chatNotifyMaxWords = 10;
+const chatNotifyMaxChars = 240;
 
-/** Fans out a collapsing "X new messages" push after a chat bubble
- * has already been written to `groupMessages/{groupId}/{messageId}`.
- * Android receives a data-only FCM so the client can update one
- * notification in place (WhatsApp-style) instead of alerting per send. */
+/** Fans out one data-only FCM per chat bubble so Android can show the
+ * actual message text (and keep a WhatsApp-style conversation + reply). */
 export async function sendChatMessageNotification(input: ChatMessageInput) {
   await requireActiveUser(input.senderUserId);
   const group = await requireActiveGroup(input.groupId);
   await requireActiveGroupMember(input.groupId, input.senderUserId);
 
   const senderName = await readDisplayName(input.senderUserId);
+  const messageText = sanitizeChatNotificationText(input.text);
+  const messageId = input.messageId?.trim() || undefined;
   const recipientUserIds = await activeRecipientUserIds(input.groupId, input.senderUserId);
   const recipientDevices = await collectRecipientDevices(recipientUserIds);
   const notificationEventId = await createNotificationEvent({
@@ -370,7 +385,7 @@ export async function sendChatMessageNotification(input: ChatMessageInput) {
     targetScope: "all_friends",
     targetUserIds: recipientUserIds,
     createdAt: nowSeconds(),
-    metadata: {}
+    metadata: messageId ? { messageId } : {}
   });
 
   const unreadByUser = new Map<string, number>();
@@ -378,17 +393,13 @@ export async function sendChatMessageNotification(input: ChatMessageInput) {
     unreadByUser.set(userId, await bumpChatUnread(input.groupId, userId));
   }
 
+  const baseUrl = config.PUBLIC_API_BASE_URL.replace(/\/$/, "");
+  const notifyUrl = `${baseUrl}/v1/groups/${input.groupId}/chat-messages/notify`;
+  const title = `💬 ${senderName}`;
+  const body = messageText ?? `${senderName} sent a message`;
   const pushResult = await sendAndroidDataPushes(
     recipientDevices.map((device) => {
       const count = unreadByUser.get(device.userId) ?? 1;
-      const title =
-        count <= 1
-          ? `💬 New message in ${group.name}`
-          : `💬 ${count} new messages`;
-      const body =
-        count <= 1
-          ? `${senderName} sent a message. ${chatPileHint}`
-          : chatPileHint;
       return {
         token: device.fcmToken,
         data: {
@@ -397,9 +408,12 @@ export async function sendChatMessageNotification(input: ChatMessageInput) {
           groupName: group.name,
           senderUserId: input.senderUserId,
           senderName,
+          ...(messageId ? { messageId } : {}),
+          ...(messageText ? { messageText } : {}),
           unreadCount: String(count),
           title,
           body,
+          notifyUrl,
           deepLink: `walkie://group/${input.groupId}`
         }
       };
@@ -435,11 +449,15 @@ async function activeRecipientUserIds(groupId: string, senderUserId: string) {
   const snapshot = await getRealtimeDatabase().ref(`groupMembers/${groupId}`).get();
   if (!snapshot.exists() || !isRecord(snapshot.val())) return [];
 
-  return Object.entries(snapshot.val() as Record<string, unknown>)
+  const memberIds = Object.entries(snapshot.val() as Record<string, unknown>)
     .filter(([userId, value]) => {
       return userId !== senderUserId && isRecord(value) && value.memberState === "active";
     })
     .map(([userId]) => userId);
+
+  // Drop accounts that were deleted (users/{uid} gone). Uninstalled-but-still-
+  // registered accounts keep their users record and remain eligible.
+  return filterActiveAccountUserIds(memberIds);
 }
 
 async function collectRecipientDevices(userIds: string[]) {
@@ -555,6 +573,24 @@ async function writeStatusEvent(
 async function readDisplayName(userId: string) {
   const snapshot = await getRealtimeDatabase().ref(`users/${userId}/displayName`).get();
   return snapshot.val()?.toString() || "Someone";
+}
+
+async function readDisplayNames(userIds: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  await Promise.all(
+    userIds.map(async (userId) => {
+      names.set(userId, await readDisplayName(userId));
+    })
+  );
+  return names;
+}
+
+function sanitizeChatNotificationText(raw: string | undefined): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const normalized = raw.trim().replace(/\s+/g, " ");
+  if (!normalized) return undefined;
+  const words = normalized.split(" ").slice(0, chatNotifyMaxWords);
+  return words.join(" ").slice(0, chatNotifyMaxChars);
 }
 
 async function readProfilePhotoUrl(userId: string): Promise<string | undefined> {

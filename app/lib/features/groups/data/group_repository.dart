@@ -115,18 +115,26 @@ class GroupRepository {
       activeEntries.map((entry) => _loadMemberProfile(entry.key)),
     );
 
-    return [
-      for (var i = 0; i < activeEntries.length; i++)
+    // Skip memberships whose users/{uid} record is gone or inactive.
+    // That is the account-deletion signal — uninstall leaves users/{uid}
+    // intact, so those members still appear (correctly) as away/unreachable.
+    final members = <GroupMemberSummary>[];
+    for (var i = 0; i < activeEntries.length; i++) {
+      final profile = profiles[i];
+      if (profile == null) continue;
+      members.add(
         GroupMemberSummary(
           userId: activeEntries[i].key,
-          displayName: profiles[i].displayName,
+          displayName: profile.displayName,
           role: activeEntries[i].value['role']?.toString() ?? 'member',
           memberState: 'active',
-          profilePhotoUrl: profiles[i].profilePhotoUrl,
-          profilePhotoBase64: profiles[i].profilePhotoBase64,
-          avatarAsset: profiles[i].avatarAsset,
+          profilePhotoUrl: profile.profilePhotoUrl,
+          profilePhotoBase64: profile.profilePhotoBase64,
+          avatarAsset: profile.avatarAsset,
         ),
-    ];
+      );
+    }
+    return members;
   }
 
   Future<int> countActiveMembers(String groupId) async {
@@ -211,13 +219,17 @@ class GroupRepository {
         .toList();
   }
 
-  Future<_MemberProfileFields> _loadMemberProfile(String userId) async {
+  Future<_MemberProfileFields?> _loadMemberProfile(String userId) async {
     try {
       final snap = await _database.ref('users/$userId').get();
       if (snap.value is! Map) {
-        return _MemberProfileFields(displayName: userId);
+        // No users/{uid} → account was deleted. Do not treat as a live member.
+        return null;
       }
       final data = Map<Object?, Object?>.from(snap.value! as Map);
+      if ((data['accountState']?.toString() ?? 'active') != 'active') {
+        return null;
+      }
       final displayName = data['displayName']?.toString().trim();
       return _MemberProfileFields(
         displayName: (displayName == null || displayName.isEmpty)
@@ -228,6 +240,8 @@ class GroupRepository {
         avatarAsset: data['avatarAsset']?.toString(),
       );
     } catch (_) {
+      // Transient read failures should not invent a "deleted" member; keep
+      // them visible with a fallback name until a later refresh succeeds.
       return _MemberProfileFields(displayName: userId);
     }
   }
