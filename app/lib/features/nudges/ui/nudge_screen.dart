@@ -663,6 +663,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     // Persist failure summaries so they can be shown on sheet reopen.
     final failed = <NudgeDeliveryResult>[];
     final failedNames = <String>[];
+    final failedReasons = <String?>[];
     for (final entry in _resultsByUserId.entries) {
       final result = entry.value;
       final name =
@@ -672,6 +673,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       if (!result.played) {
         failed.add(result);
         failedNames.add(name.trim().split(RegExp(r'\s+')).first);
+        failedReasons.add(result.reason);
       }
     }
     final volumeWarnings = _mergedVolumeWarnings();
@@ -679,13 +681,12 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     if (failed.isEmpty) {
       NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
     } else {
-      final persistMsg = failed.length == 1
-          ? _shortFailureWithReason(failedNames.first, failed.first.reason)
-          : _persistedFailureMessage(
-              failed.length,
-              totalRecipients,
-              failedNames,
-            );
+      final persistMsg = _persistedFailureMessage(
+        failed.length,
+        totalRecipients,
+        failedNames,
+        reasons: failedReasons,
+      );
       NudgeFailureMemory.instance.record(
         widget.group.groupId,
         failed.length >= totalRecipients
@@ -781,9 +782,15 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     }
 
     if (failed.isNotEmpty) {
-      if (failed.length == 1 && (expected.length <= 1 || results.length == 1)) {
-        final f = failed.first;
-        return _shortFailureWithReason(nameOf(f), f.reason);
+      if (failed.length == 1) {
+        return _shortFailureWithReason(nameOf(failed.first), failed.first.reason);
+      }
+      // Prefer per-person reason lines when there are only a couple of failures
+      // so the sender learns *why* (lock vs Duo) instead of a generic miss.
+      if (failed.length <= 2) {
+        return failed
+            .map((f) => _shortFailureWithReason(nameOf(f), f.reason))
+            .join('\n');
       }
       final names = failed.map(nameOf).toList(growable: false);
       final named = _joinNames(names);
@@ -873,6 +880,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       case 'playback_error':
       case 'playback_service_start_error':
       case 'download_error':
+      case 'download_failed':
         return 'Nudge did not reach $name \u2014 something went wrong on '
             'Duo\u2019s end.';
       default:
@@ -883,8 +891,23 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   String _persistedFailureMessage(
     int failedCount,
     int totalRecipients,
-    List<String> failedNames,
-  ) {
+    List<String> failedNames, {
+    List<String?> reasons = const [],
+  }) {
+    if (failedCount == 1 && failedNames.isNotEmpty) {
+      return _shortFailureWithReason(
+        failedNames.first,
+        reasons.isNotEmpty ? reasons.first : null,
+      );
+    }
+    if (failedCount <= 2 &&
+        failedNames.length == failedCount &&
+        reasons.length == failedCount) {
+      return [
+        for (var i = 0; i < failedCount; i++)
+          _shortFailureWithReason(failedNames[i], reasons[i]),
+      ].join('\n');
+    }
     if (failedCount >= totalRecipients) {
       return 'Nudge wasn\u2019t delivered to anyone in this group.';
     }
@@ -1463,7 +1486,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
             padding: const EdgeInsets.only(bottom: 15),
             child: ConstrainedBox(
               constraints: BoxConstraints(
-                maxHeight: MediaQuery.sizeOf(context).height * 0.88,
+                maxHeight: MediaQuery.sizeOf(context).height * 0.68,
               ),
               child: SingleChildScrollView(
                 child: Column(
@@ -1473,7 +1496,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                     // ── Drag handle ──
                     Center(
                       child: Padding(
-                        padding: EdgeInsets.only(top: 10.h, bottom: 14.h),
+                        padding: EdgeInsets.only(top: 8.h, bottom: 8.h),
                         child: Container(
                           width: 38.w,
                           height: 4.h,
@@ -1491,28 +1514,13 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                       child: Row(
                         children: [
                           Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Send a nudge',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 18.sp,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                                SizedBox(height: 4.h),
-                                Text(
-                                  widget.group.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: Colors.white38,
-                                    fontSize: 12.sp,
-                                  ),
-                                ),
-                              ],
+                            child: Text(
+                              'Get their attention',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18.sp,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                           ),
                           IconButton(
@@ -1528,23 +1536,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                       ),
                     ),
 
-                    SizedBox(height: 16.h),
+                    SizedBox(height: 10.h),
 
-                    // ── Recipient picker (with delivery state badges) ──
-                    Padding(
-                      padding: EdgeInsets.fromLTRB(20.w, 0, 20.w, 10.h),
-                      child: Text(
-                        'Whom do you want to reach?',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 15.sp,
-                          fontWeight: FontWeight.w500,
-                          height: 1.3,
-                        ),
-                      ),
-                    ),
+                    // ── Recipient picker (selection is self-explanatory) ──
                     SizedBox(
-                      height: 100.h,
+                      height: 92.h,
                       child: ListView(
                         scrollDirection: Axis.horizontal,
                         clipBehavior: Clip.none,
@@ -1570,7 +1566,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                             ),
                           ),
                           for (final friend in _friends) ...[
-                            SizedBox(width: 14.w),
+                            SizedBox(width: 12.w),
                             Builder(
                               builder: (context) {
                                 final online = _isOnline(friend.userId);
@@ -1617,11 +1613,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                       ),
                     ),
 
-                    SizedBox(height: 16.h),
+                    SizedBox(height: 12.h),
                     _SheetDivider(),
-                    SizedBox(height: 28.h),
+                    SizedBox(height: 18.h),
 
-                    // ── Primary action: voice nudge ──
+                    // ── Primary action: hold-to-speak (centered lower sheet) ──
                     Center(
                       child: _buildVoiceMicButton(
                         accent: accent,
@@ -1631,7 +1627,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                       ),
                     ),
 
-                    SizedBox(height: 28.h),
+                    SizedBox(height: 18.h),
 
                     // ── Secondary actions: ring + push ──
                     Padding(
@@ -1641,13 +1637,13 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Colors.white,
-                          fontSize: 15.sp,
+                          fontSize: 14.sp,
                           fontWeight: FontWeight.w500,
                           height: 1.3,
                         ),
                       ),
                     ),
-                    SizedBox(height: 18.h),
+                    SizedBox(height: 12.h),
                     Padding(
                       padding: EdgeInsets.symmetric(horizontal: 48.w),
                       child: Row(
@@ -1681,10 +1677,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                       ),
                     ),
 
-                    SizedBox(height: 24.h),
-
-                    // ── Status (step 1, step 2, errors, guards) ──
                     if (showStatus) ...[
+                      SizedBox(height: 14.h),
                       Padding(
                         padding: EdgeInsets.fromLTRB(20.w, 0, 20.w, 0),
                         child: _NudgeStatus(
@@ -1706,7 +1700,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                       ),
                     ],
 
-                    SizedBox(height: 32.h),
+                    SizedBox(height: 18.h),
                   ],
                 ),
               ),

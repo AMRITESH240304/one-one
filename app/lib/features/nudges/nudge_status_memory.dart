@@ -183,7 +183,7 @@ class NudgeStatusMemory {
     }
 
     final firstName = _firstName(responderName);
-    final message = reply == NudgeRecipientReply.declined
+    final replyLabel = reply == NudgeRecipientReply.declined
         ? '$firstName declined'
         : '$firstName snoozed';
     final status = reply == NudgeRecipientReply.declined
@@ -195,6 +195,13 @@ class NudgeStatusMemory {
     ];
     final index = signifiers.indexWhere((s) => s.userId == responderUserId);
     final prior = index >= 0 ? signifiers[index] : null;
+
+    // Preserve lock/skull classification across decline/snooze so reopen
+    // cannot flip icons. If delivery was device-blocked, keep that reason
+    // in the sender-facing status line too.
+    final blockHint = _senderFacingBlockHint(prior);
+    final message = blockHint == null ? replyLabel : '$replyLabel — $blockHint';
+
     final updated = LastNudgeRecipientSignifier(
       userId: responderUserId,
       displayName: responderName.trim().isEmpty
@@ -224,6 +231,27 @@ class NudgeStatusMemory {
       ),
     );
     return true;
+  }
+
+  /// Short sender-facing hint when a prior delivery failure was device-blocked.
+  static String? _senderFacingBlockHint(LastNudgeRecipientSignifier? prior) {
+    if (prior == null || !prior.failed || !prior.deviceBlocked) return null;
+    final reason = prior.failureReason?.trim();
+    if (reason == null || reason.isEmpty) {
+      return 'their phone blocked delivery';
+    }
+    return switch (reason) {
+      'permission_denied_notifications' =>
+        'notifications are off on their phone',
+      'permission_denied_microphone' => 'microphone access is blocked',
+      'background_fg_service_blocked' ||
+      'permission_denied_foreground_service' =>
+        'their phone blocked background playback',
+      'battery_optimization_active' => 'battery restrictions may be blocking Duo',
+      'fcm_not_delivered' || 'app_force_stopped' || 'timeout' =>
+        'Duo may be closed or restricted on their phone',
+      _ => 'their phone blocked delivery',
+    };
   }
 
   static String _firstName(String displayName) {

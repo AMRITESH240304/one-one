@@ -147,6 +147,10 @@ void main() {
       expect(signifier.deviceBlocked, isTrue);
       expect(signifier.failureReason, 'timeout');
       expect(signifier.failed, isTrue);
+      expect(
+        memory.forGroup('group-a')!.message,
+        contains('Duo may be closed or restricted'),
+      );
     });
   });
 }
