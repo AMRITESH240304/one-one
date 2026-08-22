@@ -11,6 +11,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Build
+import androidx.core.graphics.drawable.IconCompat
 
 object VoiceNudgeNotifications {
     fun ensureChannels(context: Context) {
@@ -292,6 +293,7 @@ object VoiceNudgeNotifications {
     fun buildChatConversation(
         context: Context,
         conversation: ChatConversation,
+        largeIconOverride: Bitmap? = null,
     ): Notification {
         ensureChannels(context)
         val groupId = conversation.groupId
@@ -318,9 +320,21 @@ object VoiceNudgeNotifications {
         } else {
             "${latest.senderName}: ${latest.text}"
         }
+        val latestIncoming = conversation.messages.lastOrNull { !it.fromSelf }
+        val iconLine = latestIncoming ?: conversation.messages.lastOrNull()
+        val largeIcon = largeIconOverride ?: if (iconLine != null) {
+            NotificationAvatarHelper.largeIcon(
+                context,
+                iconLine.senderPhotoUrl,
+                iconLine.senderName,
+                iconLine.senderAvatarAsset,
+            )
+        } else {
+            NotificationAvatarHelper.appLogoBitmap(context)
+        }
         val configured = builder
             .setSmallIcon(appSmallIcon)
-            .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
+            .setLargeIcon(largeIcon)
             .setContentTitle(sanitizeNotificationCopy(conversation.groupName, "Duo"))
             .setContentText(sanitizeNotificationCopy(preview, FCM_USER_DELIVERY_FAILURE))
             .setColor(Color.rgb(248, 190, 3))
@@ -331,7 +345,7 @@ object VoiceNudgeNotifications {
             .setGroup(groupKey(groupId))
             .setAutoCancel(true)
             .setOnlyAlertOnce(false)
-        applyChatMessagingStyle(configured, conversation)
+        applyChatMessagingStyle(configured, context, conversation)
         addChatReplyAction(configured, context, conversation)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             configured.setTimeoutAfter(ChatPileStore.ttlMs)
@@ -341,10 +355,14 @@ object VoiceNudgeNotifications {
 
     private fun applyChatMessagingStyle(
         builder: Notification.Builder,
+        context: Context,
         conversation: ChatConversation,
     ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
-            val body = conversation.messages.joinToString("\n") { "${it.senderName}: ${it.text}" }
+            val body = conversation.messages.joinToString("\n") { line ->
+                val name = if (line.fromSelf) "You" else line.senderName
+                "$name: ${line.text}"
+            }
             builder.setStyle(
                 Notification.BigTextStyle().bigText(
                     sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
@@ -352,8 +370,22 @@ object VoiceNudgeNotifications {
             )
             return
         }
+        val localLine = conversation.messages.lastOrNull { it.fromSelf }
         val style = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val user = Person.Builder().setName("You").build()
+            val userBitmap = if (localLine != null) {
+                NotificationAvatarHelper.largeIcon(
+                    context,
+                    localLine.senderPhotoUrl,
+                    localLine.senderName,
+                    localLine.senderAvatarAsset,
+                )
+            } else {
+                NotificationAvatarHelper.appLogoBitmap(context)
+            }
+            val user = Person.Builder()
+                .setName("You")
+                .setIcon(IconCompat.createWithBitmap(userBitmap).toIcon())
+                .build()
             Notification.MessagingStyle(user)
                 .setConversationTitle(conversation.groupName)
                 .setGroupConversation(true)
@@ -366,9 +398,16 @@ object VoiceNudgeNotifications {
         for (line in conversation.messages) {
             val text = sanitizeNotificationCopy(line.text, FCM_USER_DELIVERY_FAILURE)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val senderBitmap = NotificationAvatarHelper.largeIcon(
+                    context,
+                    line.senderPhotoUrl,
+                    line.senderName,
+                    line.senderAvatarAsset,
+                )
                 val sender = Person.Builder()
                     .setName(if (line.fromSelf) "You" else line.senderName)
                     .setKey(line.senderUserId.ifBlank { line.senderName })
+                    .setIcon(IconCompat.createWithBitmap(senderBitmap).toIcon())
                     .build()
                 style.addMessage(
                     Notification.MessagingStyle.Message(text, line.timestampMs, sender),
@@ -431,7 +470,23 @@ object VoiceNudgeNotifications {
     fun refreshChatConversation(context: Context, groupId: String) {
         val conversation = ChatPileStore.conversation(context, groupId) ?: return
         val manager = context.getSystemService(NotificationManager::class.java)
-        manager.notify(chatPileId(groupId), buildChatConversation(context, conversation))
+        val latestIncoming = conversation.messages.lastOrNull { !it.fromSelf }
+        val iconLine = latestIncoming ?: conversation.messages.lastOrNull()
+        if (iconLine == null) {
+            manager.notify(chatPileId(groupId), buildChatConversation(context, conversation))
+            return
+        }
+        NotificationAvatarHelper.applyLargeIcon(
+            context,
+            iconLine.senderPhotoUrl,
+            iconLine.senderName,
+            iconLine.senderAvatarAsset,
+        ) { bitmap ->
+            manager.notify(
+                chatPileId(groupId),
+                buildChatConversation(context, conversation, largeIconOverride = bitmap),
+            )
+        }
     }
 
     /** Drops shade piles whose bubbles have already vanished. */
@@ -588,6 +643,8 @@ data class ChatLine(
     val text: String,
     val timestampMs: Long,
     val fromSelf: Boolean = false,
+    val senderPhotoUrl: String? = null,
+    val senderAvatarAsset: String? = null,
 )
 
 data class ChatConversation(
@@ -622,6 +679,8 @@ object ChatPileStore {
         text: String,
         notifyUrl: String?,
         fromSelf: Boolean = false,
+        senderPhotoUrl: String? = null,
+        senderAvatarAsset: String? = null,
         timestampMs: Long = System.currentTimeMillis(),
     ) {
         val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
@@ -634,6 +693,8 @@ object ChatPileStore {
             text = text,
             timestampMs = timestampMs,
             fromSelf = fromSelf,
+            senderPhotoUrl = senderPhotoUrl?.trim()?.takeIf { it.isNotEmpty() },
+            senderAvatarAsset = senderAvatarAsset?.trim()?.takeIf { it.isNotEmpty() },
         )).takeLast(maxCount)
         prefs.edit()
             .putString(groupId + messagesSuffix, encodeMessages(next))
@@ -713,6 +774,8 @@ object ChatPileStore {
                     put("text", line.text)
                     put("timestampMs", line.timestampMs)
                     put("fromSelf", line.fromSelf)
+                    line.senderPhotoUrl?.let { put("senderPhotoUrl", it) }
+                    line.senderAvatarAsset?.let { put("senderAvatarAsset", it) }
                 },
             )
         }
@@ -737,6 +800,12 @@ object ChatPileStore {
                             text = text,
                             timestampMs = obj.optLong("timestampMs", System.currentTimeMillis()),
                             fromSelf = obj.optBoolean("fromSelf", false),
+                            senderPhotoUrl = obj.optString("senderPhotoUrl")
+                                .trim()
+                                .takeIf { it.isNotEmpty() },
+                            senderAvatarAsset = obj.optString("senderAvatarAsset")
+                                .trim()
+                                .takeIf { it.isNotEmpty() },
                         ),
                     )
                 }

@@ -447,7 +447,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       LiveSessionOverlayData(
         activeSpeaker: _pictureInPictureMember,
         isMuted: _audioMuted,
-        onToggleMute: _toggleAudioMute,
+        onToggleMute: _togglePipMute,
         accentColor: accentColorForKey(_session.settings.accentColorKey),
       ),
     );
@@ -460,7 +460,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       LiveSessionOverlayData(
         activeSpeaker: _pictureInPictureMember,
         isMuted: _audioMuted,
-        onToggleMute: _toggleAudioMute,
+        onToggleMute: _togglePipMute,
         accentColor: accentColorForKey(_session.settings.accentColorKey),
       ),
     );
@@ -1089,6 +1089,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// Sender-side: decline/snooze (and accept) replies update profile signifiers
   /// even when the nudge sheet is closed.
   void _onSenderNudgeResponse(NudgeRecipientResponse response) {
+    if (response.isAccept) {
+      NudgeStatusMemory.instance.clear(response.groupId);
+      if (mounted && _selectedGroup?.groupId == response.groupId) {
+        setState(() {});
+      }
+      unawaited(_connectSenderAfterNudgeAccept(response));
+      return;
+    }
+
     final updated = NudgeStatusMemory.instance.applyRecipientResponse(
       eventId: response.eventId,
       groupId: response.groupId,
@@ -1100,6 +1109,38 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (!mounted) return;
     if (_selectedGroup?.groupId == response.groupId) {
       setState(() {});
+    }
+  }
+
+  /// Brings the sender online when a receiver accepts, including while the
+  /// app is backgrounded (native bridge queues connect + may launch the app).
+  Future<void> _connectSenderAfterNudgeAccept(
+    NudgeRecipientResponse response,
+  ) async {
+    if (_nudgeActionInFlight) return;
+    if (_processedNudgeEventIds.contains(response.eventId)) return;
+    final action = NudgeNotificationAction(
+      action: 'connect',
+      eventId: response.eventId,
+      groupId: response.groupId,
+    );
+    if (_loadingGroups) {
+      _deferredNudgeAction = action;
+      return;
+    }
+    try {
+      _nudgeActionInFlight = true;
+      await _processNudgeAction(action);
+    } catch (error) {
+      LogManager.log(
+        LogLevel.warn,
+        'NudgeService',
+        'Sender auto-connect after accept failed: $error',
+        userId: _session.userId,
+        groupId: response.groupId,
+      );
+    } finally {
+      _nudgeActionInFlight = false;
     }
   }
 
@@ -1249,6 +1290,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
     final next = queue.first;
+    if (_nudgeInbox.wasGroupAcceptedRecently(next.groupId)) {
+      await _autoAcceptRecentGroupNudge(next);
+      return;
+    }
     _promptRestoreGroupId ??= _selectedGroup?.groupId;
     await _focusGroupForIncomingNudge(next);
     if (!mounted) return;
@@ -1286,6 +1331,47 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       }
       unawaited(_presentIncomingNudgePrompt());
     });
+  }
+
+  Future<void> _autoAcceptRecentGroupNudge(ActiveNudge nudge) async {
+    if (_incomingPromptBusy || _nudgeActionInFlight) return;
+    final pending = _nudgeInbox.activeInGroup(nudge.groupId);
+    if (pending.isEmpty) return;
+
+    setState(() => _incomingPromptBusy = true);
+    try {
+      for (final event in pending) {
+        if (_processedNudgeEventIds.contains(event.nudgeId)) continue;
+        _processedNudgeEventIds.add(event.nudgeId);
+        unawaited(
+          _nudgeRepository.respond(
+            groupId: event.groupId,
+            eventId: event.nudgeId,
+            action: 'accept',
+          ),
+        );
+        unawaited(_nudgeActionBridge.dismissIncomingNudge(event.nudgeId));
+      }
+      await _nudgeInbox.markAllInGroup(
+        groupId: nudge.groupId,
+        status: ActiveNudgeStatus.accepted,
+      );
+      if (!_isViewingActiveGroup || !_isOnline) {
+        await _processNudgeAction(
+          NudgeNotificationAction(
+            action: 'accept',
+            eventId: nudge.nudgeId,
+            groupId: nudge.groupId,
+            senderUserId: nudge.senderId,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _incomingPromptBusy = false);
+      if (mounted) {
+        await _presentIncomingNudgePrompt(ignoreInFlight: true);
+      }
+    }
   }
 
   Future<void> _acceptIncomingNudge(ActiveNudge nudge) async {
@@ -1681,6 +1767,18 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           .where((message) => message.messageId != messageId)
           .toList(growable: false);
     });
+  }
+
+  String _chatDisplayNameForUser(String userId, String fallback) {
+    if (userId == _session.userId) {
+      return _session.user.displayName;
+    }
+    for (final member in _members) {
+      if (member.userId == userId) {
+        return member.displayName;
+      }
+    }
+    return fallback;
   }
 
   Future<void> _sendChatMessage(String text) async {
@@ -2261,6 +2359,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
     if (_isViewingActiveGroup) {
+      _showPresenceSnackbar(
+        'You\'re going offline. Tap again when someone is live to rejoin without a nudge.',
+      );
       unawaited(_goAway());
       return;
     }
@@ -2271,6 +2372,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // If someone else is already online in this group, let the user join
     // directly — no nudge required since the room is already active.
     if (_anyPeerOnline) {
+      _showPresenceSnackbar('Someone is live — joining now.');
       unawaited(_goOnline(userIntent: true));
       return;
     }
@@ -2963,7 +3065,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // E1/E3: explicit connect defaults — speaker, unmuted. Do not inherit
     // native volume=0 as "muted" (STREAM_MUSIC is often 0 in voice mode).
     _callAudio.onSessionConnected();
-    unawaited(AudioOutputBridge.setMuted(false));
+    unawaited(AudioOutputBridge.setMuted(false, showUi: false));
     unawaited(AudioOutputBridge.applyRemotePlaybackMute(room, false));
     unawaited(_refreshAudioOutputState());
     unawaited(_syncProximityMonitoring());
@@ -3101,6 +3203,45 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() {});
       await AudioOutputBridge.applyRemotePlaybackMute(_room, _audioMuted);
       await _syncProximityMonitoring();
+    } finally {
+      _audioMuteBusy = false;
+    }
+  }
+
+  /// Mute toggle wired to the floating PiP pill.
+  ///
+  /// Unlike [_toggleAudioMute] (which is the long-press main-screen action and
+  /// always resets to speaker on unmute), this preserves the pre-mute route so
+  /// the audio routing is never silently changed as a side-effect of tapping
+  /// the PiP mute button.
+  Future<void> _togglePipMute() async {
+    if (_audioMuteBusy) return;
+    _audioMuteBusy = true;
+    final previousMode = _callAudio.userMode;
+    final nextMode = _callAudio.toggleMute();
+    final nextMuted = nextMode == CallAudioUserMode.muted;
+    setState(() {});
+    try {
+      await AudioOutputBridge.applyRemotePlaybackMute(_room, nextMuted);
+      await AudioOutputBridge.setMuted(nextMuted);
+      if (!nextMuted) {
+        // Restore whichever route (speaker or earpiece) was active before mute.
+        await _applyUserAudioRoute();
+      }
+      if (!mounted) return;
+      _updatePipOverlay();
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'pip_mute_toggle_failed',
+        ),
+      );
+      if (!mounted) return;
+      _callAudio.restoreMode(previousMode);
+      setState(() {});
+      await AudioOutputBridge.applyRemotePlaybackMute(_room, _audioMuted);
     } finally {
       _audioMuteBusy = false;
     }
@@ -3775,7 +3916,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         currentUserId: _session.userId,
         members: _displayMembers,
         accent: accentColorForKey(_session.settings.accentColorKey),
-        hapticsIntensity: _session.settings.hapticsIntensity,
         onlineUserIds: onlineUserIds,
       ),
     );
@@ -4058,9 +4198,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final bottomSystemInset = bottomSystemInsetOf(context);
 
     // When the chat keyboard is open, temporarily collapse and fade the
-    // friends/presence strip, the status-hint notifier, and the
-    // join/create carousel row so the message feed has the full available
-    // space above the keyboard — consistent with a standard chat UX.
+    // status-hint notifier and the join/create carousel row so the message
+    // feed has more space above the keyboard. The group name + participants
+    // strip stays visible.
     final keyboardOpen = MediaQuery.of(context).viewInsets.bottom > 100;
 
     return Scaffold(
@@ -4099,36 +4239,23 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                   onToggleAudioOutput: _toggleAudioOutput,
                   onToggleAudioMute: _toggleAudioMute,
                 ),
-                AnimatedOpacity(
-                  duration: const Duration(milliseconds: 180),
-                  opacity: keyboardOpen ? 0.0 : 1.0,
-                  child: AnimatedAlign(
-                    duration: const Duration(milliseconds: 220),
-                    curve: Curves.easeOutCubic,
-                    alignment: Alignment.topCenter,
-                    heightFactor: keyboardOpen ? 0.0 : 1.0,
-                    child: IgnorePointer(
-                      ignoring: keyboardOpen,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          SizedBox(height: 8.h),
-                          _FriendsStrip(
-                            groupName: focusedGroup?.name,
-                            friends: _friends,
-                            availability: _availability,
-                            speakingUserIds: _speakingUserIds,
-                            connectionQualityByUserId:
-                                _remoteConnectionQualityByUserId,
-                            nudgeRepliesByUserId: _nudgeRepliesForGroup(
-                              focusedGroup?.groupId,
-                            ),
-                            onInvite: inviteAction,
-                          ),
-                        ],
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(height: 8.h),
+                    _FriendsStrip(
+                      groupName: focusedGroup?.name,
+                      friends: _friends,
+                      availability: _availability,
+                      speakingUserIds: _speakingUserIds,
+                      connectionQualityByUserId:
+                          _remoteConnectionQualityByUserId,
+                      nudgeRepliesByUserId: _nudgeRepliesForGroup(
+                        focusedGroup?.groupId,
                       ),
+                      onInvite: inviteAction,
                     ),
-                  ),
+                  ],
                 ),
                 if (_isOnline &&
                     (_effectiveLocalConnectionQuality ==
@@ -4179,6 +4306,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                         child: ChatBubbleFeed(
                           messages: _chatMessages,
                           currentUserId: _session.userId,
+                          displayNameForUserId: _chatDisplayNameForUser,
                           accent: accent,
                           onExpire: _dismissExpiredChatMessage,
                           opacity: _chatFeedOpacity,
@@ -4295,6 +4423,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 if (focusedGroup != null) ...[
                   SizedBox(height: 8.h),
                   ChatBubbleBar(
+                    key: const ValueKey('home-chat-bubble-bar'),
                     accent: accent,
                     anyMemberOnline: anyMemberOnline,
                     onSend: _sendChatMessage,
@@ -4556,9 +4685,7 @@ class _BackdropMemberCollage extends StatelessWidget {
   }
 
   Widget _tile(GroupMemberSummary member) {
-    final initial = member.displayName.trim().isEmpty
-        ? '?'
-        : member.displayName.trim().substring(0, 1).toUpperCase();
+    final initial = profileDisplayInitial(member.displayName);
     return ProfileImage(
       // Keyed by user ID so switching groups/members never reuses another
       // user's ProfileImage state (and its sticky-photo cache) by position.
@@ -4755,21 +4882,21 @@ class _StatusToggle extends StatelessWidget {
             ? 'Tap to go away'
             : 'Go online when someone is already live, or send a nudge to go together',
         child: SizedBox(
-          width: 56.w,
-          height: 44,
+          width: 66.w,
+          height: 40,
           child: Material(
             color: Colors.transparent,
             child: InkWell(
               onTap: busy || !enabled ? null : onToggle,
-              borderRadius: BorderRadius.circular(22),
+              borderRadius: BorderRadius.circular(20),
               child: Center(
                 child: Container(
                   width: double.infinity,
-                  height: 30.h,
-                  padding: EdgeInsets.all(3.w),
+                  height: 24.h,
+                  padding: EdgeInsets.all(2.w),
                   decoration: BoxDecoration(
                     color: const Color.fromRGBO(255, 255, 255, 0.12),
-                    borderRadius: BorderRadius.circular(15.r),
+                    borderRadius: BorderRadius.circular(14.r),
                     border: Border.all(
                       color: const Color.fromRGBO(255, 255, 255, 0.22),
                     ),
@@ -4783,13 +4910,13 @@ class _StatusToggle extends StatelessWidget {
                             ? Alignment.centerRight
                             : Alignment.centerLeft,
                         child: Container(
-                          width: 20.w,
+                          width: 30.w,
                           height: double.infinity,
                           decoration: BoxDecoration(
                             color: online
                                 ? const Color(0xff7CFF6B)
                                 : Colors.white,
-                            borderRadius: BorderRadius.circular(12.r),
+                            borderRadius: BorderRadius.circular(11.r),
                           ),
                         ),
                       ),
@@ -4987,9 +5114,7 @@ class _FriendChip extends StatelessWidget {
         connectionQuality == ConnectionQuality.poor ||
         connectionQuality == ConnectionQuality.lost;
     final shortName = name.trim().split(RegExp(r'\s+')).first;
-    final initial = name.trim().isEmpty
-        ? '?'
-        : name.trim().substring(0, 1).toUpperCase();
+    final initial = profileDisplayInitial(name);
     final ringColor = isSpeaking
         ? const Color(0xff7CFF6B)
         : live
@@ -5114,7 +5239,7 @@ class _NudgeReplyBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final (icon, color) = switch (reply) {
       NudgeRecipientReply.declined => (
-        LucideIcons.moon,
+        Icons.dark_mode_rounded,
         const Color(0xff8e9aaf),
       ),
       NudgeRecipientReply.snoozed => (
@@ -6418,9 +6543,7 @@ class _MemberPhotoCollage extends StatelessWidget {
     final overflow = members.length - tiles.length;
 
     Widget tile(GroupMemberSummary member) {
-      final initial = member.displayName.trim().isEmpty
-          ? '?'
-          : member.displayName.trim().substring(0, 1).toUpperCase();
+      final initial = profileDisplayInitial(member.displayName);
       return ProfileImage(
         // Keyed by user ID so switching groups never reuses another user's
         // ProfileImage state (and its sticky-photo cache) by position.

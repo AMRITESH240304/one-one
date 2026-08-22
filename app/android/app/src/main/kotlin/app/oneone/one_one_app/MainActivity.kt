@@ -103,7 +103,14 @@ class MainActivity : FlutterFragmentActivity() {
                 AudioOutputContract.methodGetState ->
                     result.success(AudioOutput.readState(this))
                 AudioOutputContract.methodSetMuted -> {
-                    MediaVolume.setMuted(this, call.arguments == true)
+                    val (muted, showUi) = when (val args = call.arguments) {
+                        is Map<*, *> -> Pair(
+                            args["muted"] == true,
+                            args["showUi"] != false,
+                        )
+                        else -> Pair(args == true, true)
+                    }
+                    MediaVolume.setMuted(this, muted, showUi)
                     result.success(AudioOutput.readState(this))
                 }
                 AudioOutputContract.methodSetProximityMonitoring -> {

@@ -204,6 +204,21 @@ class ActiveNudgeInbox extends ChangeNotifier {
         .toList(growable: false);
   }
 
+  /// True when this group had an accept within [ActiveNudge.expiry].
+  bool wasGroupAcceptedRecently(String groupId) {
+    if (groupId.isEmpty) return false;
+    final now = _now;
+    for (final entry in _statusById.entries) {
+      final nudge = _byId[entry.key];
+      if (nudge?.groupId != groupId) continue;
+      if (entry.value.status == ActiveNudgeStatus.accepted &&
+          now.difference(entry.value.at) <= ActiveNudge.expiry) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// One pending nudge per group, most recent first.
   List<ActiveNudge> presentationQueue({
     String? preferGroupId,

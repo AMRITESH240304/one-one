@@ -3,11 +3,12 @@ package app.oneone.one_one_app
 import android.content.Context
 
 /**
- * Device-local haptic intensity for incoming nudge playback.
+ * Device-local haptic intensity for incoming voice-nudge playback.
  *
  * Flutter writes this whenever Settings (or a session load) changes the
  * user's 3-tier haptics choice so [VoiceNudgePlaybackService] can apply
- * the same pattern even when the Dart VM is not running.
+ * the same pattern even when the Dart VM is not running. Ring and other
+ * nudge kinds ignore this and stay on Light.
  */
 object HapticsPreferenceStore {
     private const val preferencesName = "one_one_haptics"

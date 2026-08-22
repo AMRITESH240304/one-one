@@ -233,7 +233,7 @@ class GroupRepository {
       final displayName = data['displayName']?.toString().trim();
       return _MemberProfileFields(
         displayName: (displayName == null || displayName.isEmpty)
-            ? userId
+            ? 'Friend'
             : displayName,
         profilePhotoUrl: data['profilePhotoUrl']?.toString(),
         profilePhotoBase64: data['profilePhotoBase64']?.toString(),
@@ -242,7 +242,7 @@ class GroupRepository {
     } catch (_) {
       // Transient read failures should not invent a "deleted" member; keep
       // them visible with a fallback name until a later refresh succeeds.
-      return _MemberProfileFields(displayName: userId);
+      return _MemberProfileFields(displayName: 'Friend');
     }
   }
 

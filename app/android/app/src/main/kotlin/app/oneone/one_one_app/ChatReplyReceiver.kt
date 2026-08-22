@@ -82,6 +82,7 @@ class ChatReplyReceiver : BroadcastReceiver() {
             "expiresAt" to nowSeconds + ChatPileStore.ttlMs / 1000L,
         )
         Tasks.await(ref.setValue(payload), 8, TimeUnit.SECONDS)
+        val profile = readProfileFields(user.uid)
         ChatPileStore.append(
             appContext,
             groupId = groupId,
@@ -92,6 +93,8 @@ class ChatReplyReceiver : BroadcastReceiver() {
             text = text,
             notifyUrl = notifyUrl,
             fromSelf = true,
+            senderPhotoUrl = profile?.photoUrl,
+            senderAvatarAsset = profile?.avatarAsset,
         )
         VoiceNudgeNotifications.refreshChatConversation(appContext, groupId)
         if (!notifyUrl.isNullOrBlank()) {
@@ -114,6 +117,31 @@ class ChatReplyReceiver : BroadcastReceiver() {
                 TimeUnit.SECONDS,
             )
             snapshot.getValue(String::class.java)?.trim()?.takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private data class ProfileFields(
+        val photoUrl: String?,
+        val avatarAsset: String?,
+    )
+
+    private fun readProfileFields(userId: String): ProfileFields? {
+        return try {
+            val snapshot = Tasks.await(
+                FirebaseDatabase.getInstance()
+                    .getReference("users/$userId")
+                    .get(),
+                5,
+                TimeUnit.SECONDS,
+            )
+            val data = snapshot.value as? Map<*, *> ?: return null
+            val photoUrl = data["profilePhotoUrl"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            val avatarAsset = data["avatarAsset"]?.toString()?.trim()?.takeIf { path ->
+                path.startsWith("assets/avatars/") || path.startsWith("assets/avatars2/")
+            }
+            ProfileFields(photoUrl = photoUrl, avatarAsset = avatarAsset)
         } catch (_: Exception) {
             null
         }

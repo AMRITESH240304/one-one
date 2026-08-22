@@ -19,6 +19,7 @@ enum CallAudioUserMode { speaker, earpiece, muted }
 ///   and device routing; they do not clear the underlying user mode.
 class CallAudioRouteController {
   CallAudioUserMode _userMode = CallAudioUserMode.speaker;
+  CallAudioUserMode _preMuteMode = CallAudioUserMode.speaker;
   AudioOutputRoute _deviceRoute = AudioOutputRoute.speaker;
   bool _sessionActive = false;
 
@@ -68,11 +69,13 @@ class CallAudioRouteController {
   void onSessionConnected() {
     _sessionActive = true;
     _userMode = CallAudioUserMode.speaker;
+    _preMuteMode = CallAudioUserMode.speaker;
   }
 
   void onSessionEnded() {
     _sessionActive = false;
     _userMode = CallAudioUserMode.speaker;
+    _preMuteMode = CallAudioUserMode.speaker;
   }
 
   /// Platform reported a route change (headphones plug/unplug, etc.).
@@ -98,6 +101,19 @@ class CallAudioRouteController {
     if (_userMode == CallAudioUserMode.muted) {
       _userMode = CallAudioUserMode.speaker;
     } else {
+      _userMode = CallAudioUserMode.muted;
+    }
+    return _userMode;
+  }
+
+  /// Simple mute toggle that preserves the speaker/earpiece preference.
+  /// Unlike [onLongPress], unmuting returns to the mode in use before muting
+  /// rather than always defaulting to speaker.
+  CallAudioUserMode toggleMute() {
+    if (_userMode == CallAudioUserMode.muted) {
+      _userMode = _preMuteMode;
+    } else {
+      _preMuteMode = _userMode;
       _userMode = CallAudioUserMode.muted;
     }
     return _userMode;

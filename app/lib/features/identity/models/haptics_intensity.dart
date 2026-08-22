@@ -1,7 +1,8 @@
-/// Three-tier haptic intensity for incoming nudges (voice, ring, and
-/// notification). Light is the historical default: two bursts at start and
-/// two at end. Medium plays a double-double burst pattern. Wild vibrates
-/// continuously for the whole nudge.
+/// Three-tier haptic intensity for incoming voice-nudge playback.
+/// Light is the historical default: two bursts at start and two at end.
+/// Medium (Pulse) plays a double-double burst pattern. Wild vibrates
+/// continuously for the whole voice nudge. Other in-app feedback (recording
+/// press, talk, UI taps) uses fixed defaults and ignores this preference.
 enum HapticsIntensity {
   light,
   medium,

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 import 'package:record/record.dart';
@@ -15,7 +16,6 @@ import '../../../core/network/api_client.dart';
 import '../../../core/ui/bottom_system_inset.dart';
 import '../../groups/models/group_member_summary.dart';
 import '../../groups/models/group_summary.dart';
-import '../../identity/models/haptics_intensity.dart';
 import '../../identity/ui/profile_avatar.dart';
 import '../data/android_voice_nudge_bridge.dart';
 import '../data/media_volume_store.dart';
@@ -24,7 +24,6 @@ import '../data/voice_nudge_audio.dart';
 import '../models/media_volume_reading.dart';
 import '../nudge_cooldowns.dart';
 import '../nudge_failure_memory.dart';
-import '../nudge_haptics.dart';
 import '../nudge_status_memory.dart';
 
 Future<void> showNudgeBottomSheet(
@@ -33,7 +32,6 @@ Future<void> showNudgeBottomSheet(
   required String currentUserId,
   required List<GroupMemberSummary> members,
   required Color accent,
-  HapticsIntensity hapticsIntensity = HapticsIntensity.light,
   Set<String> onlineUserIds = const {},
 }) async {
   await showModalBottomSheet<void>(
@@ -51,7 +49,6 @@ Future<void> showNudgeBottomSheet(
       currentUserId: currentUserId,
       members: members,
       accent: accent,
-      hapticsIntensity: hapticsIntensity,
       onlineUserIds: onlineUserIds,
     ),
   );
@@ -63,7 +60,6 @@ class _QuickNudgeSheet extends StatefulWidget {
     required this.currentUserId,
     required this.members,
     required this.accent,
-    required this.hapticsIntensity,
     required this.onlineUserIds,
   });
 
@@ -71,7 +67,6 @@ class _QuickNudgeSheet extends StatefulWidget {
   final String currentUserId;
   final List<GroupMemberSummary> members;
   final Color accent;
-  final HapticsIntensity hapticsIntensity;
   final Set<String> onlineUserIds;
 
   @override
@@ -305,7 +300,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     _cooldownTicker?.cancel();
     _deliveryTimeoutTimer?.cancel();
     _autoDismissTimer?.cancel();
-    NudgeHaptics.stopWild();
     unawaited(_deliverySub?.cancel());
     unawaited(_responseSub?.cancel());
     if (_recording) unawaited(_recorder.stop());
@@ -562,7 +556,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     final lastId = _lastEventId ?? _awaitingEventId;
     if (lastId != null &&
         lastId.isNotEmpty &&
-        response.eventId != lastId) {
+        response.eventId != lastId &&
+        response.isAccept) {
       return;
     }
 
@@ -1314,7 +1309,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     _recordingTimer?.cancel();
     _recordingCapTimer?.cancel();
     _recordingWatch.stop();
-    unawaited(NudgeHaptics.playEnd(widget.hapticsIntensity));
+    // Recording feedback stays on a fixed default — Settings haptics only
+    // apply to incoming voice-nudge playback.
+    unawaited(HapticFeedback.selectionClick());
     final actualDurationMs = _recordingWatch.elapsedMilliseconds;
     final durationMs = actualDurationMs.clamp(
       0,
@@ -1802,7 +1799,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           child: Listener(
             onPointerDown: (_) {
               if (!voiceEnabled) return;
-              unawaited(NudgeHaptics.playStart(widget.hapticsIntensity));
+              // Fixed default while holding to record (not Settings intensity).
+              unawaited(HapticFeedback.lightImpact());
               // Lock back/close on the same frame as press — before async
               // mic start — so a second gesture cannot pop the sheet.
               setState(() {
@@ -2129,7 +2127,7 @@ class _VolumeBadgeIcon extends StatelessWidget {
 // ── Decline / snooze badge icon ─────────────────────────────────────────────
 //
 // Same corner badge chrome as volume. Maps recipient reply to Lucide icons:
-//   Declined → LucideIcons.moon   (💤 — can't join right now)
+//   Declined → Icons.dark_mode_rounded (filled moon — can't join right now)
 //   Snoozed  → LucideIcons.timer  (⏳ — ask me later)
 
 class _ResponseBadgeIcon extends StatelessWidget {
@@ -2141,7 +2139,7 @@ class _ResponseBadgeIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     final (icon, color) = switch (reply) {
       NudgeRecipientReply.declined => (
-        LucideIcons.moon,
+        Icons.dark_mode_rounded,
         const Color(0xff8e9aaf),
       ),
       NudgeRecipientReply.snoozed => (

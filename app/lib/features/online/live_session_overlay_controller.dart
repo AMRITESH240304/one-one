@@ -122,8 +122,8 @@ class _LiveSessionFloatingPipState extends State<LiveSessionFloatingPip>
   }
 
   void _onDragUpdate(DragUpdateDetails details, Size screenSize) {
-    const w = 172.0;
-    const h = 64.0;
+    const w = 204.0;
+    const h = 56.0;
     const margin = 12.0;
     setState(() {
       _position = Offset(
@@ -136,7 +136,7 @@ class _LiveSessionFloatingPipState extends State<LiveSessionFloatingPip>
   }
 
   Offset _defaultPosition(Size screenSize) {
-    return Offset(screenSize.width - 172.0 - 16, screenSize.height - 64.0 - 120);
+    return Offset(screenSize.width - 204.0 - 16, screenSize.height - 56.0 - 120);
   }
 
   @override
@@ -185,119 +185,165 @@ class _PipContainer extends StatelessWidget {
     return Material(
       color: Colors.transparent,
       child: Container(
-        width: 172,
-        height: 60,
+        width: 204,
+        height: 56,
         decoration: BoxDecoration(
-          color: const Color(0xee0e0e0e),
-          borderRadius: BorderRadius.circular(30),
+          color: const Color(0xf2141414),
+          borderRadius: BorderRadius.circular(28),
           border: Border.all(
-            color: const Color(0xff7CFF6B).withValues(alpha: 0.55),
-            width: 1.5,
+            color: const Color(0xff7CFF6B).withValues(alpha: 0.35),
+            width: 1.0,
           ),
-          boxShadow: const [
+          boxShadow: [
             BoxShadow(
-              color: Colors.black54,
-              blurRadius: 14,
-              offset: Offset(0, 4),
+              color: const Color(0xff7CFF6B).withValues(alpha: 0.08),
+              blurRadius: 16,
+              spreadRadius: 0,
+            ),
+            const BoxShadow(
+              color: Color(0xaa000000),
+              blurRadius: 18,
+              offset: Offset(0, 5),
             ),
           ],
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
           child: Row(
             children: [
-              // Pulsing live dot
-              AnimatedBuilder(
-                animation: pulseController,
-                builder: (context, _) {
-                  final glow = 0.45 + 0.55 * pulseController.value;
-                  return Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: const Color(0xff7CFF6B),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xff7CFF6B).withValues(alpha: glow),
-                          blurRadius: 6,
-                          spreadRadius: 1,
+              // Avatar with pulsing live badge
+              SizedBox(
+                width: 40,
+                height: 40,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: accent.withValues(alpha: 0.65),
+                          width: 1.5,
                         ),
-                      ],
+                      ),
+                      child: ClipOval(
+                        child: ProfileAvatar(
+                          profilePhotoUrl: data.activeSpeaker.profilePhotoUrl,
+                          profilePhotoBase64:
+                              data.activeSpeaker.profilePhotoBase64,
+                          avatarAsset: data.activeSpeaker.avatarAsset,
+                          radius: 20,
+                          backgroundColor: const Color(0xff2a2a2a),
+                          fallback: Text(
+                            profileDisplayInitial(
+                              data.activeSpeaker.displayName,
+                            ),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
-                  );
-                },
-              ),
-              const SizedBox(width: 5),
-              const Text(
-                'Live',
-                style: TextStyle(
-                  color: Color(0xff7CFF6B),
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.3,
+                    // Live indicator badge
+                    Positioned(
+                      bottom: 0,
+                      right: 0,
+                      child: AnimatedBuilder(
+                        animation: pulseController,
+                        builder: (context, _) {
+                          return Container(
+                            width: 11,
+                            height: 11,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: const Color(0xff7CFF6B),
+                              border: Border.all(
+                                color: const Color(0xff141414),
+                                width: 1.5,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: const Color(0xff7CFF6B).withValues(
+                                    alpha: 0.25 + 0.6 * pulseController.value,
+                                  ),
+                                  blurRadius: 5,
+                                  spreadRadius: 0,
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 10),
-              // Active speaker avatar
-              Container(
-                width: 34,
-                height: 34,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: accent.withValues(alpha: 0.75),
-                    width: 1.5,
-                  ),
-                ),
-                child: ClipOval(
-                  child: ProfileAvatar(
-                    profilePhotoUrl: data.activeSpeaker.profilePhotoUrl,
-                    profilePhotoBase64: data.activeSpeaker.profilePhotoBase64,
-                    avatarAsset: data.activeSpeaker.avatarAsset,
-                    radius: 17,
-                    backgroundColor: const Color(0xff2a2a2a),
-                    fallback: Text(
-                      data.activeSpeaker.displayName.isEmpty
-                          ? '?'
-                          : data.activeSpeaker.displayName
-                              .trim()
-                              .substring(0, 1)
-                              .toUpperCase(),
+              const SizedBox(width: 9),
+              // Name + Live label
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      data.activeSpeaker.displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 13,
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w600,
+                        height: 1.15,
+                        letterSpacing: 0.1,
                       ),
                     ),
-                  ),
+                    const SizedBox(height: 1),
+                    const Text(
+                      'Live',
+                      style: TextStyle(
+                        color: Color(0xff7CFF6B),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.4,
+                        height: 1.1,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const Spacer(),
-              // Mute toggle button — does NOT navigate back, just toggles mic.
+              const SizedBox(width: 8),
+              // Volume mute toggle — silences audio output without changing route
               GestureDetector(
                 onTap: data.onToggleMute,
                 behavior: HitTestBehavior.opaque,
                 child: Container(
-                  width: 32,
-                  height: 32,
+                  width: 34,
+                  height: 34,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: data.isMuted
-                        ? const Color(0xffff5a5f).withValues(alpha: 0.18)
-                        : Colors.white.withValues(alpha: 0.08),
+                        ? const Color(0xffff5a5f).withValues(alpha: 0.2)
+                        : Colors.white.withValues(alpha: 0.09),
                     border: Border.all(
                       color: data.isMuted
-                          ? const Color(0xffff5a5f).withValues(alpha: 0.6)
-                          : Colors.white.withValues(alpha: 0.2),
+                          ? const Color(0xffff5a5f).withValues(alpha: 0.65)
+                          : Colors.white.withValues(alpha: 0.18),
+                      width: 1.0,
                     ),
                   ),
                   child: Icon(
-                    data.isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
+                    data.isMuted
+                        ? Icons.volume_off_rounded
+                        : Icons.volume_up_rounded,
                     color: data.isMuted
                         ? const Color(0xffff5a5f)
-                        : Colors.white70,
-                    size: 15,
+                        : Colors.white60,
+                    size: 16,
                   ),
                 ),
               ),

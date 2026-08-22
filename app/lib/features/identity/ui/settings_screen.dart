@@ -808,7 +808,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _PreferenceHeading(
                     icon: Icons.vibration_outlined,
                     title: 'Haptics',
-                    subtitle: _hapticsIntensity.subtitle,
+                    subtitle:
+                        'Incoming voice nudges — ${_hapticsIntensity.subtitle}',
                   ),
                   const SizedBox(height: 14),
                   _HapticsTierRow(
@@ -1864,30 +1865,40 @@ class _HapticsTierChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: selected ? accent : Colors.white.withValues(alpha: 0.06),
-      borderRadius: BorderRadius.circular(10),
+    final labelColor = selected ? accent : Colors.white54;
+    return Opacity(
+      opacity: enabled ? 1 : 0.45,
       child: InkWell(
         onTap: enabled ? onTap : null,
-        borderRadius: BorderRadius.circular(10),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: selected ? accent : Colors.white.withValues(alpha: 0.12),
-            ),
-          ),
+        borderRadius: BorderRadius.circular(12),
+        splashColor: accent.withValues(alpha: 0.12),
+        highlightColor: accent.withValues(alpha: 0.06),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
           child: Column(
             children: [
-              Text(option.emoji, style: const TextStyle(fontSize: 20)),
-              const SizedBox(height: 6),
+              Text(
+                option.emoji,
+                style: const TextStyle(fontSize: 28, height: 1.1),
+              ),
+              const SizedBox(height: 8),
               Text(
                 option.label,
                 style: TextStyle(
-                  color: selected ? Colors.black : Colors.white,
-                  fontWeight: FontWeight.w700,
+                  color: labelColor,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
                   fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 6),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOut,
+                height: 2,
+                width: selected ? 28 : 0,
+                decoration: BoxDecoration(
+                  color: accent,
+                  borderRadius: BorderRadius.circular(1),
                 ),
               ),
             ],

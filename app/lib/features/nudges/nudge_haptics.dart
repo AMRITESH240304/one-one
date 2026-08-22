@@ -6,9 +6,10 @@ import '../identity/models/haptics_intensity.dart';
 
 /// Flutter-side haptic patterns matching the three Settings tiers.
 ///
-/// Native playback (incoming voice / ring / notification nudges) uses the
-/// same intensity via [HapticsPreferenceStore]. This helper covers in-app
-/// sender recording so the chosen tier is felt immediately while holding.
+/// Used to preview the chosen intensity in Settings. Native incoming
+/// voice-nudge playback applies the same intensity via
+/// [HapticsPreferenceStore]. Sender recording and other UI feedback use
+/// fixed defaults instead.
 class NudgeHaptics {
   NudgeHaptics._();
 

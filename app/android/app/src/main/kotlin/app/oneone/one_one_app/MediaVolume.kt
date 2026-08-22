@@ -56,8 +56,9 @@ object MediaVolume {
         )
     }
 
-    fun setMuted(context: Context, muted: Boolean) {
+    fun setMuted(context: Context, muted: Boolean, showUi: Boolean = true) {
         val audioManager = context.getSystemService(AudioManager::class.java)
+        val flags = if (showUi) AudioManager.FLAG_SHOW_UI else 0
         val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
         if (muted) {
             if (current > 0) lastUnmutedVolume = current
@@ -65,7 +66,7 @@ object MediaVolume {
                 audioManager.adjustStreamVolume(
                     AudioManager.STREAM_MUSIC,
                     AudioManager.ADJUST_MUTE,
-                    AudioManager.FLAG_SHOW_UI,
+                    flags,
                 )
             } else {
                 @Suppress("DEPRECATION")
@@ -75,16 +76,17 @@ object MediaVolume {
                 audioManager.setStreamVolume(
                     AudioManager.STREAM_MUSIC,
                     0,
-                    AudioManager.FLAG_SHOW_UI,
+                    flags,
                 )
             }
             return
         }
+        if (!isMuted(context)) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             audioManager.adjustStreamVolume(
                 AudioManager.STREAM_MUSIC,
                 AudioManager.ADJUST_UNMUTE,
-                AudioManager.FLAG_SHOW_UI,
+                flags,
             )
         } else {
             @Suppress("DEPRECATION")
@@ -97,7 +99,7 @@ object MediaVolume {
             audioManager.setStreamVolume(
                 AudioManager.STREAM_MUSIC,
                 restored.coerceAtMost(max),
-                AudioManager.FLAG_SHOW_UI,
+                flags,
             )
         }
     }

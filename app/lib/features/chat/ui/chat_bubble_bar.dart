@@ -216,11 +216,7 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
       // See _sendPreset.
     } finally {
       if (mounted) {
-        setState(() {
-          _sending = false;
-          _composing = false;
-        });
-        _focusNode.unfocus();
+        setState(() => _sending = false);
       }
     }
   }

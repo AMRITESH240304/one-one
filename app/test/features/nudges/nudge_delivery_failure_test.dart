@@ -112,6 +112,34 @@ void main() {
       expect(skullResult.isDuoBug, isTrue);
     });
 
+    test('decline with newer eventId still updates same group', () {
+      memory.record(
+        'group-a',
+        LastNudgeState(
+          eventId: 'evt-old',
+          status: LastNudgeStatus.sent,
+          message: 'sent',
+          at: DateTime.now(),
+          kind: NudgeKind.voice,
+          signifiers: const [],
+        ),
+      );
+
+      final updated = memory.applyRecipientResponse(
+        eventId: 'evt-new',
+        groupId: 'group-a',
+        responderUserId: 'u1',
+        responderName: 'Ada',
+        action: 'decline',
+      );
+      expect(updated, isTrue);
+      expect(memory.forGroup('group-a')!.eventId, 'evt-new');
+      expect(
+        memory.forGroup('group-a')!.signifiers.single.reply,
+        NudgeRecipientReply.declined,
+      );
+    });
+
     test('decline/snooze reply preserves deviceBlocked', () {
       memory.record(
         'group-a',

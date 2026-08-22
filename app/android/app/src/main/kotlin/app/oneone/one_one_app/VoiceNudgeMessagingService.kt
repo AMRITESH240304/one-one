@@ -475,6 +475,8 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         val messageId = message.data["messageId"]?.takeIf { it.isNotBlank() }
             ?: message.messageId
             ?: "${System.currentTimeMillis()}"
+        val senderPhotoUrl = message.data["senderPhotoUrl"]?.takeIf { it.isNotBlank() }
+        val senderAvatarAsset = message.data["senderAvatarAsset"]?.takeIf { it.isNotBlank() }
         ChatPileStore.append(
             this,
             groupId = groupId,
@@ -484,14 +486,36 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             senderName = senderName,
             text = text,
             notifyUrl = message.data["notifyUrl"],
+            senderPhotoUrl = senderPhotoUrl,
+            senderAvatarAsset = senderAvatarAsset,
         )
         val conversation = ChatPileStore.conversation(this, groupId) ?: return
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val latestIncoming = conversation.messages.lastOrNull { !it.fromSelf }
+        val iconLine = latestIncoming ?: conversation.messages.lastOrNull()
         try {
-            manager.notify(
-                VoiceNudgeNotifications.chatPileId(groupId),
-                VoiceNudgeNotifications.buildChatConversation(this, conversation),
-            )
+            if (iconLine == null) {
+                manager.notify(
+                    VoiceNudgeNotifications.chatPileId(groupId),
+                    VoiceNudgeNotifications.buildChatConversation(this, conversation),
+                )
+            } else {
+                NotificationAvatarHelper.applyLargeIcon(
+                    this,
+                    iconLine.senderPhotoUrl,
+                    iconLine.senderName,
+                    iconLine.senderAvatarAsset,
+                ) { bitmap ->
+                    manager.notify(
+                        VoiceNudgeNotifications.chatPileId(groupId),
+                        VoiceNudgeNotifications.buildChatConversation(
+                            this,
+                            conversation,
+                            largeIconOverride = bitmap,
+                        ),
+                    )
+                }
+            }
             Log.i(
                 VoiceNudgeDiagnostics.tag,
                 "[FCM-08] Chat notification displayed groupSuffix=${groupId.takeLast(6)} " +
@@ -687,18 +711,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         // B5: Nudge response arrived — cancel sender's expiry alarm.
         NudgeExpiryTracker.cancelExpiry(this, eventId)
         if (responseAction == "accept") {
-            // Only auto-join the sender when they are already looking at the
-            // app (they just sent the nudge and are waiting). If the app is
-            // backgrounded or killed, the notification's tap-to-join is the
-            // explicit intent — queuing a connect here would join the room
-            // the next time they merely open the app.
-            if (!DeviceLog.wasAppInBackground()) {
-                NudgeActionStore.save(
-                    this,
-                    PendingNudgeAction("connect", eventId, groupId),
-                )
-                NudgeActionDispatcher.signal()
-            }
+            queueSenderConnectOnAccept(eventId, groupId)
         }
         // Always forward to Flutter so the sender sheet / friend profiles can
         // show decline & snooze signifiers (and accept can clear pending state).
@@ -730,6 +743,42 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             "[NUDGE-ACTION-03] sender received response=$responseAction " +
                 "snoozeMinutes=${snoozeMinutes ?: "none"}",
         )
+    }
+
+    private fun queueSenderConnectOnAccept(eventId: String, groupId: String) {
+        NudgeActionStore.save(
+            this,
+            PendingNudgeAction("connect", eventId, groupId),
+        )
+        NudgeActionDispatcher.signal()
+        if (!DeviceLog.wasAppInBackground()) return
+        val connectIntent = Intent(this, MainActivity::class.java).apply {
+            action = VoiceNudgeContract.actionConnect
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            )
+            putExtra(VoiceNudgeContract.extraEventId, eventId)
+            putExtra(VoiceNudgeContract.extraGroupId, groupId)
+            putExtra(
+                VoiceNudgeContract.extraNotificationId,
+                VoiceNudgeNotifications.idFor(eventId),
+            )
+        }
+        try {
+            startActivity(connectIntent)
+            Log.i(
+                VoiceNudgeDiagnostics.tag,
+                "[NUDGE-ACTION-04] launched MainActivity for sender connect " +
+                    "eventSuffix=${eventId.takeLast(6)}",
+            )
+        } catch (error: Exception) {
+            VoiceNudgeDiagnostics.logFailure(
+                "[NUDGE-E11] sender connect launch failed",
+                error,
+            )
+        }
     }
 
     /**

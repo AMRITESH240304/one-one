@@ -136,12 +136,15 @@ class AudioOutputBridge {
     return null;
   }
 
-  static Future<AudioOutputState?> setMuted(bool muted) async {
+  static Future<AudioOutputState?> setMuted(
+    bool muted, {
+    bool showUi = true,
+  }) async {
     _ensureHandler();
     try {
       final raw = await _channel.invokeMethod<dynamic>(
         AudioOutputContract.methodSetMuted,
-        muted,
+        {'muted': muted, 'showUi': showUi},
       );
       if (raw is Map) {
         return AudioOutputState.fromMap(Map<Object?, Object?>.from(raw));

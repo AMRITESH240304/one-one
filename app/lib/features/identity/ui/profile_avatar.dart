@@ -7,6 +7,19 @@ import 'package:flutter/material.dart';
 import '../../../core/storage/cloudinary_delivery.dart';
 import '../data/avatar_assets.dart';
 
+/// First letter of the user's display name for avatar fallbacks.
+String profileDisplayInitial(String displayName) {
+  final trimmed = displayName.trim();
+  if (trimmed.isEmpty) return '?';
+  final words = trimmed.split(RegExp(r'\s+'));
+  var word = words.first;
+  if (word.startsWith('@') && word.length > 1) {
+    word = word.substring(1);
+  }
+  if (word.isEmpty) return '?';
+  return word.substring(0, 1).toUpperCase();
+}
+
 /// Renders a profile photo filling its bounds, falling back to [fallback]
 /// (or a person icon) when there is no photo or the photo fails to load.
 ///

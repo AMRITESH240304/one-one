@@ -1066,7 +1066,7 @@ class VoiceNudgePlaybackService : Service() {
             )
         }
         acknowledge(request, "played", null, health, attention) {}
-        triggerReceiptHaptics(durationMsForHaptics(request))
+        triggerReceiptHaptics(durationMsForHaptics(request), request.kind)
     }
 
     private fun durationMsForHaptics(request: NudgeRequest): Long {
@@ -1082,12 +1082,13 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     /**
-     * Haptic feedback for incoming voice / ring / notification nudges.
-     * Intensity comes from Settings (Light / Pulse / Wild) via
-     * [HapticsPreferenceStore]. Light is the historical default.
+     * Haptic feedback for incoming nudge playback.
+     *
+     * Settings intensity (Light / Pulse / Wild) applies to voice nudges only.
+     * Ring and other kinds always use the Light default.
      */
-    private fun triggerReceiptHaptics(durationMs: Long) {
-        Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] triggerReceiptHaptics durationMs=$durationMs")
+    private fun triggerReceiptHaptics(durationMs: Long, kind: String) {
+        Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] triggerReceiptHaptics durationMs=$durationMs kind=$kind")
         val vibrator = (
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 getSystemService(VibratorManager::class.java)?.defaultVibrator
@@ -1100,7 +1101,11 @@ class VoiceNudgePlaybackService : Service() {
 
         cancelHaptics()
 
-        val intensity = HapticsPreferenceStore.read(this)
+        val intensity = if (kind == VoiceNudgeContract.kindVoice) {
+            HapticsPreferenceStore.read(this)
+        } else {
+            HapticsPreferenceStore.light
+        }
         val openBurst = when (intensity) {
             HapticsPreferenceStore.medium -> NudgeHapticsWaveforms.mediumBurst
             else -> NudgeHapticsWaveforms.lightBurst

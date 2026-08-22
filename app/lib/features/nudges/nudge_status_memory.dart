@@ -159,9 +159,7 @@ class NudgeStatusMemory {
     if (groupId.isEmpty || eventId.isEmpty) return false;
     if (responderUserId.isEmpty) return false;
     if (action == 'accept') {
-      final entry = _byGroupId[groupId];
-      if (entry != null &&
-          (entry.eventId.isEmpty || entry.eventId == eventId)) {
+      if (forGroup(groupId) != null) {
         clear(groupId);
         return true;
       }
@@ -176,11 +174,7 @@ class NudgeStatusMemory {
     if (reply == null) return false;
 
     final existing = forGroup(groupId);
-    if (existing != null &&
-        existing.eventId.isNotEmpty &&
-        existing.eventId != eventId) {
-      return false;
-    }
+    if (existing == null) return false;
 
     final firstName = _firstName(responderName);
     final replyLabel = reply == NudgeRecipientReply.declined

@@ -116,7 +116,14 @@ object NotificationAvatarHelper {
         val size = (64 * context.resources.displayMetrics.density).toInt().coerceAtLeast(96)
         val key = "mono:${senderName.trim().lowercase()}:$size"
         cache[key]?.let { return it }
-        val letter = senderName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+        val letter = senderName.trim()
+            .split(Regex("\\s+"))
+            .firstOrNull { it.isNotEmpty() }
+            ?.removePrefix("@")
+            ?.firstOrNull()
+            ?.uppercaseChar()
+            ?.toString()
+            ?: "?"
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

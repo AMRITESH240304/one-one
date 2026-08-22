@@ -152,6 +152,17 @@ void main() {
       expect(inbox.presentationQueue().single.nudgeId, 's3');
     });
 
+    test('wasGroupAcceptedRecently is true within 10 minutes', () async {
+      inbox.upsert(nudge(id: 'n1', group: 'g1', minutesAgo: 1));
+      expect(inbox.wasGroupAcceptedRecently('g1'), isFalse);
+
+      await inbox.mark(nudgeId: 'n1', status: ActiveNudgeStatus.accepted);
+      expect(inbox.wasGroupAcceptedRecently('g1'), isTrue);
+
+      now = now.add(const Duration(minutes: 11));
+      expect(inbox.wasGroupAcceptedRecently('g1'), isFalse);
+    });
+
     test('persisted status survives a new inbox bind', () async {
       final store = MemoryActiveNudgeStatusStore();
       final first = ActiveNudgeInbox(store: store, clock: () => now);

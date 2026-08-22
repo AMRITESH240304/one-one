@@ -18,6 +18,7 @@ class ChatBubbleFeed extends StatelessWidget {
     required this.currentUserId,
     required this.accent,
     required this.onExpire,
+    this.displayNameForUserId,
     this.opacity = 1,
   });
 
@@ -25,6 +26,7 @@ class ChatBubbleFeed extends StatelessWidget {
   final String currentUserId;
   final Color accent;
   final ValueChanged<String> onExpire;
+  final String Function(String userId, String fallback)? displayNameForUserId;
 
   /// Host-driven fade (e.g. clearing offline history when anyone goes live).
   final double opacity;
@@ -51,12 +53,22 @@ class ChatBubbleFeed extends StatelessWidget {
               key: ValueKey(message.messageId),
               message: message,
               isOwn: message.senderUserId == currentUserId,
+              senderLabel: _senderLabel(message),
               accent: accent,
               onExpire: () => onExpire(message.messageId),
             ),
         ],
       ),
     );
+  }
+
+  String _senderLabel(GroupChatMessage message) {
+    if (message.senderUserId == currentUserId) return 'You';
+    final resolved = displayNameForUserId?.call(
+      message.senderUserId,
+      message.senderDisplayName,
+    );
+    return resolved ?? message.senderDisplayName;
   }
 }
 
@@ -65,12 +77,14 @@ class _ChatBubbleTile extends StatefulWidget {
     super.key,
     required this.message,
     required this.isOwn,
+    required this.senderLabel,
     required this.accent,
     required this.onExpire,
   });
 
   final GroupChatMessage message;
   final bool isOwn;
+  final String senderLabel;
   final Color accent;
   final VoidCallback onExpire;
 
@@ -164,7 +178,7 @@ class _ChatBubbleTileState extends State<_ChatBubbleTile> {
                   Padding(
                     padding: EdgeInsets.symmetric(horizontal: 12.w),
                     child: Text(
-                      isOwn ? 'You' : message.senderDisplayName,
+                      widget.senderLabel,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
