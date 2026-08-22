@@ -220,7 +220,8 @@ class VoiceNudgePlaybackService : Service() {
                 "active=${active?.eventId?.takeLast(6) ?: "none"}",
         )
         mainHandler.removeCallbacksAndMessages(null)
-        releasePlayback()
+        stopPlayback()
+        releasePlayer()
         releaseWakeLock()
         // Use shutdown() (not shutdownNow()) so in-flight download and ack
         // tasks can complete gracefully instead of being interrupted mid-IO.
@@ -303,7 +304,7 @@ class VoiceNudgePlaybackService : Service() {
                 "[FCM-D] stopGroupNudges: active nudge matches group, tearing down " +
                     "eventSuffix=${current.eventId.takeLast(6)}",
             )
-            releasePlayback()
+            stopPlayback()
             releaseWakeLock()
             active = null
             clearActiveTimeout()
@@ -394,6 +395,11 @@ class VoiceNudgePlaybackService : Service() {
             }
         } else {
             Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] processNext -> downloadAndPlay")
+            // Warm the (reused) ExoPlayer while the audio downloads, so the
+            // player's expensive init/decode pipeline overlaps network I/O and
+            // playback starts the moment the file is local. Queued to run after
+            // this command returns, so it never blocks the download kickoff.
+            mainHandler.post { ensurePlayer() }
             downloadAndPlay(request)
         }
     }
@@ -527,28 +533,27 @@ class VoiceNudgePlaybackService : Service() {
     private fun downloadAndPlay(request: NudgeRequest) {
         DeviceLog.info(
             "NudgeService",
-            "Download started kind=${request.kind} eventId=${request.eventId} urlHost=${request.audioUrl?.substringAfter("://")?.substringBefore("/") ?: "-"}",
+            "VOICE_NUDGE_DOWNLOAD_START nudgeId=${request.eventId} kind=${request.kind} " +
+                "urlHost=${request.audioUrl?.substringAfter("://")?.substringBefore("/") ?: "-"}",
             groupId = request.groupId,
         )
         Log.d(
             VoiceNudgeDiagnostics.tag,
             "[FCM-D] downloadAndPlay scheduling download eventSuffix=${request.eventId.takeLast(6)}",
         )
+        val downloadStartedAt = System.currentTimeMillis()
         networkExecutor.execute {
             try {
                 val file = downloadAudio(request)
+                val downloadMs = System.currentTimeMillis() - downloadStartedAt
                 Log.i(
                     VoiceNudgeDiagnostics.tag,
                     "[FCM-13] Voice audio downloaded bytes=${file.length()}",
                 )
                 DeviceLog.info(
                     "NudgeService",
-                    "Download complete bytes=${file.length()} eventId=${request.eventId}",
-                    groupId = request.groupId,
-                )
-                DeviceLog.info(
-                    "NudgeService",
-                    "Download complete bytes=${file.length()} eventId=${request.eventId}",
+                    "VOICE_NUDGE_DOWNLOAD_END nudgeId=${request.eventId} bytes=${file.length()} " +
+                        "downloadMs=$downloadMs",
                     groupId = request.groupId,
                 )
                 Log.d(
@@ -707,10 +712,45 @@ class VoiceNudgePlaybackService : Service() {
             isPlaying = true,
         )
         Log.i(VoiceNudgeDiagnostics.tag, "[FCM-14] Preparing voice audio player")
+        DeviceLog.info(
+            "NudgeService",
+            "VOICE_NUDGE_DECOMPRESSION_START nudgeId=${request.eventId} bytes=${file.length()}",
+            groupId = request.groupId,
+        )
         // AAC-LC in M4A is already the compressed payload. ExoPlayer's hardware
         // decoder is the decompress/decode step; wrapping a second codec would
         // delay playback without shrinking the download.
-        player = ExoPlayer.Builder(this).build().apply {
+        val player = ensurePlayer()
+        player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
+        player.prepare()
+        if (request.cachedReplay) {
+            player.seekTo(
+                VoiceNudgeAudioCache.position(
+                    this@VoiceNudgePlaybackService,
+                    request.eventId,
+                ),
+            )
+        }
+        player.play()
+    }
+
+    /**
+     * Returns the shared, reused ExoPlayer instance, building it on first use.
+     *
+     * Constructing an ExoPlayer (audio sink + codec pipeline) is the dominant
+     * receiver-side cost for a short voice nudge — ~2.5s on a MediaTek device.
+     * Keeping one instance across nudges (instead of a fresh player per nudge)
+     * removes that cost for every nudge after the first, and the player is
+     * warmed during the download so even the first nudge overlaps init with
+     * network I/O.
+     */
+    private fun ensurePlayer(): ExoPlayer {
+        player?.let { return it }
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] ensurePlayer: building ExoPlayer (first use)",
+        )
+        val built = ExoPlayer.Builder(this).build().apply {
             // handleAudioFocus = false: play through regardless of audio-focus
             // state, matching how ring nudges play via AudioTrack. On some
             // Android 15 devices (e.g. Moto g64 5G / MediaTek), ExoPlayer's
@@ -726,115 +766,117 @@ class VoiceNudgePlaybackService : Service() {
                 false,
             )
             setWakeMode(C.WAKE_MODE_LOCAL)
-            addListener(object : Player.Listener {
-                override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    Log.d(
-                        VoiceNudgeDiagnostics.tag,
-                        "[FCM-D] ExoPlayer onIsPlayingChanged isPlaying=$isPlaying",
-                    )
-                    // "Genuinely played" means audio has actually started
-                    // outputting — not merely delivered/downloaded — so the ack
-                    // fires here, the moment ExoPlayer's isPlaying flips true,
-                    // rather than waiting for playback to finish.
-                    if (isPlaying && !request.cachedReplay) {
-                        sendPlayedAckOnce(request)
-                    }
-                    if (isPlaying) {
-                        DeviceLog.info(
-                            "NudgeService",
-                            "Playback started kind=${request.kind} eventId=${request.eventId}",
-                            groupId = request.groupId,
-                        )
-                        // Playback has genuinely started, so the clip must end
-                        // within its duration plus a short grace. Re-arming the
-                        // watchdog here recovers quickly from an audio-focus /
-                        // codec stall that otherwise never fires STATE_ENDED.
-                        schedulePlaybackEndTimeout(request)
-                    }
-                }
+            addListener(playerListener)
+        }
+        player = built
+        return built
+    }
 
-                override fun onPlaybackStateChanged(playbackState: Int) {
-                    Log.d(
-                        VoiceNudgeDiagnostics.tag,
-                        "[FCM-D] ExoPlayer onPlaybackStateChanged state=${playbackStateName(playbackState)}",
-                    )
-                    when (playbackState) {
-                        Player.STATE_READY -> {
-                            // Prepared and about to play. Arm the tight end-timeout
-                            // here as well so a decoder stall that never flips
-                            // isPlaying (or never reaches STATE_ENDED) still
-                            // recovers quickly rather than waiting out the 60s
-                            // download window.
-                            schedulePlaybackEndTimeout(request)
-                        }
-                        Player.STATE_ENDED -> {
-                            Log.i(VoiceNudgeDiagnostics.tag, "[FCM-15] Voice playback completed")
-                            DeviceLog.info(
-                                "NudgeService",
-                                "Playback complete eventId=${request.eventId}",
-                                groupId = request.groupId,
-                            )
-                            VoiceNudgeAudioCache.clearPosition(
-                                this@VoiceNudgePlaybackService,
-                                request.eventId,
-                            )
-                            finishActive(success = true)
-                        }
-                    }
-                }
-
-                override fun onPlayerError(error: PlaybackException) {
-                    Log.d(
-                        VoiceNudgeDiagnostics.tag,
-                        "[FCM-D] ExoPlayer onPlayerError errorCode=${error.errorCodeName} " +
-                            "message=${error.message}",
-                    )
-                    VoiceNudgeDiagnostics.logFailure("[FCM-E6] Voice playback", error)
-                    DeviceLog.log(
-                        "ERROR",
-                        "NudgeService",
-                        "Playback failed: ${error.errorCodeName} ${error.message}. " +
-                            "Nudge not delivered: unknown. eventId=${request.eventId}",
-                        groupId = request.groupId,
-                        throwable = error,
-                    )
-                    VoiceNudgeDiagnostics.recordNudgeFailure(
-                        reason = "playback_error",
-                        eventId = request.eventId,
-                        kind = request.kind,
-                        extras = mapOf(
-                            "error" to (error.errorCodeName),
-                            "cached_replay" to request.cachedReplay.toString(),
-                        ),
-                        groupId = request.groupId,
-                        senderUserId = request.senderUserId,
-                        senderName = request.senderName,
-                        health = activeHealth?.toCrashlyticsMap().orEmpty(),
-                    )
-                    VoiceNudgeAudioCache.delete(
-                        this@VoiceNudgePlaybackService,
-                        request.eventId,
-                    )
-                    if (request.cachedReplay || ackedEventId == request.eventId) {
-                        finishActive(success = false)
-                    } else {
-                        acknowledge(request, "failed", "playback_error", activeHealth) {
-                            finishActive(success = false)
-                        }
-                    }
-                }
-            })
-            setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
-            prepare()
-            if (request.cachedReplay) {
-                seekTo(
-                    VoiceNudgeAudioCache.position(
-                        this@VoiceNudgePlaybackService,
-                        request.eventId,
-                    ),
-                )
+    /**
+     * Shared player listener. Callbacks resolve the current [active] nudge at
+     * call time so the listener can be attached once to the reused player
+     * instead of being rebuilt (and capturing a single nudge) per playback.
+     */
+    private val playerListener = object : Player.Listener {
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            val request = active ?: return
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] ExoPlayer onIsPlayingChanged isPlaying=$isPlaying " +
+                    "eventSuffix=${request.eventId.takeLast(6)}",
+            )
+            // "Genuinely played" means audio has actually started outputting —
+            // not merely delivered/downloaded — so the ack fires here, the
+            // moment ExoPlayer's isPlaying flips true, rather than waiting for
+            // playback to finish.
+            if (isPlaying && !request.cachedReplay) {
+                sendPlayedAckOnce(request)
             }
-            play()
+            if (isPlaying) {
+                DeviceLog.info(
+                    "NudgeService",
+                    "VOICE_NUDGE_DECOMPRESSION_END nudgeId=${request.eventId} " +
+                        "VOICE_NUDGE_PLAYBACK_START nudgeId=${request.eventId} kind=${request.kind}",
+                    groupId = request.groupId,
+                )
+                // Playback has genuinely started, so the clip must end within
+                // its duration plus a short grace. Re-arming the watchdog here
+                // recovers quickly from an audio-focus / codec stall that
+                // otherwise never fires STATE_ENDED.
+                schedulePlaybackEndTimeout(request)
+            }
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] ExoPlayer onPlaybackStateChanged state=${playbackStateName(playbackState)}",
+            )
+            when (playbackState) {
+                Player.STATE_READY -> {
+                    // Prepared and about to play. Arm the tight end-timeout here
+                    // as well so a decoder stall that never flips isPlaying (or
+                    // never reaches STATE_ENDED) still recovers quickly rather
+                    // than waiting out the 60s download window.
+                    active?.let { schedulePlaybackEndTimeout(it) }
+                }
+                Player.STATE_ENDED -> {
+                    val request = active ?: return
+                    Log.i(VoiceNudgeDiagnostics.tag, "[FCM-15] Voice playback completed")
+                    DeviceLog.info(
+                        "NudgeService",
+                        "VOICE_NUDGE_PLAYBACK_END nudgeId=${request.eventId}",
+                        groupId = request.groupId,
+                    )
+                    VoiceNudgeAudioCache.clearPosition(
+                        this@VoiceNudgePlaybackService,
+                        request.eventId,
+                    )
+                    finishActive(success = true)
+                }
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            val request = active ?: return
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] ExoPlayer onPlayerError errorCode=${error.errorCodeName} " +
+                    "message=${error.message}",
+            )
+            VoiceNudgeDiagnostics.logFailure("[FCM-E6] Voice playback", error)
+            DeviceLog.log(
+                "ERROR",
+                "NudgeService",
+                "Playback failed: ${error.errorCodeName} ${error.message}. " +
+                    "Nudge not delivered: unknown. eventId=${request.eventId}",
+                groupId = request.groupId,
+                throwable = error,
+            )
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "playback_error",
+                eventId = request.eventId,
+                kind = request.kind,
+                extras = mapOf(
+                    "error" to (error.errorCodeName),
+                    "cached_replay" to request.cachedReplay.toString(),
+                ),
+                groupId = request.groupId,
+                senderUserId = request.senderUserId,
+                senderName = request.senderName,
+                health = activeHealth?.toCrashlyticsMap().orEmpty(),
+            )
+            VoiceNudgeAudioCache.delete(
+                this@VoiceNudgePlaybackService,
+                request.eventId,
+            )
+            if (request.cachedReplay || ackedEventId == request.eventId) {
+                finishActive(success = false)
+            } else {
+                acknowledge(request, "failed", "playback_error", activeHealth) {
+                    finishActive(success = false)
+                }
+            }
         }
     }
 
@@ -853,7 +895,7 @@ class VoiceNudgePlaybackService : Service() {
                 "[FCM-D] pauseCachedAudio: saving position ${position}ms and releasing playback",
             )
             VoiceNudgeAudioCache.savePosition(this, request.eventId, position)
-            releasePlayback()
+            stopPlayback()
             active = null
             clearActiveTimeout()
             releaseWakeLock()
@@ -979,9 +1021,9 @@ class VoiceNudgePlaybackService : Service() {
                 )
                 DeviceLog.info(
                     "NudgeService",
-                    "Delivery ack sent status=$status reason=${reason ?: "none"} " +
-                        "attention=${attention ?: "-"} HTTP=$responseCode " +
-                        "eventId=${request.eventId}",
+                    "VOICE_NUDGE_PLAYBACK_CONFIRMATION_SENT nudgeId=${request.eventId} " +
+                        "status=$status reason=${reason ?: "none"} " +
+                        "attention=${attention ?: "-"} HTTP=$responseCode",
                     groupId = request.groupId,
                 )
             } catch (error: Exception) {
@@ -1400,7 +1442,7 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-D] finishActive: releasing playback queueDepth=${queue.size} " +
                 "eventSuffix=${request.eventId.takeLast(6)}",
         )
-        releasePlayback()
+        stopPlayback()
         active = null
         clearActiveTimeout()
         val manager = getSystemService(NotificationManager::class.java)
@@ -1455,13 +1497,22 @@ class VoiceNudgePlaybackService : Service() {
         }
     }
 
-    private fun releasePlayback() {
+    /**
+     * Stops the current playback but keeps the [player] instance for reuse.
+     * Releasing and rebuilding ExoPlayer per nudge was the dominant
+     * receiver-side cost; the player is released only in [onDestroy].
+     */
+    private fun stopPlayback() {
         Log.d(
             VoiceNudgeDiagnostics.tag,
-            "[FCM-D] releasePlayback hasPlayer=${player != null} hasRingTrack=${ringTrack != null}",
+            "[FCM-D] stopPlayback hasPlayer=${player != null} hasRingTrack=${ringTrack != null}",
         )
-        player?.release()
-        player = null
+        try {
+            player?.stop()
+        } catch (_: IllegalStateException) {
+            // Player may already be idle/ended.
+        }
+        player?.clearMediaItems()
         try {
             ringTrack?.stop()
         } catch (_: IllegalStateException) {
@@ -1470,6 +1521,15 @@ class VoiceNudgePlaybackService : Service() {
         ringTrack?.release()
         ringTrack = null
         cancelHaptics()
+    }
+
+    private fun releasePlayer() {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] releasePlayer hasPlayer=${player != null}",
+        )
+        player?.release()
+        player = null
     }
 
     private fun holdWakeLock() {

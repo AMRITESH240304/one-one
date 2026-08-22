@@ -104,59 +104,10 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
   const { ticket, status, reason, attention, health } = input;
   const now = nowSeconds();
 
-  // Best-effort audit trail — never blocks the ack or the sender push.
-  await getRealtimeDatabase()
-    .ref(`nudgeDeliveries/${ticket.eventId}/${ticket.recipientUserId}`)
-    .update({
-      eventId: ticket.eventId,
-      groupId: ticket.groupId,
-      kind: ticket.kind,
-      senderUserId: ticket.senderUserId,
-      recipientUserId: ticket.recipientUserId,
-      recipientName: ticket.recipientName,
-      status,
-      reason: reason ?? null,
-      attention: attention ?? null,
-      health: health ?? null,
-      recordedAt: now
-    })
-    .catch((error) => {
-      logger.warn(
-        {
-          checkpoint: "NUDGE-DELIVERY-BE-W1",
-          category: "expected",
-          eventId: ticket.eventId,
-          error: describeError(error)
-        },
-        "failed to persist nudge delivery outcome (non-fatal)"
-      );
-    });
-
-  // Core troubleshooting: maintain a per-recipient rollup so we can identify
-  // users who repeatedly fail to receive nudges without scanning every event.
-  await upsertRecipientDeliveryRollup({
-    ticket,
-    status,
-    reason,
-    attention,
-    health,
-    now
-  });
-
-  logger.info(
-    {
-      checkpoint: "NUDGE-DELIVERY-BE-01",
-      category: "expected",
-      eventId: ticket.eventId,
-      kind: ticket.kind,
-      recipientUserId: ticket.recipientUserId,
-      status,
-      reason: reason ?? null,
-      attention: attention ?? null,
-      health: health ?? null
-    },
-    "nudge delivery outcome recorded"
-  );
+  // Audit writes (per-event record + per-recipient rollup) run in the
+  // background. They must never delay the real-time sender confirmation, so
+  // the sender push below starts without waiting on these RTDB round trips.
+  void persistDeliveryAudit({ ticket, status, reason, attention, health, now });
 
   const senderDevices = await collectAndroidDevices(ticket.senderUserId);
   if (senderDevices.length === 0) {
@@ -195,6 +146,73 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
     notifiedSenderDevices: senderDevices.length,
     sent: pushResult.successCount
   };
+}
+
+/**
+ * Background audit persistence for a delivery outcome. Runs independently of
+ * the sender confirmation push so RTDB write/transaction latency never delays
+ * the sender from seeing "played". Both writes are individually non-fatal.
+ */
+async function persistDeliveryAudit(input: {
+  ticket: AckTicket;
+  status: NudgeDeliveryStatus;
+  reason?: string;
+  attention?: string;
+  health?: Record<string, unknown>;
+  now: number;
+}) {
+  const { ticket, status, reason, attention, health, now } = input;
+
+  await getRealtimeDatabase()
+    .ref(`nudgeDeliveries/${ticket.eventId}/${ticket.recipientUserId}`)
+    .update({
+      eventId: ticket.eventId,
+      groupId: ticket.groupId,
+      kind: ticket.kind,
+      senderUserId: ticket.senderUserId,
+      recipientUserId: ticket.recipientUserId,
+      recipientName: ticket.recipientName,
+      status,
+      reason: reason ?? null,
+      attention: attention ?? null,
+      health: health ?? null,
+      recordedAt: now
+    })
+    .catch((error) => {
+      logger.warn(
+        {
+          checkpoint: "NUDGE-DELIVERY-BE-W1",
+          category: "expected",
+          eventId: ticket.eventId,
+          error: describeError(error)
+        },
+        "failed to persist nudge delivery outcome (non-fatal)"
+      );
+    });
+
+  await upsertRecipientDeliveryRollup({
+    ticket,
+    status,
+    reason,
+    attention,
+    health,
+    now
+  });
+
+  logger.info(
+    {
+      checkpoint: "NUDGE-DELIVERY-BE-01",
+      category: "expected",
+      eventId: ticket.eventId,
+      kind: ticket.kind,
+      recipientUserId: ticket.recipientUserId,
+      status,
+      reason: reason ?? null,
+      attention: attention ?? null,
+      health: health ?? null
+    },
+    "nudge delivery outcome recorded"
+  );
 }
 
 /**

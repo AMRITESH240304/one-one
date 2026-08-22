@@ -208,26 +208,8 @@ async function dispatchVoiceNudgeFromContext(ctx: {
     "voice nudge audio verified in Cloud Storage after client direct upload"
   );
 
-  const file = getVoiceNudgeBucket().file(ctx.storagePath);
-  let signedAudioUrl: string;
-  try {
-    signedAudioUrl = await createVoiceNudgeSignedReadUrl(ctx.storagePath, ctx.expiresAt * 1000);
-  } catch (error) {
-    logger.error(
-      {
-        checkpoint: "VOICE-NUDGE-BE-E1",
-        category: "unexpected",
-        eventId: ctx.eventId,
-        storagePath: ctx.storagePath,
-        error: describeError(error)
-      },
-      "voice nudge signed read URL generation failed, rolling back Cloud Storage object"
-    );
-    await file.delete({ ignoreNotFound: true }).catch(() => undefined);
-    throw error;
-  }
-
   if (ctx.recipientDevices.length === 0) {
+    const file = getVoiceNudgeBucket().file(ctx.storagePath);
     logger.warn(
       {
         checkpoint: "VOICE-NUDGE-BE-W1",
@@ -241,25 +223,50 @@ async function dispatchVoiceNudgeFromContext(ctx: {
     return nudgeResult(ctx.eventId, ctx.recipientUserIds.length, 0, 0, 0);
   }
 
-  // Write a lightweight notification event so the respond-to-nudge endpoint
-  // can validate voice-nudge responses and notification action buttons work.
+  const file = getVoiceNudgeBucket().file(ctx.storagePath);
+
+  // Independent post-upload work runs in parallel instead of serially: sign
+  // the read URL, fetch the sender's profile photo + avatar, and write the
+  // respond-event record (non-fatal). Previously each awaited before the FCM
+  // push, adding several serial RTDB/GCS round trips to sender-visible latency.
   const baseUrl = config.PUBLIC_API_BASE_URL.replace(/\/$/, "");
   const responseUrl = `${baseUrl}/v1/groups/${ctx.groupId}/nudges/${ctx.eventId}/respond`;
-  await writeNudgeNotificationEvent({
-    groupId: ctx.groupId,
-    eventId: ctx.eventId,
-    senderUserId: ctx.senderUserId,
-    eventType: "voice_nudge",
-    targetScope: "all_friends",
-    targetUserIds: ctx.recipientUserIds.filter((uid) => uid !== ctx.senderUserId),
-    createdAt: nowSeconds(),
-    responseUrl,
-    senderName: ctx.senderName
+  const signedAudioUrlPromise = createVoiceNudgeSignedReadUrl(
+    ctx.storagePath,
+    ctx.expiresAt * 1000
+  ).catch(async (error) => {
+    logger.error(
+      {
+        checkpoint: "VOICE-NUDGE-BE-E1",
+        category: "unexpected",
+        eventId: ctx.eventId,
+        storagePath: ctx.storagePath,
+        error: describeError(error)
+      },
+      "voice nudge signed read URL generation failed, rolling back Cloud Storage object"
+    );
+    await file.delete({ ignoreNotFound: true }).catch(() => undefined);
+    throw error;
   });
 
+  const [signedAudioUrl, senderPhotoUrl, senderAvatarAsset] = await Promise.all([
+    signedAudioUrlPromise,
+    readProfilePhotoUrl(ctx.senderUserId),
+    readAvatarAsset(ctx.senderUserId),
+    writeNudgeNotificationEvent({
+      groupId: ctx.groupId,
+      eventId: ctx.eventId,
+      senderUserId: ctx.senderUserId,
+      eventType: "voice_nudge",
+      targetScope: "all_friends",
+      targetUserIds: ctx.recipientUserIds.filter((uid) => uid !== ctx.senderUserId),
+      createdAt: nowSeconds(),
+      responseUrl,
+      senderName: ctx.senderName
+    })
+  ]);
+
   const ackUrl = `${baseUrl}/v1/nudges/${ctx.eventId}/ack`;
-  const senderPhotoUrl = await readProfilePhotoUrl(ctx.senderUserId);
-  const senderAvatarAsset = await readAvatarAsset(ctx.senderUserId);
   const pushResult = await sendAndroidDataPushes(
     ctx.recipientDevices.map((device) => ({
       token: device.fcmToken,

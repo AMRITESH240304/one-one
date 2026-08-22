@@ -194,8 +194,8 @@ class NudgeRepository {
       LogManager.log(
         LogLevel.info,
         'NudgeService',
-        'Voice upload start bytes=${audio.length} durationMs=$durationMs '
-            'eventId=$eventId reservedUrl=$reserved',
+        'VOICE_NUDGE_UPLOAD_START nudgeId=$eventId bytes=${audio.length} '
+            'durationMs=$durationMs reservedUrl=$reserved',
         groupId: groupId,
       );
       final uploadWatch = Stopwatch()..start();
@@ -208,8 +208,8 @@ class NudgeRepository {
       LogManager.log(
         LogLevel.info,
         'NudgeService',
-        'Voice upload complete bytes=${audio.length} elapsedMs=$uploadMs '
-            'eventId=$eventId',
+        'VOICE_NUDGE_UPLOAD_END nudgeId=$eventId bytes=${audio.length} '
+            'uploadMs=$uploadMs',
         groupId: groupId,
       );
 
@@ -221,7 +221,7 @@ class NudgeRepository {
       LogManager.log(
         LogLevel.info,
         'NudgeService',
-        'Voice FCM trigger sending eventId=$eventId',
+        'VOICE_NUDGE_SEND_START nudgeId=$eventId',
         groupId: groupId,
       );
       final fcmWatch = Stopwatch()..start();
@@ -247,8 +247,8 @@ class NudgeRepository {
       LogManager.log(
         LogLevel.info,
         'NudgeService',
-        'Voice FCM trigger sent eventId=${result['notificationEventId'] ?? eventId} '
-            'elapsedMs=${fcmWatch.elapsedMilliseconds} '
+        'VOICE_NUDGE_SEND_ACK nudgeId=${result['notificationEventId'] ?? eventId} '
+            'sendMs=${fcmWatch.elapsedMilliseconds} '
             'sent=${result['sent'] ?? '-'} '
             'targetDevices=${result['targetDevices'] ?? '-'}',
         groupId: groupId,
