@@ -186,6 +186,13 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                     "senderUserId=${data["senderUserId"] ?: "-"}",
                 groupId = data["groupId"],
             )
+            if (kind == VoiceNudgeContract.kindVoice || kind == VoiceNudgeContract.kindRing) {
+                DeviceLog.info(
+                    "NudgeService",
+                    "VOICE_NUDGE_RECEIVED nudgeId=${data["eventId"] ?: "-"} kind=$kind",
+                    groupId = data["groupId"],
+                )
+            }
         }
         if (kind == null) {
             if (message.notification != null) {

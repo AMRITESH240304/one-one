@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
 import 'package:record/record.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../../core/firebase/crashlytics_service.dart';
 import '../../../core/logging/log_level.dart';
@@ -116,6 +117,14 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   /// Kept after delivery finalize so late decline/snooze replies still match.
   String? _lastEventId;
+
+  // Voice-nudge timing diagnostics. [_voiceRequestId] is a local request id
+  // minted at record-start; once the backend returns an event id it becomes
+  // the correlation key (nudgeId) for the rest of the sender-side trace.
+  String? _voiceRequestId;
+  String? _voiceNudgeId;
+  final Stopwatch _voiceNudgeWatch = Stopwatch();
+  bool _voiceConfirmationLogged = false;
   Timer? _deliveryTimeoutTimer;
   final Map<String, _PendingRecipient> _expectedRecipients = {};
   final Map<String, NudgeDeliveryResult> _resultsByUserId = {};
@@ -515,6 +524,18 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           'recipientName=${result.recipientName ?? '-'}',
       groupId: widget.group.groupId,
     );
+    if (result.played && _voiceNudgeId == result.eventId) {
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'VOICE_NUDGE_PLAYBACK_STARTED nudgeId=${result.eventId} '
+            'recipientUserId=${result.recipientUserId ?? '-'} '
+            'recipientName=${result.recipientName ?? '-'} '
+            'attention=${result.attention ?? '-'} '
+            'elapsedSinceRecordEndMs=${_voiceNudgeWatch.elapsedMilliseconds}',
+        groupId: widget.group.groupId,
+      );
+    }
 
     String? matchedId = result.recipientUserId;
     if (matchedId == null || !_expectedRecipients.containsKey(matchedId)) {
@@ -626,6 +647,28 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   void _finalizeDeliverySummary({required bool timedOut}) {
     if (!mounted) return;
+    if (_voiceNudgeId != null && !_voiceConfirmationLogged) {
+      _voiceConfirmationLogged = true;
+      _voiceNudgeWatch.stop();
+      final totalMs = _voiceNudgeWatch.elapsedMilliseconds;
+      if (timedOut) {
+        LogManager.log(
+          LogLevel.warn,
+          'NudgeService',
+          'VOICE_NUDGE_CONFIRMATION_TIMEOUT nudgeId=$_voiceNudgeId '
+              'totalMs=$totalMs',
+          groupId: widget.group.groupId,
+        );
+      } else {
+        LogManager.log(
+          LogLevel.info,
+          'NudgeService',
+          'VOICE_NUDGE_CONFIRMATION_RECEIVED nudgeId=$_voiceNudgeId '
+              'VOICE_NUDGE_TOTAL_TIME nudgeId=$_voiceNudgeId totalMs=$totalMs',
+          groupId: widget.group.groupId,
+        );
+      }
+    }
     LogManager.log(
       timedOut ? LogLevel.warn : LogLevel.info,
       'NudgeService',
@@ -1273,10 +1316,17 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _recordingCapTimer = Timer(VoiceNudgeAudio.maxRecordingDuration, () {
         unawaited(_finishRecording(send: true));
       });
+      _voiceRequestId = const Uuid().v4();
+      _voiceNudgeId = null;
+      _voiceConfirmationLogged = false;
       LogManager.log(
         LogLevel.info,
         'NudgeService',
-        'Voice recording start capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds}',
+        'VOICE_NUDGE_RECORD_START nudgeId=$_voiceRequestId '
+            'encoder=aacLc bitRate=${VoiceNudgeAudio.bitRate} '
+            'sampleRate=${VoiceNudgeAudio.sampleRate} '
+            'channels=${VoiceNudgeAudio.numChannels} '
+            'capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds}',
         groupId: widget.group.groupId,
       );
       _recordingTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
@@ -1321,11 +1371,18 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       0,
       VoiceNudgeAudio.maxAcceptedDurationMs,
     );
+    // Start the end-to-end clock at record-end: everything below (flush,
+    // upload, dispatch, receiver download/decode/playback, confirmation) must
+    // fit within the target window.
+    _voiceNudgeWatch
+      ..reset()
+      ..start();
     LogManager.log(
       LogLevel.info,
       'NudgeService',
-      'Voice recording end durationMs=$actualDurationMs '
-          'send=$send capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds}',
+      'VOICE_NUDGE_RECORD_END nudgeId=${_voiceRequestId ?? '-'} '
+          'durationMs=$actualDurationMs send=$send '
+          'capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds}',
       groupId: widget.group.groupId,
     );
     if (mounted) {
@@ -1354,13 +1411,22 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           )
         : null;
     try {
+      // AAC-LC encoding happens inside the recorder while recording; the
+      // stop() call only flushes/finalizes the M4A container. This is the
+      // single measurable "compression" step on the sender.
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'VOICE_NUDGE_COMPRESSION_START nudgeId=${_voiceRequestId ?? '-'}',
+        groupId: widget.group.groupId,
+      );
       final stopWatch = Stopwatch()..start();
       path = await _recorder.stop();
       LogManager.log(
         LogLevel.info,
         'NudgeService',
-        'Voice recorder flush elapsedMs=${stopWatch.elapsedMilliseconds} '
-            'path=${path != null}',
+        'VOICE_NUDGE_COMPRESSION_END nudgeId=${_voiceRequestId ?? '-'} '
+            'elapsedMs=${stopWatch.elapsedMilliseconds} path=${path != null}',
         groupId: widget.group.groupId,
       );
       if (!send || path == null) return;
@@ -1393,6 +1459,15 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _cooldowns.record(NudgeKind.voice);
       sent = true;
       voiceEventId = response['notificationEventId']?.toString();
+      _voiceNudgeId = voiceEventId;
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'VOICE_NUDGE_SEND_ACK nudgeId=${voiceEventId ?? '-'} '
+            'clientRequestId=${_voiceRequestId ?? '-'} '
+            'elapsedSinceRecordEndMs=${_voiceNudgeWatch.elapsedMilliseconds}',
+        groupId: widget.group.groupId,
+      );
       _expectedRecipients
         ..clear()
         ..addEntries(
