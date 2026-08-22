@@ -1,11 +1,11 @@
 import { randomBytes, createHash } from "node:crypto";
-import { RoomServiceClient } from "livekit-server-sdk";
 import { config } from "../config.js";
 import { sendAndroidDataPushes } from "../firebase/messaging.js";
 import { getRealtimeDatabase } from "../firebase/database.js";
 import { getVoiceNudgeBucket } from "../firebase/storage.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
+import { createLiveKitRoomServiceClient, isLiveKitNotFound } from "../livekit/tokens.js";
 
 const maxMembers = 6;
 const defaultMaxTalkMs = 60_000;
@@ -1046,16 +1046,8 @@ async function notifyUsers(
   }
 }
 
-function roomServiceClient() {
-  if (!config.LIVEKIT_URL || !config.LIVEKIT_API_KEY || !config.LIVEKIT_API_SECRET) {
-    return null;
-  }
-  const host = config.LIVEKIT_URL.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
-  return new RoomServiceClient(host, config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET);
-}
-
 async function disconnectLiveKitMember(groupId: string, userId: string) {
-  const client = roomServiceClient();
+  const client = createLiveKitRoomServiceClient();
   if (!client) return;
   try {
     const group = await getRealtimeDatabase().ref(`groups/${groupId}`).get();
@@ -1080,7 +1072,7 @@ async function disconnectLiveKitMember(groupId: string, userId: string) {
 }
 
 async function disconnectLiveKitRoom(roomName: string) {
-  const client = roomServiceClient();
+  const client = createLiveKitRoomServiceClient();
   if (!client) return;
   try {
     const participants = await client.listParticipants(roomName);
@@ -1097,12 +1089,6 @@ async function disconnectLiveKitRoom(roomName: string) {
       logger.warn({ error, roomName }, "LiveKit room deletion failed");
     }
   }
-}
-
-function isLiveKitNotFound(error: unknown) {
-  if (!isRecord(error)) return false;
-  const status = error.status ?? error.code;
-  return status === 404 || status === "not_found";
 }
 
 function defaultAvailability(now: number) {

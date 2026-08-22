@@ -3,25 +3,28 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:one_one_app/features/online/peer_reconnect_coordinator.dart';
 
 void main() {
-  test('suppresses lost connection when the same peer rejoins inside the window', () {
-    fakeAsync((async) {
-      final lost = <String>[];
-      final back = <String>[];
-      final coordinator = PeerReconnectCoordinator(
-        window: const Duration(seconds: 15),
-        onLostConnection: lost.add,
-        onBackLive: back.add,
-      );
+  test(
+    'suppresses lost connection when the same peer rejoins inside the window',
+    () {
+      fakeAsync((async) {
+        final lost = <String>[];
+        final back = <String>[];
+        final coordinator = PeerReconnectCoordinator(
+          window: const Duration(seconds: 15),
+          onLostConnection: lost.add,
+          onBackLive: back.add,
+        );
 
-      coordinator.peerLeft('friend');
-      async.elapse(const Duration(seconds: 5));
-      coordinator.peerJoined('friend');
-      async.elapse(const Duration(seconds: 20));
+        coordinator.peerLeft('friend');
+        async.elapse(const Duration(seconds: 5));
+        expect(coordinator.peerJoined('friend'), isTrue);
+        async.elapse(const Duration(seconds: 20));
 
-      expect(lost, isEmpty);
-      expect(back, ['friend']);
-    });
-  });
+        expect(lost, isEmpty);
+        expect(back, ['friend']);
+      });
+    },
+  );
 
   test('shows lost connection if the peer does not rejoin in time', () {
     fakeAsync((async) {
@@ -50,7 +53,7 @@ void main() {
         onBackLive: back.add,
       );
 
-      coordinator.peerJoined('friend');
+      expect(coordinator.peerJoined('friend'), isFalse);
       expect(back, isEmpty);
     });
   });

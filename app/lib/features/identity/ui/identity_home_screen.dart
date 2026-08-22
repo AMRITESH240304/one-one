@@ -151,6 +151,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   GroupSummary? _selectedGroup;
   StreamSubscription<DatabaseEvent>? _availabilitySubscription;
   Timer? _availabilityExpiryTimer;
+  Set<String> _liveKitParticipantUserIds = {};
+  int _liveKitPresenceRequestId = 0;
   StreamSubscription<DatabaseEvent>? _membersSubscription;
   StreamSubscription<DatabaseEvent>? _userGroupsSubscription;
   final List<StreamSubscription<DatabaseEvent>> _memberProfileSubscriptions =
@@ -190,6 +192,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   bool _liveSessionActiveOnBackground = false;
 
   final Set<String> _processedNudgeEventIds = {};
+  Set<String> _connectedLiveKitUserIds = {};
+  bool _participantJoinNotifiersReady = false;
 
   // Automatic-offline-on-disconnect (with grace period) bookkeeping. See
   // _evaluatePeerPresenceForAutoOffline for the state machine.
@@ -255,7 +259,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Timer? _incomingExpiryTimer;
   bool _inviteJoinInFlight = false;
   bool _connectionCleanupInFlight = false;
-  bool _hasAvailabilitySnapshot = false;
   String? _lastPeerLossUserId;
   DateTime? _lastPeerLossAt;
   bool _processTeardownInFlight = false;
@@ -540,6 +543,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       try {
         unawaited(_refreshDeviceRegistration());
         unawaited(_reportMediaVolume());
+        final groupId = _selectedGroup?.groupId;
+        if (groupId != null) unawaited(_refreshLiveKitParticipants(groupId));
         // Notification Accept/Connect taps are queued natively and consumed
         // here. Opening the app by itself must not start a LiveKit session —
         // `_goOnline` still requires `_explicitJoinIntent`.
@@ -1514,7 +1519,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   void _listenToAvailability(String groupId) {
     unawaited(_availabilitySubscription?.cancel());
-    _hasAvailabilitySnapshot = false;
+    unawaited(_refreshLiveKitParticipants(groupId));
     _availabilitySubscription = AppDatabase.instance()
         .ref('memberAvailability/$groupId')
         .onValue
@@ -1532,39 +1537,42 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           }
 
           if (!mounted || _selectedGroup?.groupId != groupId) return;
-          if (_hasAvailabilitySnapshot) {
-            final lostPeerIds = _availability.entries
-                .where(
-                  (entry) =>
-                      entry.key != _session.userId &&
-                      entry.value.isLive &&
-                      !(next[entry.key]?.isLive ?? false),
-                )
-                .map((entry) => entry.key)
-                .toList(growable: false);
-            final rejoinedPeerIds = next.entries
-                .where(
-                  (entry) =>
-                      entry.key != _session.userId &&
-                      entry.value.isLive &&
-                      !(_availability[entry.key]?.isLive ?? false),
-                )
-                .map((entry) => entry.key)
-                .toList(growable: false);
-            for (final userId in lostPeerIds) {
-              _peerReconnect.peerLeft(userId);
-            }
-            for (final userId in rejoinedPeerIds) {
-              _peerReconnect.peerJoined(userId);
-            }
-          }
+          final previousVoiceUserIds = _availability.entries
+              .where((entry) => entry.value.isInVoiceSession)
+              .map((entry) => entry.key)
+              .toSet();
+          final nextVoiceUserIds = next.entries
+              .where((entry) => entry.value.isInVoiceSession)
+              .map((entry) => entry.key)
+              .toSet();
           setState(() => _availability = next);
-          _hasAvailabilitySnapshot = true;
+          if (previousVoiceUserIds.length != nextVoiceUserIds.length ||
+              !previousVoiceUserIds.containsAll(nextVoiceUserIds)) {
+            unawaited(_refreshLiveKitParticipants(groupId));
+          }
           _scheduleAvailabilityExpiryRefresh();
           if (_onlineSession?.groupId == groupId) {
             _evaluatePeerPresenceForAutoOffline(next);
           }
         });
+  }
+
+  Future<Set<String>> _refreshLiveKitParticipants(String groupId) async {
+    final requestId = ++_liveKitPresenceRequestId;
+    Set<String> userIds;
+    try {
+      userIds = await _onlineRepository.liveParticipantUserIds(groupId);
+    } catch (_) {
+      // Never promote cached/RTDB presence to live when LiveKit cannot verify it.
+      userIds = {};
+    }
+    if (!mounted ||
+        requestId != _liveKitPresenceRequestId ||
+        _selectedGroup?.groupId != groupId) {
+      return userIds;
+    }
+    setState(() => _liveKitParticipantUserIds = userIds);
+    return userIds;
   }
 
   /// Live-syncs the last [ChatMessageRepository.visibleLimit] chat bubbles
@@ -2123,6 +2131,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       () {
         if (!mounted) return;
         setState(() {});
+        final groupId = _selectedGroup?.groupId;
+        if (groupId != null) unawaited(_refreshLiveKitParticipants(groupId));
         if (_onlineSession != null) {
           _evaluatePeerPresenceForAutoOffline(_availability);
         }
@@ -2138,6 +2148,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _selectedGroup = group;
       _members = cachedMembers ?? const [];
       _availability = {};
+      _liveKitParticipantUserIds = {};
       _chatMessages = const [];
       _chatFeedOpacity = 1;
       _chatVisibleAfterCreatedAt = 0;
@@ -2372,8 +2383,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // If someone else is already online in this group, let the user join
     // directly — no nudge required since the room is already active.
     if (_anyPeerOnline) {
-      _showPresenceSnackbar('Someone is live — joining now.');
-      unawaited(_goOnline(userIntent: true));
+      unawaited(_joinLiveGroupIfStillActive());
       return;
     }
     // Nobody is online yet — the room doesn't exist. Prompt the user to
@@ -2385,9 +2395,40 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   /// True when at least one other group member is actively online.
   bool get _anyPeerOnline {
-    return _availability.entries.any(
-      (entry) => entry.key != _session.userId && entry.value.isLive,
+    return _liveKitParticipantUserIds.any(
+      (userId) => userId != _session.userId,
     );
+  }
+
+  Future<void> _joinLiveGroupIfStillActive() async {
+    final group = _selectedGroup;
+    if (group == null || _busy) return;
+    setState(() {
+      _busy = true;
+      _state = 'connecting';
+      _message = null;
+    });
+    final userIds = await _refreshLiveKitParticipants(group.groupId);
+    if (!mounted) return;
+    if (_selectedGroup?.groupId != group.groupId) {
+      setState(() {
+        _busy = false;
+        _state = _isOnline ? 'live' : 'away';
+      });
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _state = 'away';
+    });
+    if (!userIds.any((userId) => userId != _session.userId)) {
+      _showPresenceSnackbar(
+        'Nobody is live now. Send a nudge to go online together.',
+      );
+      return;
+    }
+    _showPresenceSnackbar('Someone is live — joining now.');
+    await _goOnline(userIntent: true);
   }
 
   Future<void> _goOnline({bool userIntent = false}) async {
@@ -2460,7 +2501,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final startInCallMode = _availability.entries.any(
       (entry) =>
           entry.key != _session.userId &&
-          entry.value.isLive &&
+          _liveKitParticipantUserIds.contains(entry.key) &&
           entry.value.isCallMode,
     );
     final startingConnectionMode = startInCallMode
@@ -2509,6 +2550,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _state = 'live';
         _message = LiveKitStatus.live;
       });
+      final room = _room;
+      if (room != null) _syncConnectedLiveKitUsers(room);
+      _participantJoinNotifiersReady = true;
       // Ensure remote emoji bursts reattach after going live (bootstrap may
       // have left a dead stream after a prior permission blip).
       _listenToEmojiBursts(group.groupId);
@@ -3339,6 +3383,22 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     });
   }
 
+  void _syncConnectedLiveKitUsers(Room room) {
+    final userIds = room.remoteParticipants.values
+        .map(
+          (participant) => _participantUserIdFromIdentity(participant.identity),
+        )
+        .whereType<String>()
+        .where((userId) => userId != _session.userId)
+        .toSet();
+    _connectedLiveKitUserIds = userIds;
+    if (mounted && _selectedGroup?.groupId == _onlineSession?.groupId) {
+      setState(
+        () => _liveKitParticipantUserIds = {...userIds, _session.userId},
+      );
+    }
+  }
+
   void _updateParticipantConnectionQuality(
     Participant participant,
     ConnectionQuality quality,
@@ -3383,10 +3443,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             _logLocalParticipantPermissions(room);
           })
           ..on<RoomReconnectingEvent>((_) {
+            _participantJoinNotifiersReady = false;
             _setStateAndMessage('reconnecting', LiveKitStatus.reconnecting);
           })
           ..on<RoomReconnectedEvent>((_) {
             _syncConnectionQualities(room);
+            _syncConnectedLiveKitUsers(room);
+            _participantJoinNotifiersReady = true;
             _logLocalParticipantPermissions(room);
             // Reconnection can drop the local audio track — restore it based on
             // the current talk/call state so the participant never silently
@@ -3410,7 +3473,28 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               event.participant.identity,
             );
             if (userId != null && userId != _session.userId) {
-              _peerReconnect.peerJoined(userId);
+              final firstDevice = _connectedLiveKitUserIds.add(userId);
+              final reconnected = _peerReconnect.peerJoined(userId);
+              if (mounted &&
+                  _selectedGroup?.groupId == _onlineSession?.groupId) {
+                setState(
+                  () => _liveKitParticipantUserIds = {
+                    ..._liveKitParticipantUserIds,
+                    userId,
+                  },
+                );
+              }
+              if (firstDevice &&
+                  !reconnected &&
+                  _participantJoinNotifiersReady) {
+                final name = _chatDisplayNameForUser(
+                  userId,
+                  event.participant.name.trim(),
+                );
+                _showPresenceSnackbar(
+                  '${name.isEmpty ? 'A participant' : name} joined',
+                );
+              }
             }
           })
           ..on<ParticipantDisconnectedEvent>((event) {
@@ -3418,7 +3502,23 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               event.participant.identity,
             );
             if (userId != null && userId != _session.userId) {
-              _peerReconnect.peerLeft(userId);
+              final stillConnected = room.remoteParticipants.values.any(
+                (participant) =>
+                    _participantUserIdFromIdentity(participant.identity) ==
+                    userId,
+              );
+              if (!stillConnected) {
+                _connectedLiveKitUserIds.remove(userId);
+                _peerReconnect.peerLeft(userId);
+                if (mounted &&
+                    _selectedGroup?.groupId == _onlineSession?.groupId) {
+                  setState(
+                    () => _liveKitParticipantUserIds = {
+                      ..._liveKitParticipantUserIds.where((id) => id != userId),
+                    },
+                  );
+                }
+              }
             }
           })
           ..on<ParticipantConnectionQualityUpdatedEvent>((event) {
@@ -3678,6 +3778,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _hardwareAudioDeviceSubscription = null;
     _soloGuard?.detach();
     _soloGuard = null;
+    _connectedLiveKitUserIds = {};
+    _participantJoinNotifiersReady = false;
     _speakingUserIds = const {};
     _clearConnectionQualities();
     _callAudio.onSessionEnded();
@@ -3904,11 +4006,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // Sender-side warm: prefetch this device's LiveKit token now so that if
     // the nudge is accepted and both sides go online, joining is instant.
     unawaited(_prefetchLiveKit(group: group));
-    final onlineUserIds = <String>{
-      for (final entry in _availability.entries)
-        if (entry.value.isLive || entry.value.isInVoiceSession) entry.key,
-      if (_isOnline) _session.userId,
-    };
+    final onlineUserIds = {..._liveKitParticipantUserIds};
+    if (_isOnline) onlineUserIds.add(_session.userId);
     unawaited(
       showNudgeBottomSheet(
         context,
@@ -4174,19 +4273,18 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // whether the call-mode controls render at all.
     final friends = _friends;
     final anyFriendOnline = friends.any(
-      (friend) =>
-          (_availability[friend.userId] ?? MemberAvailability.away).isLive,
+      (friend) => _liveKitParticipantUserIds.contains(friend.userId),
     );
     final allFriendsOnline =
         friends.isNotEmpty &&
         friends.every(
-          (friend) =>
-              (_availability[friend.userId] ?? MemberAvailability.away).isLive,
+          (friend) => _liveKitParticipantUserIds.contains(friend.userId),
         );
     final groupAllOffline = !live && !anyFriendOnline;
     final groupAllOnline = live && allFriendsOnline;
     final groupMixed = !groupAllOffline && !groupAllOnline;
     final anyMemberOnline = live || anyFriendOnline;
+    final showGoLive = !_isOnline && anyFriendOnline;
     // Offline chips ↔ online emoji bar, and fade past bubbles on go-live.
     _syncChatVisibilityForOnlineState(anyMemberOnline);
 
@@ -4338,6 +4436,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                                   : 'Tap to Talk')
                             : _isOnline
                             ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
+                            : showGoLive
+                            ? 'Someone is live — tap Go Live to join'
                             : !_serviceReady
                             ? 'invite a friend to enable voice service'
                             : 'send a nudge to go online together',
@@ -4354,19 +4454,18 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     ),
                   ),
                 ),
-                // Vertical edge actions only while the local user is
-                // live. Fully offline restores the original layout:
-                // nudge lives inside the main button, no side stack.
-                if (live && (groupMixed || anyMemberOnline))
+                // Keep nudge secondary on the right while peers are live.
+                // With nobody live it remains inside the main button.
+                if ((live && (groupMixed || anyMemberOnline)) || showGoLive)
                   Align(
                     alignment: Alignment.centerRight,
                     child: Padding(
                       // Flush to the right edge of the safe area.
                       padding: EdgeInsets.only(right: 0, bottom: 6.h),
                       child: _EdgeQuickActions(
-                        showNudge: groupMixed,
+                        showNudge: groupMixed || showGoLive,
                         onNudge: _busy ? null : _openNudges,
-                        showModeToggle: anyMemberOnline,
+                        showModeToggle: live && anyMemberOnline,
                         modeToggleEnabled:
                             viewingActiveGroup && !_connectionModeBusy,
                         callModeActive: _isCallMode,
@@ -4404,6 +4503,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           callMode: _isCallMode,
                           accent: accent,
                           nudgeGroupId: groupAllOffline
+                              ? focusedGroup?.groupId
+                              : null,
+                          goLiveGroupId: showGoLive
                               ? focusedGroup?.groupId
                               : null,
                           onNudge: _busy ? null : _openNudges,
@@ -5259,11 +5361,7 @@ class _NudgeReplyBadge extends StatelessWidget {
           width: 1,
         ),
         boxShadow: const [
-          BoxShadow(
-            color: Colors.black45,
-            blurRadius: 3,
-            offset: Offset(0, 1),
-          ),
+          BoxShadow(color: Colors.black45, blurRadius: 3, offset: Offset(0, 1)),
         ],
       ),
       child: Icon(icon, color: color, size: 13.sp),
@@ -5661,6 +5759,7 @@ class _ExperienceCarousel extends StatefulWidget {
     required this.callMode,
     required this.accent,
     required this.nudgeGroupId,
+    required this.goLiveGroupId,
     required this.onNudge,
     required this.onSelected,
     required this.onTalkStart,
@@ -5690,6 +5789,9 @@ class _ExperienceCarousel extends StatefulWidget {
   /// the focused card should join instead (peers already live, or switching
   /// from another connected group).
   final String? nudgeGroupId;
+
+  /// Focused room with an active LiveKit peer while this user is offline.
+  final String? goLiveGroupId;
   final VoidCallback? onNudge;
   final ValueChanged<int> onSelected;
   final Future<void> Function() onTalkStart;
@@ -5819,6 +5921,7 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
 
     final connectedToThisGroup = item.group.groupId == widget.connectedGroupId;
     final focused = actuallySelected && distance < 0.45;
+    final goLiveMode = focused && item.group.groupId == widget.goLiveGroupId;
     Widget circle = _MainAvatarCircle(
       item: item,
       selected: visuallySelected,
@@ -5836,7 +5939,12 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
       accent: widget.accent,
       // Offline/default icon whenever this focused card is not in a live
       // session and not mid-connect — never leave the circle with no glyph.
-      nudgeMode: focused && !widget.connecting && !connectedToThisGroup,
+      nudgeMode:
+          focused &&
+          !widget.connecting &&
+          !connectedToThisGroup &&
+          item.group.groupId == widget.nudgeGroupId,
+      goLiveMode: goLiveMode,
       onNudge: widget.onNudge,
       onTalkStart: widget.onTalkStart,
       onTalkStop: widget.onTalkStop,
@@ -6025,6 +6133,7 @@ class _MainAvatarCircle extends StatelessWidget {
     required this.callMode,
     required this.accent,
     required this.nudgeMode,
+    required this.goLiveMode,
     required this.onNudge,
     required this.onTalkStart,
     required this.onTalkStop,
@@ -6049,6 +6158,9 @@ class _MainAvatarCircle extends StatelessWidget {
   /// the circle becomes a nudge trigger instead of join/talk, with member
   /// photos dimmed and a subtle sleeping "Z" animation.
   final bool nudgeMode;
+
+  /// True when an offline user can directly join an active LiveKit room.
+  final bool goLiveMode;
   final VoidCallback? onNudge;
   final Future<void> Function() onTalkStart;
   final Future<void> Function() onTalkStop;
@@ -6082,15 +6194,35 @@ class _MainAvatarCircle extends StatelessWidget {
           children: [
             AnimatedOpacity(
               duration: const Duration(milliseconds: 220),
-              opacity: (nudgeMode || connecting) ? 0.4 : 1,
-              child: _MemberPhotoCollage(
-                members: item.members,
-                fallbackPhotoUrl: item.profilePhotoUrl,
-                fallbackPhotoBase64: item.profilePhotoBase64,
-                fallbackAvatarAsset: item.avatarAsset,
-                tileSize: size,
+              opacity: (nudgeMode || goLiveMode || connecting) ? 0.38 : 1,
+              child: ImageFiltered(
+                imageFilter: ImageFilter.blur(
+                  sigmaX: goLiveMode ? 2.4 : 0,
+                  sigmaY: goLiveMode ? 2.4 : 0,
+                ),
+                child: _MemberPhotoCollage(
+                  members: item.members,
+                  fallbackPhotoUrl: item.profilePhotoUrl,
+                  fallbackPhotoBase64: item.profilePhotoBase64,
+                  fallbackAvatarAsset: item.avatarAsset,
+                  tileSize: size,
+                ),
               ),
             ),
+            if (goLiveMode && !connecting) ...[
+              const ColoredBox(color: Color(0x40000000)),
+              Center(
+                child: Text(
+                  'Go Live',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 19.sp,
+                    fontWeight: FontWeight.w800,
+                    shadows: const [Shadow(color: Colors.black, blurRadius: 8)],
+                  ),
+                ),
+              ),
+            ],
             // Bottom fade lifts live glyphs without fully masking profiles.
             if (connected && !connecting)
               const DecoratedBox(
@@ -6213,7 +6345,9 @@ class _MainAvatarCircle extends StatelessWidget {
     if (!connecting && (talkEnabled || joinEnabled || nudgeMode)) {
       circle = Semantics(
         button: true,
-        label: joinEnabled
+        label: goLiveMode
+            ? 'Go Live with ${item.group.name}'
+            : joinEnabled
             ? 'Join ${item.group.name}'
             : nudgeMode
             ? 'Nudge ${item.group.name}'
@@ -6501,10 +6635,8 @@ class _SleepZAnimationState extends State<_SleepZAnimation>
   }
 }
 
-/// Tiles up to [_maxTiles] group members' photos inside the connect circle
-/// so it's obvious at a glance which group/members you're about to connect
-/// with. Falls back to a single self-avatar when member data isn't loaded
-/// yet (e.g. for a group that isn't focused in the carousel).
+/// Tiles every group member inside the connect circle. Falls back to a single
+/// self-avatar when member data isn't loaded yet.
 class _MemberPhotoCollage extends StatelessWidget {
   const _MemberPhotoCollage({
     required this.members,
@@ -6513,8 +6645,6 @@ class _MemberPhotoCollage extends StatelessWidget {
     required this.fallbackAvatarAsset,
     required this.tileSize,
   });
-
-  static const int _maxTiles = 4;
 
   final List<GroupMemberSummary> members;
   final String? fallbackPhotoUrl;
@@ -6539,8 +6669,8 @@ class _MemberPhotoCollage extends StatelessWidget {
       );
     }
 
-    final tiles = members.take(_maxTiles).toList(growable: false);
-    final overflow = members.length - tiles.length;
+    final columns = math.sqrt(members.length).ceil();
+    final rows = (members.length / columns).ceil();
 
     Widget tile(GroupMemberSummary member) {
       final initial = profileDisplayInitial(member.displayName);
@@ -6557,119 +6687,25 @@ class _MemberPhotoCollage extends StatelessWidget {
           initial,
           style: TextStyle(
             color: Colors.white,
-            fontSize: tileSize * 0.16,
+            fontSize: tileSize * 0.16 / columns,
             fontWeight: FontWeight.w700,
           ),
         ),
       );
     }
 
-    Widget grid;
-    switch (tiles.length) {
-      case 1:
-        grid = tile(tiles[0]);
-      case 2:
-        grid = Row(
-          children: [
-            Expanded(child: tile(tiles[0])),
-            _CollageDivider(vertical: true, length: tileSize),
-            Expanded(child: tile(tiles[1])),
-          ],
-        );
-      case 3:
-        grid = Column(
-          children: [
-            Expanded(child: tile(tiles[0])),
-            _CollageDivider(vertical: false, length: tileSize),
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(child: tile(tiles[1])),
-                  _CollageDivider(vertical: true, length: tileSize / 2),
-                  Expanded(child: tile(tiles[2])),
-                ],
-              ),
-            ),
-          ],
-        );
-      default:
-        grid = Column(
-          children: [
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(child: tile(tiles[0])),
-                  _CollageDivider(vertical: true, length: tileSize / 2),
-                  Expanded(child: tile(tiles[1])),
-                ],
-              ),
-            ),
-            _CollageDivider(vertical: false, length: tileSize),
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(child: tile(tiles[2])),
-                  _CollageDivider(vertical: true, length: tileSize / 2),
-                  Expanded(child: tile(tiles[3])),
-                ],
-              ),
-            ),
-          ],
-        );
-    }
-
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        grid,
-        if (overflow > 0)
-          Positioned(
-            right: tileSize * 0.06,
-            bottom: tileSize * 0.06,
-            child: Container(
-              padding: EdgeInsets.symmetric(
-                horizontal: tileSize * 0.05,
-                vertical: tileSize * 0.02,
-              ),
-              decoration: BoxDecoration(
-                color: const Color.fromRGBO(0, 0, 0, 0.7),
-                borderRadius: BorderRadius.circular(tileSize * 0.08),
-              ),
-              child: Text(
-                '+$overflow',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: tileSize * 0.09,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-          ),
-      ],
+    return GridView.builder(
+      padding: EdgeInsets.zero,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: members.length,
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: columns,
+        childAspectRatio: rows / columns,
+        crossAxisSpacing: 1.5,
+        mainAxisSpacing: 1.5,
+      ),
+      itemBuilder: (context, index) => tile(members[index]),
     );
-  }
-}
-
-class _CollageDivider extends StatelessWidget {
-  const _CollageDivider({required this.vertical, required this.length});
-
-  final bool vertical;
-  final double length;
-
-  @override
-  Widget build(BuildContext context) {
-    const color = Color.fromRGBO(0, 0, 0, 0.55);
-    return vertical
-        ? SizedBox(
-            width: length * 0.014,
-            height: length,
-            child: const ColoredBox(color: color),
-          )
-        : SizedBox(
-            width: length,
-            height: length * 0.014,
-            child: const ColoredBox(color: color),
-          );
   }
 }
 

@@ -28,12 +28,13 @@ class PeerReconnectCoordinator {
     });
   }
 
-  void peerJoined(String userId) {
-    if (userId.isEmpty) return;
+  bool peerJoined(String userId) {
+    if (userId.isEmpty) return false;
     final pending = _pendingLoss.remove(userId);
-    if (pending == null) return;
+    if (pending == null) return false;
     pending.cancel();
     onBackLive(userId);
+    return true;
   }
 
   void clear() {

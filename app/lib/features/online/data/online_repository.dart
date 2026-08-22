@@ -240,15 +240,27 @@ class OnlineRepository {
     try {
       await _apiClient.postJson(
         '/v1/groups/${session.groupId}/notifications/gone-offline',
-        {
-          'deviceId': session.deviceId,
-          'reason': reason,
-        },
+        {'deviceId': session.deviceId, 'reason': reason},
       );
     } catch (_) {
       // Best-effort — RTDB presence is already away; missing the push is
       // non-fatal (foreground snackbars still cover the same cases).
     }
+  }
+
+  /// LiveKit's room participant list is authoritative; RTDB availability is
+  /// only a refresh trigger and may briefly outlive a dropped connection.
+  Future<Set<String>> liveParticipantUserIds(String groupId) async {
+    final response = await _apiClient.getJson(
+      '/v1/livekit/groups/${Uri.encodeComponent(groupId)}/participants',
+    );
+    final raw = response['participantUserIds'];
+    return raw is List
+        ? raw
+              .map((item) => item.toString())
+              .where((id) => id.isNotEmpty)
+              .toSet()
+        : <String>{};
   }
 
   Future<void> _scheduleAwayOnDisconnect(OnlineSession session) async {
