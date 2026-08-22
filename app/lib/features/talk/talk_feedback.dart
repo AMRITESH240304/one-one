@@ -30,6 +30,9 @@ class TalkFeedback {
     await _playAsset('sounds/talk_stop.wav');
   }
 
+  /// Short confirmation after the local participant successfully joins.
+  static Future<void> joined() => _playAsset('sounds/talk_start.wav');
+
   /// A remote participant began speaking while this device is transmitting.
   /// The haptic setting is supplied at event time so mid-call toggles apply.
   static Future<void> remoteSpeakerStarted({

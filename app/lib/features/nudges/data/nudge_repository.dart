@@ -91,7 +91,7 @@ class NudgeRepository {
     required NudgeTarget target,
     required int durationSeconds,
   }) async {
-    if (durationSeconds != 3 && durationSeconds != 5 && durationSeconds != 10) {
+    if (durationSeconds != 3 && durationSeconds != 6 && durationSeconds != 9) {
       throw ArgumentError.value(durationSeconds, 'durationSeconds');
     }
     final response = await _apiClient.postJson(
@@ -128,10 +128,10 @@ class NudgeRepository {
     required NudgeTarget target,
     required int durationMs,
   }) {
-    return _apiClient.postJson(
-      '/v1/groups/$groupId/voice-nudges/uploads',
-      {...target.json, 'durationMs': durationMs},
-    );
+    return _apiClient.postJson('/v1/groups/$groupId/voice-nudges/uploads', {
+      ...target.json,
+      'durationMs': durationMs,
+    });
   }
 
   /// Direct-to-GCS upload via signed write URL, then backend finalize/FCM.
@@ -225,13 +225,11 @@ class NudgeRepository {
         groupId: groupId,
       );
       final fcmWatch = Stopwatch()..start();
-      final response = await _apiClient.postJson(
-        '/v1/groups/$groupId/voice-nudges/$eventId/complete',
-        {
-          if (uploadTicket != null && uploadTicket.isNotEmpty)
-            'uploadTicket': uploadTicket,
-        },
-      );
+      final response = await _apiClient
+          .postJson('/v1/groups/$groupId/voice-nudges/$eventId/complete', {
+            if (uploadTicket != null && uploadTicket.isNotEmpty)
+              'uploadTicket': uploadTicket,
+          });
       debugPrint(
         '[OneOneNudge][DART-02] Voice nudge upload accepted '
         'audioBytes=${audio.length} elapsedMs=${flowWatch.elapsedMilliseconds} '

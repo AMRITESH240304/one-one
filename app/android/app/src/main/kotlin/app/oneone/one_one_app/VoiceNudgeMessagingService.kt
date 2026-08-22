@@ -328,6 +328,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             putExtra(VoiceNudgeContract.extraKind, kind)
             putExtra(VoiceNudgeContract.extraEventId, eventId)
             putExtra(VoiceNudgeContract.extraSenderName, senderName)
+            putExtra(VoiceNudgeContract.extraGroupName, data["groupName"])
             putExtra(VoiceNudgeContract.extraSenderUserId, data["senderUserId"])
             putExtra(VoiceNudgeContract.extraSenderPhotoUrl, senderPhotoUrl)
             putExtra(VoiceNudgeContract.extraSenderAvatarAsset, senderAvatarAsset)
@@ -403,6 +404,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                             ongoing = false,
                             largeIcon = largeIcon,
                             senderUserId = data["senderUserId"],
+                            groupName = data["groupName"],
                         ),
                     )
                 } catch (error: SecurityException) {
@@ -552,10 +554,11 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
 
     private fun showForegroundNotification(message: RemoteMessage, kind: String) {
         val senderName = message.data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
+        val groupName = message.data["groupName"]?.take(80).orEmpty()
         val fallbackTitle = if (kind == VoiceNudgeContract.kindFriendLive) {
             "🟢 $senderName is live"
         } else {
-            "👋 $senderName nudged you"
+            "👋 $senderName nudged you${if (groupName.isBlank()) "" else " in $groupName"}"
         }
         val fallbackBody = if (kind == VoiceNudgeContract.kindFriendLive) {
             "Tap to open Duo 🎙️"
@@ -614,6 +617,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             return
         }
         val senderName = data["senderName"]?.take(80).orEmpty().ifBlank { "Someone" }
+        val groupName = data["groupName"]?.take(80).orEmpty()
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         val notificationsEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             manager.areNotificationsEnabled()
@@ -668,7 +672,7 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                             groupId,
                             data["responseUrl"],
                             senderName,
-                            "👋 $senderName nudged you",
+                            "👋 $senderName nudged you${if (groupName.isBlank()) "" else " in $groupName"}",
                             "Accept or decline ✨",
                             largeIcon = largeIcon,
                             senderUserId = data["senderUserId"],

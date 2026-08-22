@@ -39,11 +39,8 @@ Future<void> showNudgeBottomSheet(
     isScrollControlled: true,
     useSafeArea: false,
     backgroundColor: Colors.transparent,
-    // Drag/barrier dismiss is unsafe during hold-to-speak: a second finger
-    // or stray swipe pops the sheet and aborts recording. Close is X / back,
-    // both of which are disabled while the hold (or send) is in progress.
-    isDismissible: false,
-    enableDrag: false,
+    isDismissible: true,
+    enableDrag: true,
     builder: (_) => _QuickNudgeSheet(
       group: group,
       currentUserId: currentUserId,
@@ -75,8 +72,6 @@ class _QuickNudgeSheet extends StatefulWidget {
 
 class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   static const _autoDismissDelay = Duration(seconds: 5);
-  static const _ringTapDurationSeconds = 5;
-  static const _ringDoubleTapDurationSeconds = 10;
 
   final NudgeRepository _repository = NudgeRepository();
   final AudioRecorder _recorder = AudioRecorder();
@@ -227,7 +222,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         if (last.message.isNotEmpty) {
           _message = last.message;
           _messageIsError = false;
-          _messageIsWarning = last.status == LastNudgeStatus.volumeLow ||
+          _messageIsWarning =
+              last.status == LastNudgeStatus.volumeLow ||
               last.status == LastNudgeStatus.volumeMuted;
           _messagePending = false;
         }
@@ -282,17 +278,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       !_recording &&
       _awaitingEventId == null;
 
-  /// True while the sheet must not dismiss (hold-to-speak, send in flight,
-  /// or waiting on delivery confirmation). Barrier/drag dismiss are disabled
-  /// for the whole sheet; this gates system back and the close button.
-  bool get _sheetInteractionLocked =>
-      _busy ||
-      _recording ||
-      _startingRecording ||
-      _finishingRecording ||
-      _pointerHeld ||
-      _awaitingEventId != null;
-
   @override
   void dispose() {
     _recordingTimer?.cancel();
@@ -316,6 +301,21 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           (f) =>
               _PendingRecipient(userId: f.userId, displayName: f.displayName),
         )
+        .toList(growable: false);
+  }
+
+  List<_PendingRecipient> _acceptedRecipients(
+    Object? response,
+    List<_PendingRecipient> requested,
+  ) {
+    if (response is! Map || response['recipientUserIds'] is! List) {
+      return requested;
+    }
+    final accepted = (response['recipientUserIds'] as List)
+        .map((value) => value.toString())
+        .toSet();
+    return requested
+        .where((recipient) => accepted.contains(recipient.userId))
         .toList(growable: false);
   }
 
@@ -778,7 +778,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
     if (failed.isNotEmpty) {
       if (failed.length == 1) {
-        return _shortFailureWithReason(nameOf(failed.first), failed.first.reason);
+        return _shortFailureWithReason(
+          nameOf(failed.first),
+          failed.first.reason,
+        );
       }
       // Prefer per-person reason lines when there are only a couple of failures
       // so the sender learns *why* (lock vs Duo) instead of a generic miss.
@@ -972,7 +975,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   // ── Ring ─────────────────────────────────────────────────────────────────
 
-  /// Single tap rings for 5s; double tap rings for 10s.
+  /// Each tap adds one three-second phrase, capped at three consecutive rings.
   /// Ring skips the "Confirming…" text step and shows results as avatar badges.
   Future<void> _sendRing({required int durationSeconds}) async {
     if (_cooldownRemaining(NudgeKind.ring) > Duration.zero) return;
@@ -1054,14 +1057,15 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       final result = await action();
       _cooldowns.record(kind);
       if (!mounted) return;
+      final acceptedExpected = _acceptedRecipients(result, expected);
       setState(() => _busy = false);
       if (awaitsDeliveryConfirmation && result is Map) {
         final eventId = result['notificationEventId']?.toString();
         if (eventId != null && eventId.isNotEmpty) {
-          _scheduleSenderExpiry(eventId, expected);
+          _scheduleSenderExpiry(eventId, acceptedExpected);
           await _prepareDeliveryWait(
             eventId: eventId,
-            expected: expected,
+            expected: acceptedExpected,
             waitingMessage: waitingMessage,
           );
           return;
@@ -1071,14 +1075,14 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         final eventId = result['notificationEventId']?.toString();
         if (eventId != null && eventId.isNotEmpty) {
           _lastEventId = eventId;
-          _scheduleSenderExpiry(eventId, expected);
+          _scheduleSenderExpiry(eventId, acceptedExpected);
         }
       }
       // Check aggregate send/failed counts before claiming success.
       if (!awaitsDeliveryConfirmation && result is Map<String, dynamic>) {
         final nudgeResult = NudgeResult.fromSendResponse(
           result,
-          expected.map((e) => e.userId).toList(growable: false),
+          acceptedExpected.map((e) => e.userId).toList(growable: false),
         );
         if (!nudgeResult.isFullSuccess) {
           final message = nudgeResult.isFullFailure
@@ -1122,9 +1126,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
         _expectedRecipients
           ..clear()
-          ..addEntries(expected.map((e) => MapEntry(e.userId, e)));
+          ..addEntries(acceptedExpected.map((e) => MapEntry(e.userId, e)));
         final signifiers = [
-          for (final pending in expected)
+          for (final pending in acceptedExpected)
             LastNudgeRecipientSignifier(
               userId: pending.userId,
               displayName: pending.displayName,
@@ -1145,7 +1149,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         });
         _scheduleAutoDismiss();
       } else {
-        await _showImmediateSendOutcome(expected);
+        await _showImmediateSendOutcome(acceptedExpected);
       }
     } catch (error, stack) {
       final cancelled = error.toString().toLowerCase().contains('cancel');
@@ -1389,6 +1393,14 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _cooldowns.record(NudgeKind.voice);
       sent = true;
       voiceEventId = response['notificationEventId']?.toString();
+      _expectedRecipients
+        ..clear()
+        ..addEntries(
+          _acceptedRecipients(
+            response,
+            _recipientsForTarget(),
+          ).map((recipient) => MapEntry(recipient.userId, recipient)),
+        );
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -1418,11 +1430,13 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           _showConfirmingText = true;
           await _prepareDeliveryWait(
             eventId: voiceEventId,
-            expected: _recipientsForTarget(),
+            expected: _expectedRecipients.values.toList(growable: false),
             waitingMessage: 'Confirming if everyone received\u2026',
           );
         } else if (sent) {
-          await _showImmediateSendOutcome(_recipientsForTarget());
+          await _showImmediateSendOutcome(
+            _expectedRecipients.values.toList(growable: false),
+          );
         }
       }
     }
@@ -1467,12 +1481,10 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
     // Errors, confirming, received/failed confirmation, and empty-group guards.
     final showStatus =
-        _friends.isEmpty ||
-        _nudgeableFriends.isEmpty ||
-        _message != null;
+        _friends.isEmpty || _nudgeableFriends.isEmpty || _message != null;
 
     return PopScope(
-      canPop: !_sheetInteractionLocked,
+      canPop: true,
       child: Material(
         color: const Color(0xff141414),
         borderRadius: BorderRadius.vertical(top: Radius.circular(28.r)),
@@ -1521,9 +1533,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                             ),
                           ),
                           IconButton(
-                            onPressed: _sheetInteractionLocked
-                                ? null
-                                : () => Navigator.of(context).pop(),
+                            onPressed: () => Navigator.of(context).pop(),
                             icon: const Icon(Icons.close_rounded),
                             color: Colors.white38,
                             iconSize: 20.sp,
@@ -1568,8 +1578,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                               builder: (context) {
                                 final online = _isOnline(friend.userId);
                                 final failed = _isDeliveryFailed(friend.userId);
-                                final deviceLocked =
-                                    _isDeviceLockedFailure(friend.userId);
+                                final deviceLocked = _isDeviceLockedFailure(
+                                  friend.userId,
+                                );
                                 final reply = _replyFor(friend.userId);
                                 final volumeBand = _volumeBandFor(
                                   friend.userId,
@@ -1652,15 +1663,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                             cooldownLabel: ringCooldown > Duration.zero
                                 ? _cooldownLabel(ringCooldown)
                                 : null,
-                            onTap: () => unawaited(
-                              _sendRing(
-                                durationSeconds: _ringTapDurationSeconds,
-                              ),
-                            ),
-                            onDoubleTap: () => unawaited(
-                              _sendRing(
-                                durationSeconds: _ringDoubleTapDurationSeconds,
-                              ),
+                            onRingCount: (count) => unawaited(
+                              _sendRing(durationSeconds: count * 3),
                             ),
                           ),
                           _PushActionButton(
@@ -1983,30 +1987,53 @@ class _SheetDivider extends StatelessWidget {
 //
 // Secondary control under "More ways to get their attention". Icon + label
 // only — no circular chrome, so it does not compete with the primary mic.
-// Single tap sends a 5s ring; double tap sends a 10s ring.
+// Up to three rapid taps are coalesced into one consecutive ring request.
 
-class _RingActionButton extends StatelessWidget {
+class _RingActionButton extends StatefulWidget {
   const _RingActionButton({
     required this.enabled,
-    required this.onTap,
-    required this.onDoubleTap,
+    required this.onRingCount,
     this.cooldownLabel,
   });
 
   final bool enabled;
-  final VoidCallback onTap;
-  final VoidCallback onDoubleTap;
+  final ValueChanged<int> onRingCount;
   final String? cooldownLabel;
+
+  @override
+  State<_RingActionButton> createState() => _RingActionButtonState();
+}
+
+class _RingActionButtonState extends State<_RingActionButton> {
+  Timer? _dispatchTimer;
+  int _tapCount = 0;
+
+  void _queueRing() {
+    if (!widget.enabled || _tapCount >= 3) return;
+    setState(() => _tapCount++);
+    _dispatchTimer?.cancel();
+    _dispatchTimer = Timer(const Duration(milliseconds: 350), () {
+      final count = _tapCount;
+      if (!mounted || count == 0) return;
+      setState(() => _tapCount = 0);
+      widget.onRingCount(count);
+    });
+  }
+
+  @override
+  void dispose() {
+    _dispatchTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       button: true,
-      enabled: enabled,
+      enabled: widget.enabled,
       label: 'Ring their phone',
       child: GestureDetector(
-        onTap: enabled ? onTap : null,
-        onDoubleTap: enabled ? onDoubleTap : null,
+        onTap: widget.enabled ? _queueRing : null,
         behavior: HitTestBehavior.opaque,
         child: ConstrainedBox(
           constraints: BoxConstraints(minWidth: 72.w, minHeight: 48.h),
@@ -2017,16 +2044,17 @@ class _RingActionButton extends StatelessWidget {
                 padding: EdgeInsets.all(8.r),
                 child: Icon(
                   LucideIcons.bellRing,
-                  color: enabled ? Colors.white70 : Colors.white24,
+                  color: widget.enabled ? Colors.white70 : Colors.white24,
                   size: 28.sp,
                 ),
               ),
               SizedBox(height: 4.h),
               Text(
-                cooldownLabel ?? 'Ring',
+                widget.cooldownLabel ??
+                    (_tapCount > 1 ? 'Ring ×$_tapCount' : 'Ring'),
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: enabled ? Colors.white54 : Colors.white24,
+                  color: widget.enabled ? Colors.white54 : Colors.white24,
                   fontSize: 12.sp,
                   fontWeight: FontWeight.w500,
                 ),
@@ -2138,10 +2166,7 @@ class _ResponseBadgeIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (icon, color) = switch (reply) {
-      NudgeRecipientReply.declined => (
-        Icons.dark_mode_rounded,
-        const Color(0xff8e9aaf),
-      ),
+      NudgeRecipientReply.declined => (Icons.dark_mode_rounded, Colors.white70),
       NudgeRecipientReply.snoozed => (
         LucideIcons.timer,
         const Color(0xffe0a83c),

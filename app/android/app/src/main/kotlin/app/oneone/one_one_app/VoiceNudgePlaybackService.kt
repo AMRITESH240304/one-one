@@ -6,7 +6,9 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.database.ContentObserver
 import android.media.AudioAttributes as PlatformAudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -20,12 +22,14 @@ import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import com.google.firebase.auth.FirebaseAuth
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -55,6 +59,19 @@ class VoiceNudgePlaybackService : Service() {
     private var activeTimeout: Runnable? = null
     private var hapticCloseRunnable: Runnable? = null
     private var hapticStopRunnable: Runnable? = null
+    private var silencedEventId: String? = null
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF ||
+                intent?.action == "android.media.VOLUME_CHANGED_ACTION"
+            ) {
+                silenceActiveRing()
+            }
+        }
+    }
+    private val volumeObserver = object : ContentObserver(mainHandler) {
+        override fun onChange(selfChange: Boolean) = silenceActiveRing()
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -64,6 +81,21 @@ class VoiceNudgePlaybackService : Service() {
         DeviceLog.info("NudgeService", "VoiceNudgePlaybackService created")
         Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] Playback service created")
         VoiceNudgeAudioCache.deleteOrphans(this)
+        val silenceFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction("android.media.VOLUME_CHANGED_ACTION")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(
+                screenOffReceiver,
+                silenceFilter,
+                RECEIVER_NOT_EXPORTED,
+            )
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(screenOffReceiver, silenceFilter)
+        }
+        contentResolver.registerContentObserver(Settings.System.CONTENT_URI, true, volumeObserver)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -227,7 +259,44 @@ class VoiceNudgePlaybackService : Service() {
         // The executor guard in acknowledge() prevents new submissions from
         // racing with teardown.
         networkExecutor.shutdown()
+        runCatching { unregisterReceiver(screenOffReceiver) }
+        contentResolver.unregisterContentObserver(volumeObserver)
         super.onDestroy()
+    }
+
+    private fun silenceActiveRing() {
+        val request = active ?: return
+        if (request.kind != VoiceNudgeContract.kindRing || silencedEventId == request.eventId) return
+        silencedEventId = request.eventId
+        postRingSilenced(request)
+        finishActive(success = true)
+    }
+
+    private fun postRingSilenced(request: NudgeRequest) {
+        val responseUrl = request.responseUrl ?: return
+        FirebaseAuth.getInstance().currentUser?.getIdToken(false)
+            ?.addOnSuccessListener { result ->
+                val token = result.token ?: return@addOnSuccessListener
+                silenceExecutor.execute {
+                    val connection = URL(responseUrl).openConnection() as HttpURLConnection
+                    try {
+                        connection.connectTimeout = 8_000
+                        connection.readTimeout = 8_000
+                        connection.requestMethod = "POST"
+                        connection.doOutput = true
+                        connection.setRequestProperty("authorization", "Bearer $token")
+                        connection.setRequestProperty("content-type", "application/json")
+                        connection.outputStream.use {
+                            it.write("{\"action\":\"silence\"}".toByteArray())
+                        }
+                        connection.responseCode
+                    } catch (error: Exception) {
+                        Log.w(VoiceNudgeDiagnostics.tag, "Ring silence report failed", error)
+                    } finally {
+                        connection.disconnect()
+                    }
+                }
+            }
     }
 
     /**
@@ -1660,6 +1729,7 @@ class VoiceNudgePlaybackService : Service() {
                 request.senderAvatarAsset,
             ),
             senderUserId = request.senderUserId,
+            groupName = request.groupName,
         )
     }
 
@@ -1730,6 +1800,7 @@ class VoiceNudgePlaybackService : Service() {
             kind = kind,
             eventId = eventId,
             senderName = senderName,
+            groupName = getStringExtra(VoiceNudgeContract.extraGroupName),
             senderUserId = getStringExtra(VoiceNudgeContract.extraSenderUserId),
             senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
             senderAvatarAsset = getStringExtra(VoiceNudgeContract.extraSenderAvatarAsset),
@@ -1754,6 +1825,7 @@ class VoiceNudgePlaybackService : Service() {
             kind = VoiceNudgeContract.kindVoice,
             eventId = eventId,
             senderName = getStringExtra(VoiceNudgeContract.extraSenderName) ?: "Someone",
+            groupName = getStringExtra(VoiceNudgeContract.extraGroupName),
             senderUserId = getStringExtra(VoiceNudgeContract.extraSenderUserId),
             senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
             senderAvatarAsset = getStringExtra(VoiceNudgeContract.extraSenderAvatarAsset),
@@ -1779,6 +1851,7 @@ class VoiceNudgePlaybackService : Service() {
         val kind: String,
         val eventId: String,
         val senderName: String,
+        val groupName: String?,
         val senderUserId: String?,
         val senderPhotoUrl: String?,
         val senderAvatarAsset: String?,
@@ -1801,7 +1874,8 @@ class VoiceNudgePlaybackService : Service() {
     companion object {
         private const val ringSampleRate = 44_100
         private const val ringPhraseMs = 900.0
-        private val supportedRingDurationsMs = setOf(3_000L, 5_000L, 10_000L)
+        private val supportedRingDurationsMs = setOf(3_000L, 6_000L, 9_000L)
+        private val silenceExecutor = Executors.newSingleThreadExecutor()
         private const val maxAudioBytes = 128 * 1024
         private const val maxWakeLockDurationMs = 30_000L
     }
