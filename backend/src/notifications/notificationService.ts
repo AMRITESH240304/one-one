@@ -14,6 +14,7 @@ import {
 } from "../groups/groupService.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
+import { listLiveGroupParticipantUserIds } from "../livekit/liveKitTokenService.js";
 import { chatUnreadTtlSeconds, nextChatUnread } from "./chatUnread.js";
 import { createAckTicket } from "./nudgeDeliveryService.js";
 import { enforceNudgeRateLimits } from "./nudgeRateLimiter.js";
@@ -260,7 +261,7 @@ export async function sendGoneOfflineNotification(input: GoneOfflineInput) {
 
 export async function sendNudgeNotification(input: NudgeInput) {
   await requireActiveUser(input.senderUserId);
-  await requireActiveGroup(input.groupId);
+  const group = await requireActiveGroup(input.groupId);
   await requireActiveGroupMember(input.groupId, input.senderUserId);
 
   if (input.targetScope === "single_friend") {
@@ -281,12 +282,16 @@ export async function sendNudgeNotification(input: NudgeInput) {
   }
 
   const now = nowSeconds();
-  const recipientUserIds =
+  let recipientUserIds =
     input.targetScope === "single_friend"
       ? [input.targetUserId!].filter((userId) => userId !== input.senderUserId)
       : input.targetScope === "selected_friends"
         ? uniqueRecipientIds(input.targetUserIds, input.senderUserId)
         : await activeRecipientUserIds(input.groupId, input.senderUserId);
+  const liveUserIds = new Set(
+    await listLiveGroupParticipantUserIds(input.senderUserId, input.groupId)
+  );
+  recipientUserIds = recipientUserIds.filter((userId) => !liveUserIds.has(userId));
   await enforceNudgeRateLimits({
     groupId: input.groupId,
     senderUserId: input.senderUserId,
@@ -319,6 +324,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
         groupId: input.groupId,
         senderUserId: input.senderUserId,
         senderName,
+        groupName: group.name,
         ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         ...(senderAvatarAsset ? { senderAvatarAsset } : {}),
         responseUrl: `${baseUrl}/v1/groups/${input.groupId}/nudges/${notificationEventId}/respond`,
@@ -354,6 +360,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
     notificationEventId,
     eventType: "nudge",
     rateLimited: false,
+    recipientUserIds,
     recipientUsers: recipientUserIds.length,
     targetDevices: recipientDevices.length,
     sent: pushResult.successCount,

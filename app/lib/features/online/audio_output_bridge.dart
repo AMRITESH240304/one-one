@@ -9,8 +9,7 @@ class AudioOutputContract {
   static const String flutterChannel = 'app.oneone/audio_output';
   static const String methodGetState = 'getState';
   static const String methodSetMuted = 'setMuted';
-  static const String methodSetProximityMonitoring =
-      'setProximityMonitoring';
+  static const String methodSetProximityMonitoring = 'setProximityMonitoring';
   static const String methodOnStateChanged = 'onStateChanged';
 }
 
@@ -54,7 +53,7 @@ AudioOutputRoute parseAudioOutputRoute(String? value) {
   };
 }
 
-/// Single call-bar glyph: Volume2 when speaker, outline speaker when earpiece,
+/// Single call-bar glyph: Volume2 when speaker, phone when earpiece,
 /// headphones when an external device is active, VolumeX when muted.
 AudioOutputGlyphKind resolveAudioOutputGlyph({
   required AudioOutputRoute route,
@@ -77,12 +76,12 @@ String audioOutputTooltip({
     AudioOutputGlyphKind.muted => 'Muted — tap to return to speaker',
     AudioOutputGlyphKind.headset =>
       speakerPreferenceOn
-          ? 'Headphones — tap to prefer speaker after unplug, hold to mute'
-          : 'Headphones — tap to prefer phone after unplug, hold to mute',
+          ? 'Headphones — tap to prefer speaker after unplug, hold to mute mic'
+          : 'Headphones — tap to prefer phone after unplug, hold to mute mic',
     AudioOutputGlyphKind.speaker =>
-      'Speaker — tap to switch to phone, hold to mute',
+      'Speaker — tap to switch to phone, hold to mute mic',
     AudioOutputGlyphKind.earpiece =>
-      'Phone — tap to switch to speaker, hold to mute',
+      'Phone — tap to switch to speaker, hold to mute mic',
   };
 }
 

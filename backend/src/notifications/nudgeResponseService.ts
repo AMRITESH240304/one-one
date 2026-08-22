@@ -5,7 +5,7 @@ import { requireActiveGroup, requireActiveGroupMember } from "../groups/groupSer
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
 
-export type NudgeResponseAction = "accept" | "decline" | "snooze";
+export type NudgeResponseAction = "accept" | "decline" | "snooze" | "silence";
 
 type RecipientDevice = {
   fcmToken: string;
@@ -47,6 +47,39 @@ export async function respondToNudge(input: {
     throw new HttpError(409, "nudge_sender_missing", "This nudge has no sender.");
   }
 
+  const now = nowSeconds();
+  if (input.action === "silence") {
+    if (eventType !== "ring_nudge") {
+      throw new HttpError(409, "nudge_not_ring", "Only a ring can be silenced.");
+    }
+    const suppressedUntil = now + 10 * 60;
+    await db.ref().update({
+      [`ringSuppressions/${input.groupId}/${input.responderUserId}`]: {
+        groupId: input.groupId,
+        recipientUserId: input.responderUserId,
+        eventId: input.eventId,
+        senderUserId,
+        silencedAt: now,
+        suppressedUntil
+      },
+      [`nudgeResponses/${input.eventId}/${input.responderUserId}`]: {
+        eventId: input.eventId,
+        groupId: input.groupId,
+        responderUserId: input.responderUserId,
+        senderUserId,
+        action: "silence",
+        respondedAt: now,
+        suppressedUntil
+      }
+    });
+    return {
+      eventId: input.eventId,
+      action: input.action,
+      suppressedUntil,
+      deduped: false
+    };
+  }
+
   const responseRef = db.ref(
     `nudgeResponses/${input.eventId}/${input.responderUserId}`
   );
@@ -71,7 +104,6 @@ export async function respondToNudge(input: {
     };
   }
 
-  const now = nowSeconds();
   const snoozedUntil = snoozeMinutes == null ? null : now + snoozeMinutes * 60;
   await db.ref().update({
     [`nudgeResponses/${input.eventId}/${input.responderUserId}`]: {

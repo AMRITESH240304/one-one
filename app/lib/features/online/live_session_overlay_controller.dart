@@ -10,27 +10,31 @@ import '../identity/ui/profile_avatar.dart';
 /// Everything the PiP overlay needs to render and act.
 class LiveSessionOverlayData {
   const LiveSessionOverlayData({
-    required this.activeSpeaker,
-    required this.isMuted,
-    required this.onToggleMute,
+    required this.member,
+    required this.groupName,
+    required this.microphoneMuted,
+    required this.onToggleMicrophone,
     required this.accentColor,
   });
 
-  final GroupMemberSummary activeSpeaker;
-  final bool isMuted;
-  final VoidCallback onToggleMute;
+  final GroupMemberSummary member;
+  final String groupName;
+  final bool microphoneMuted;
+  final VoidCallback onToggleMicrophone;
   final Color accentColor;
 
   LiveSessionOverlayData copyWith({
-    GroupMemberSummary? activeSpeaker,
-    bool? isMuted,
-    VoidCallback? onToggleMute,
+    GroupMemberSummary? member,
+    String? groupName,
+    bool? microphoneMuted,
+    VoidCallback? onToggleMicrophone,
     Color? accentColor,
   }) {
     return LiveSessionOverlayData(
-      activeSpeaker: activeSpeaker ?? this.activeSpeaker,
-      isMuted: isMuted ?? this.isMuted,
-      onToggleMute: onToggleMute ?? this.onToggleMute,
+      member: member ?? this.member,
+      groupName: groupName ?? this.groupName,
+      microphoneMuted: microphoneMuted ?? this.microphoneMuted,
+      onToggleMicrophone: onToggleMicrophone ?? this.onToggleMicrophone,
       accentColor: accentColor ?? this.accentColor,
     );
   }
@@ -42,9 +46,8 @@ class LiveSessionOverlayData {
 
 /// Controls the in-app floating live-session PiP overlay.
 ///
-/// The home screen calls [setSession] when the local user is live and another
-/// route is pushed on top, and [clearSession] when the session ends or the
-/// home screen becomes the active top-level route again.
+/// The home screen calls [setSession] while the local user is live and
+/// [clearSession] only when that LiveKit session ends.
 class LiveSessionOverlayController {
   LiveSessionOverlayController._();
 
@@ -67,16 +70,12 @@ class LiveSessionOverlayController {
 // Floating PiP widget — placed directly as a Stack child in OneOneApp
 // ---------------------------------------------------------------------------
 
-/// Draggable floating overlay shown whenever the user is in a live session
-/// and has navigated away from the home screen.
+/// Draggable floating overlay shown whenever the user is in a live session.
 ///
 /// This widget must be a direct child of a [Stack] so that the [Positioned]
 /// it builds is correctly interpreted by [RenderStack].
 class LiveSessionFloatingPip extends StatefulWidget {
-  const LiveSessionFloatingPip({
-    super.key,
-    required this.navigatorKey,
-  });
+  const LiveSessionFloatingPip({super.key, required this.navigatorKey});
 
   final GlobalKey<NavigatorState> navigatorKey;
 
@@ -111,8 +110,9 @@ class _LiveSessionFloatingPipState extends State<LiveSessionFloatingPip>
 
   @override
   void dispose() {
-    LiveSessionOverlayController.instance.state
-        .removeListener(_onSessionChanged);
+    LiveSessionOverlayController.instance.state.removeListener(
+      _onSessionChanged,
+    );
     _pulseController.dispose();
     super.dispose();
   }
@@ -127,16 +127,23 @@ class _LiveSessionFloatingPipState extends State<LiveSessionFloatingPip>
     const margin = 12.0;
     setState(() {
       _position = Offset(
-        (_position.dx + details.delta.dx)
-            .clamp(margin, screenSize.width - w - margin),
-        (_position.dy + details.delta.dy)
-            .clamp(margin, screenSize.height - h - margin),
+        (_position.dx + details.delta.dx).clamp(
+          margin,
+          screenSize.width - w - margin,
+        ),
+        (_position.dy + details.delta.dy).clamp(
+          margin,
+          screenSize.height - h - margin,
+        ),
       );
     });
   }
 
   Offset _defaultPosition(Size screenSize) {
-    return Offset(screenSize.width - 204.0 - 16, screenSize.height - 56.0 - 120);
+    return Offset(
+      screenSize.width - 204.0 - 16,
+      screenSize.height - 56.0 - 120,
+    );
   }
 
   @override
@@ -157,10 +164,7 @@ class _LiveSessionFloatingPipState extends State<LiveSessionFloatingPip>
         behavior: HitTestBehavior.opaque,
         onPanUpdate: (d) => _onDragUpdate(d, screenSize),
         onTap: _returnToHome,
-        child: _PipContainer(
-          data: data,
-          pulseController: _pulseController,
-        ),
+        child: _PipContainer(data: data, pulseController: _pulseController),
       ),
     );
   }
@@ -171,10 +175,7 @@ class _LiveSessionFloatingPipState extends State<LiveSessionFloatingPip>
 // ---------------------------------------------------------------------------
 
 class _PipContainer extends StatelessWidget {
-  const _PipContainer({
-    required this.data,
-    required this.pulseController,
-  });
+  const _PipContainer({required this.data, required this.pulseController});
 
   final LiveSessionOverlayData data;
   final AnimationController pulseController;
@@ -230,16 +231,13 @@ class _PipContainer extends StatelessWidget {
                       ),
                       child: ClipOval(
                         child: ProfileAvatar(
-                          profilePhotoUrl: data.activeSpeaker.profilePhotoUrl,
-                          profilePhotoBase64:
-                              data.activeSpeaker.profilePhotoBase64,
-                          avatarAsset: data.activeSpeaker.avatarAsset,
+                          profilePhotoUrl: data.member.profilePhotoUrl,
+                          profilePhotoBase64: data.member.profilePhotoBase64,
+                          avatarAsset: data.member.avatarAsset,
                           radius: 20,
                           backgroundColor: const Color(0xff2a2a2a),
                           fallback: Text(
-                            profileDisplayInitial(
-                              data.activeSpeaker.displayName,
-                            ),
+                            profileDisplayInitial(data.member.displayName),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 15,
@@ -291,7 +289,7 @@ class _PipContainer extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      data.activeSpeaker.displayName,
+                      data.groupName,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -317,30 +315,30 @@ class _PipContainer extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              // Volume mute toggle — silences audio output without changing route
+              // Actual LiveKit microphone toggle.
               GestureDetector(
-                onTap: data.onToggleMute,
+                onTap: data.onToggleMicrophone,
                 behavior: HitTestBehavior.opaque,
                 child: Container(
                   width: 34,
                   height: 34,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: data.isMuted
+                    color: data.microphoneMuted
                         ? const Color(0xffff5a5f).withValues(alpha: 0.2)
                         : Colors.white.withValues(alpha: 0.09),
                     border: Border.all(
-                      color: data.isMuted
+                      color: data.microphoneMuted
                           ? const Color(0xffff5a5f).withValues(alpha: 0.65)
                           : Colors.white.withValues(alpha: 0.18),
                       width: 1.0,
                     ),
                   ),
                   child: Icon(
-                    data.isMuted
-                        ? Icons.volume_off_rounded
-                        : Icons.volume_up_rounded,
-                    color: data.isMuted
+                    data.microphoneMuted
+                        ? Icons.mic_off_rounded
+                        : Icons.mic_rounded,
+                    color: data.microphoneMuted
                         ? const Color(0xffff5a5f)
                         : Colors.white60,
                     size: 16,

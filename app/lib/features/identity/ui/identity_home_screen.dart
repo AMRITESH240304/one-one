@@ -5,7 +5,7 @@ import 'dart:ui';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_database/firebase_database.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
@@ -226,6 +226,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   bool _busy = false;
   bool _audioOutputBusy = false;
   bool _audioMuteBusy = false;
+  bool _microphoneMutedByUser = false;
   final CallAudioRouteController _callAudio = CallAudioRouteController();
   AudioOutputRoute get _audioRoute => _callAudio.displayRoute;
   bool get _audioMuted => _callAudio.muted;
@@ -428,13 +429,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   // ── RouteAware callbacks ─────────────────────────────────────────────────
 
-  /// Home screen is the active top-level route — hide the in-app PiP overlay.
   @override
-  void didPush() => _hidePipOverlay();
+  void didPush() => _showPipOverlayIfLive();
 
-  /// A route above home was popped — home is active again, hide PiP.
   @override
-  void didPopNext() => _hidePipOverlay();
+  void didPopNext() => _showPipOverlayIfLive();
 
   /// Another route was pushed on top of home — show PiP if currently live.
   @override
@@ -442,15 +441,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   // ── In-app PiP overlay helpers ───────────────────────────────────────────
 
-  /// Show the floating live-session PiP (called when user navigates away
-  /// from home while in an active live session).
+  /// Keep the floating live-session control available on every relevant route.
   void _showPipOverlayIfLive() {
     if (!_isOnline) return;
     LiveSessionOverlayController.instance.setSession(
       LiveSessionOverlayData(
-        activeSpeaker: _pictureInPictureMember,
-        isMuted: _audioMuted,
-        onToggleMute: _togglePipMute,
+        member: _localLiveMember,
+        groupName: _activeLiveGroupName,
+        microphoneMuted: !_microphoneEnabled,
+        onToggleMicrophone: _toggleMicrophone,
         accentColor: accentColorForKey(_session.settings.accentColorKey),
       ),
     );
@@ -461,15 +460,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (LiveSessionOverlayController.instance.state.value == null) return;
     LiveSessionOverlayController.instance.updateSession(
       LiveSessionOverlayData(
-        activeSpeaker: _pictureInPictureMember,
-        isMuted: _audioMuted,
-        onToggleMute: _togglePipMute,
+        member: _localLiveMember,
+        groupName: _activeLiveGroupName,
+        microphoneMuted: !_microphoneEnabled,
+        onToggleMicrophone: _toggleMicrophone,
         accentColor: accentColorForKey(_session.settings.accentColorKey),
       ),
     );
   }
 
-  /// Hide and clear the in-app PiP when home is active or session ends.
+  /// Clear the in-app PiP only when the LiveKit session ends.
   void _hidePipOverlay() {
     LiveSessionOverlayController.instance.clearSession();
   }
@@ -545,6 +545,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         unawaited(_reportMediaVolume());
         final groupId = _selectedGroup?.groupId;
         if (groupId != null) unawaited(_refreshLiveKitParticipants(groupId));
+        final room = _room;
+        if (_onlineSession != null && room != null) {
+          if (room.connectionState == ConnectionState.connected) {
+            _syncConnectedLiveKitUsers(room);
+            _syncPipSessionState();
+          } else if (room.connectionState == ConnectionState.disconnected) {
+            unawaited(
+              _handleConnectionLoss('Connection lost. You are now offline.'),
+            );
+          }
+        }
         // Notification Accept/Connect taps are queued natively and consumed
         // here. Opening the app by itself must not start a LiveKit session —
         // `_goOnline` still requires `_explicitJoinIntent`.
@@ -622,7 +633,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (_onlineSession == null) {
       _hidePipOverlay();
     } else {
-      _updatePipOverlay();
+      _showPipOverlayIfLive();
     }
   }
 
@@ -1552,7 +1563,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           }
           _scheduleAvailabilityExpiryRefresh();
           if (_onlineSession?.groupId == groupId) {
-            _evaluatePeerPresenceForAutoOffline(next);
+            _evaluatePeerPresenceForAutoOffline();
           }
         });
   }
@@ -1893,9 +1904,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// The countdown only runs while we remain alone uninterrupted. Any other
   /// member rejoining — including still-connecting — cancels/resets it; a
   /// later drop back to one member starts a fresh minute.
-  void _evaluatePeerPresenceForAutoOffline(
-    Map<String, MemberAvailability> availability,
-  ) {
+  void _evaluatePeerPresenceForAutoOffline() {
     if (!_isOnline) {
       _peerWasLiveWithMe = false;
       _peerDisconnectGraceTimer?.cancel();
@@ -1903,7 +1912,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
 
-    final anyPeerInSession = _anyOtherMemberInVoiceSession(availability);
+    final anyPeerInSession = _connectedLiveKitUserIds.isNotEmpty;
 
     if (anyPeerInSession) {
       _peerWasLiveWithMe = true;
@@ -1925,20 +1934,12 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       if (!mounted || !_isOnline) return;
       // Re-check at fire time: a rejoin may have landed after the last
       // evaluation (or while this callback was already queued).
-      if (_anyOtherMemberInVoiceSession(_availability)) return;
+      if (_connectedLiveKitUserIds.isNotEmpty) return;
       unawaited(_goAway(reason: 'peer_left'));
       _showPresenceSnackbar(
         'The other participant has gone offline. You are now offline.',
       );
     });
-  }
-
-  bool _anyOtherMemberInVoiceSession(
-    Map<String, MemberAvailability> availability,
-  ) {
-    return availability.entries.any(
-      (entry) => entry.key != _session.userId && entry.value.isInVoiceSession,
-    );
   }
 
   /// Marks the last time voice activity was detected (local or remote) and
@@ -2120,7 +2121,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       // lone-member grace timer can start without waiting for another RTDB
       // write.
       if (_onlineSession != null) {
-        _evaluatePeerPresenceForAutoOffline(_availability);
+        _evaluatePeerPresenceForAutoOffline();
       }
       return;
     }
@@ -2134,7 +2135,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         final groupId = _selectedGroup?.groupId;
         if (groupId != null) unawaited(_refreshLiveKitParticipants(groupId));
         if (_onlineSession != null) {
-          _evaluatePeerPresenceForAutoOffline(_availability);
+          _evaluatePeerPresenceForAutoOffline();
         }
         _scheduleAvailabilityExpiryRefresh();
       },
@@ -2148,7 +2149,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _selectedGroup = group;
       _members = cachedMembers ?? const [];
       _availability = {};
-      _liveKitParticipantUserIds = {};
+      _liveKitParticipantUserIds = groupId == _onlineSession?.groupId
+          ? {..._connectedLiveKitUserIds, _session.userId}
+          : {};
       _chatMessages = const [];
       _chatFeedOpacity = 1;
       _chatVisibleAfterCreatedAt = 0;
@@ -2547,6 +2550,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() {
         _onlineSession = createdSession;
         _connectionMode = startingConnectionMode;
+        _microphoneMutedByUser = false;
         _state = 'live';
         _message = LiveKitStatus.live;
       });
@@ -2557,6 +2561,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       // have left a dead stream after a prior permission blip).
       _listenToEmojiBursts(group.groupId);
       _syncPipSessionState();
+      unawaited(TalkFeedback.joined());
       if (startInCallMode) {
         _scheduleCallModeTimeout();
       } else {
@@ -2806,6 +2811,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     Object? stopError;
     try {
       await _setMicrophoneEnabled(false);
+      if (mounted) _updatePipOverlay();
     } catch (error) {
       stopError = error;
     }
@@ -2865,7 +2871,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       );
 
       if (!mounted) return;
-      setState(() => _connectionMode = nextMode);
+      setState(() {
+        _connectionMode = nextMode;
+        _microphoneMutedByUser = false;
+      });
       if (switchingToCallMode) {
         _scheduleCallModeTimeout();
       } else {
@@ -3214,78 +3223,42 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   Future<void> _toggleAudioMute() async {
-    if (_audioMuteBusy) return;
-    _audioMuteBusy = true;
-    if (_liveHapticsEnabled) {
-      unawaited(HapticFeedback.mediumImpact());
-    }
-    final previousMode = _callAudio.userMode;
-    final nextMode = _callAudio.onLongPress();
-    final nextMuted = nextMode == CallAudioUserMode.muted;
-    setState(() {});
-    try {
-      await AudioOutputBridge.applyRemotePlaybackMute(_room, nextMuted);
-      await AudioOutputBridge.setMuted(nextMuted);
-      if (!nextMuted) {
-        await _room?.setSpeakerOn(true);
-        if (!mounted) return;
-      }
-      if (!mounted) return;
-      unawaited(_reportMediaVolume());
-      _showPresenceSnackbar(nextMuted ? 'Volume muted' : 'Volume unmuted');
-      await _syncProximityMonitoring();
-    } catch (error, stack) {
-      unawaited(
-        CrashlyticsService.recordError(
-          error,
-          stack,
-          reason: 'audio_output_mute_failed',
-        ),
-      );
-      if (!mounted) return;
-      _callAudio.restoreMode(previousMode);
-      setState(() {});
-      await AudioOutputBridge.applyRemotePlaybackMute(_room, _audioMuted);
-      await _syncProximityMonitoring();
-    } finally {
-      _audioMuteBusy = false;
-    }
+    await _toggleMicrophone();
   }
 
-  /// Mute toggle wired to the floating PiP pill.
-  ///
-  /// Unlike [_toggleAudioMute] (which is the long-press main-screen action and
-  /// always resets to speaker on unmute), this preserves the pre-mute route so
-  /// the audio routing is never silently changed as a side-effect of tapping
-  /// the PiP mute button.
-  Future<void> _togglePipMute() async {
+  /// Toggles the actual LiveKit microphone. Walkie mode reuses the existing
+  /// talk lock; call mode mutes/unmutes the published microphone track.
+  Future<void> _toggleMicrophone() async {
     if (_audioMuteBusy) return;
-    _audioMuteBusy = true;
-    final previousMode = _callAudio.userMode;
-    final nextMode = _callAudio.toggleMute();
-    final nextMuted = nextMode == CallAudioUserMode.muted;
-    setState(() {});
-    try {
-      await AudioOutputBridge.applyRemotePlaybackMute(_room, nextMuted);
-      await AudioOutputBridge.setMuted(nextMuted);
-      if (!nextMuted) {
-        // Restore whichever route (speaker or earpiece) was active before mute.
-        await _applyUserAudioRoute();
+    if (!_isCallMode) {
+      if (_talkSession != null || _microphoneEnabled) {
+        await _stopTalking(reason: 'microphone_toggle');
+      } else {
+        await _startTalking();
       }
+      return;
+    }
+
+    _audioMuteBusy = true;
+    final enable = !_microphoneEnabled;
+    try {
+      await _setMicrophoneEnabled(enable);
       if (!mounted) return;
+      _microphoneMutedByUser = !enable;
+      setState(() {});
       _updatePipOverlay();
+      _showPresenceSnackbar(enable ? 'Microphone on' : 'Microphone muted');
     } catch (error, stack) {
       unawaited(
         CrashlyticsService.recordError(
           error,
           stack,
-          reason: 'pip_mute_toggle_failed',
+          reason: 'microphone_toggle_failed',
         ),
       );
       if (!mounted) return;
-      _callAudio.restoreMode(previousMode);
       setState(() {});
-      await AudioOutputBridge.applyRemotePlaybackMute(_room, _audioMuted);
+      _showPresenceSnackbar(LiveKitStatus.sanitizeError(error));
     } finally {
       _audioMuteBusy = false;
     }
@@ -3392,6 +3365,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         .where((userId) => userId != _session.userId)
         .toSet();
     _connectedLiveKitUserIds = userIds;
+    _evaluatePeerPresenceForAutoOffline();
     if (mounted && _selectedGroup?.groupId == _onlineSession?.groupId) {
       setState(
         () => _liveKitParticipantUserIds = {...userIds, _session.userId},
@@ -3474,6 +3448,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             );
             if (userId != null && userId != _session.userId) {
               final firstDevice = _connectedLiveKitUserIds.add(userId);
+              _evaluatePeerPresenceForAutoOffline();
               final reconnected = _peerReconnect.peerJoined(userId);
               if (mounted &&
                   _selectedGroup?.groupId == _onlineSession?.groupId) {
@@ -3509,6 +3484,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               );
               if (!stillConnected) {
                 _connectedLiveKitUserIds.remove(userId);
+                _evaluatePeerPresenceForAutoOffline();
                 _peerReconnect.peerLeft(userId);
                 if (mounted &&
                     _selectedGroup?.groupId == _onlineSession?.groupId) {
@@ -3596,6 +3572,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               );
               if (remoteSpeaking && _talkSession == null) {
                 _message = LiveKitStatus.receivingVoice;
+              } else if (_message == LiveKitStatus.receivingVoice) {
+                _message = LiveKitStatus.live;
               }
             });
             // Reflect the new active speaker in the in-app PiP overlay.
@@ -3654,11 +3632,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // Restore the microphone to match the current session state.
     // In call mode the mic should be on; in walkie-talkie, it stays off
     // until the user presses talk.
-    final shouldBeEnabled = _isCallMode || _talkSession != null;
+    final shouldBeEnabled =
+        (_isCallMode && !_microphoneMutedByUser) || _talkSession != null;
     try {
       await participant
           .setMicrophoneEnabled(shouldBeEnabled)
           .timeout(const Duration(seconds: 8));
+      if (mounted) {
+        setState(() {});
+        _updatePipOverlay();
+      }
       debugPrint(
         '[LiveKit] Post-reconnect microphone restored: '
         'enabled=$shouldBeEnabled '
@@ -3706,6 +3689,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _speakingUserIds = const {};
         _state = 'away';
         _connectionMode = MemberAvailability.walkieTalkieMode;
+        _microphoneMutedByUser = false;
         _message = message;
       });
       _syncPipSessionState();
@@ -4135,6 +4119,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   bool get _isOnline => _onlineSession != null;
 
+  bool get _microphoneEnabled =>
+      _room?.localParticipant?.isMicrophoneEnabled() ?? false;
+
   /// LiveKit join, reconnect, or leave is in flight — the main button must
   /// show a loader instead of an empty middle state between online/offline.
   bool get _isSessionConnecting =>
@@ -4177,6 +4164,23 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       avatarAsset: _session.user.avatarAsset,
     );
   }
+
+  GroupMemberSummary get _localLiveMember => GroupMemberSummary(
+    userId: _session.userId,
+    displayName: _session.user.displayName,
+    role: 'member',
+    memberState: 'active',
+    profilePhotoUrl: _session.user.profilePhotoUrl,
+    profilePhotoBase64: _session.user.profilePhotoBase64,
+    avatarAsset: _session.user.avatarAsset,
+  );
+
+  String get _activeLiveGroupName =>
+      _groups
+          .where((group) => group.groupId == _onlineSession?.groupId)
+          .firstOrNull
+          ?.name ??
+      'Live conversation';
 
   List<GroupMemberSummary> _displayMembersFrom(
     List<GroupMemberSummary> members,
@@ -4285,6 +4289,21 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final groupMixed = !groupAllOffline && !groupAllOnline;
     final anyMemberOnline = live || anyFriendOnline;
     final showGoLive = !_isOnline && anyFriendOnline;
+    final liveAvailability = <String, MemberAvailability>{
+      for (final friend in friends)
+        friend.userId: _liveKitParticipantUserIds.contains(friend.userId)
+            ? MemberAvailability(
+                desiredState: 'online',
+                effectiveState: _speakingUserIds.contains(friend.userId)
+                    ? 'talking'
+                    : 'live',
+                canReceiveLiveAudio: true,
+                connectionMode:
+                    _availability[friend.userId]?.connectionMode ??
+                    MemberAvailability.walkieTalkieMode,
+              )
+            : MemberAvailability.away,
+    };
     // Offline chips ↔ online emoji bar, and fade past bubbles on go-live.
     _syncChatVisibilityForOnlineState(anyMemberOnline);
 
@@ -4344,7 +4363,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     _FriendsStrip(
                       groupName: focusedGroup?.name,
                       friends: _friends,
-                      availability: _availability,
+                      availability: liveAvailability,
                       speakingUserIds: _speakingUserIds,
                       connectionQualityByUserId:
                           _remoteConnectionQualityByUserId,
@@ -4415,45 +4434,50 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 ),
                 // Status hint: collapsed when keyboard is open so the
                 // message feed gets more space above the keyboard.
-                AnimatedOpacity(
-                  duration: const Duration(milliseconds: 180),
-                  opacity: keyboardOpen ? 0.0 : 1.0,
-                  child: AnimatedAlign(
-                    duration: const Duration(milliseconds: 220),
-                    curve: Curves.easeOutCubic,
-                    alignment: Alignment.topCenter,
-                    heightFactor: keyboardOpen ? 0.0 : 1.0,
-                    child: Padding(
-                      padding: EdgeInsets.fromLTRB(24.w, 0, 24.w, 6.h),
-                      child: Text(
-                        _isSessionConnecting
-                            ? (_state == 'reconnecting'
-                                  ? LiveKitStatus.reconnecting
-                                  : LiveKitStatus.connecting)
-                            : viewingActiveGroup
-                            ? (_isCallMode
-                                  ? 'In a call — mic always on'
-                                  : 'Tap to Talk')
-                            : _isOnline
-                            ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
-                            : showGoLive
-                            ? 'Someone is live — tap Go Live to join'
-                            : !_serviceReady
-                            ? 'invite a friend to enable voice service'
-                            : 'send a nudge to go online together',
-                        textAlign: TextAlign.center,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: const Color.fromRGBO(255, 255, 255, 0.55),
-                          fontSize: 13.sp,
-                          fontWeight: FontWeight.w500,
-                          height: 1.3,
+                if (!(viewingActiveGroup &&
+                    !_isCallMode &&
+                    !_isSessionConnecting))
+                  AnimatedOpacity(
+                    duration: const Duration(milliseconds: 180),
+                    opacity: keyboardOpen ? 0.0 : 1.0,
+                    child: AnimatedAlign(
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOutCubic,
+                      alignment: Alignment.topCenter,
+                      heightFactor: keyboardOpen ? 0.0 : 1.0,
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(24.w, 0, 24.w, 6.h),
+                        child: Text(
+                          _isSessionConnecting
+                              ? (_state == 'reconnecting'
+                                    ? LiveKitStatus.reconnecting
+                                    : LiveKitStatus.connecting)
+                              : viewingActiveGroup
+                              ? (_isCallMode
+                                    ? (_microphoneEnabled
+                                          ? 'In a call — mic on'
+                                          : 'In a call — mic muted')
+                                    : 'Tap to Talk')
+                              : _isOnline
+                              ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
+                              : showGoLive
+                              ? 'Someone is live — tap Join? to join'
+                              : !_serviceReady
+                              ? 'invite a friend to enable voice service'
+                              : 'send a nudge to go online together',
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: const Color.fromRGBO(255, 255, 255, 0.55),
+                            fontSize: 13.sp,
+                            fontWeight: FontWeight.w500,
+                            height: 1.3,
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
                 // Keep nudge secondary on the right while peers are live.
                 // With nobody live it remains inside the main button.
                 if ((live && (groupMixed || anyMemberOnline)) || showGoLive)
@@ -5340,10 +5364,7 @@ class _NudgeReplyBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (icon, color) = switch (reply) {
-      NudgeRecipientReply.declined => (
-        Icons.dark_mode_rounded,
-        const Color(0xff8e9aaf),
-      ),
+      NudgeRecipientReply.declined => (Icons.dark_mode_rounded, Colors.white70),
       NudgeRecipientReply.snoozed => (
         LucideIcons.timer,
         const Color(0xffe0a83c),
@@ -5974,7 +5995,33 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
               transform: Matrix4.identity()
                 ..setEntry(3, 2, 0.0014)
                 ..rotateY(rotationY),
-              child: Transform.scale(scale: scale, child: circle),
+              child: Transform.scale(
+                scale: scale,
+                child:
+                    focused &&
+                        connectedToThisGroup &&
+                        !widget.callMode &&
+                        !widget.connecting
+                    ? Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            widget.talkActive
+                                ? 'Tap to Stop Talking'
+                                : 'Tap to Talk',
+                            maxLines: 1,
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 12.sp,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          SizedBox(height: 4.h),
+                          circle,
+                        ],
+                      )
+                    : circle,
+              ),
             ),
           ),
         ),
@@ -6213,7 +6260,10 @@ class _MainAvatarCircle extends StatelessWidget {
               const ColoredBox(color: Color(0x40000000)),
               Center(
                 child: Text(
-                  'Go Live',
+                  'Join?',
+                  maxLines: 1,
+                  overflow: TextOverflow.fade,
+                  softWrap: false,
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 19.sp,
@@ -6346,7 +6396,7 @@ class _MainAvatarCircle extends StatelessWidget {
       circle = Semantics(
         button: true,
         label: goLiveMode
-            ? 'Go Live with ${item.group.name}'
+            ? 'Join the conversation in ${item.group.name}'
             : joinEnabled
             ? 'Join ${item.group.name}'
             : nudgeMode

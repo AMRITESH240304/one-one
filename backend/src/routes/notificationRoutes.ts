@@ -16,6 +16,7 @@ import {
 import { maxVoiceNudgeBytes } from "../notifications/voiceNudgeValidation.js";
 import { respondToNudge } from "../notifications/nudgeResponseService.js";
 import { recordNudgeDelivery, verifyAckTicket } from "../notifications/nudgeDeliveryService.js";
+import { listLiveGroupParticipantUserIds } from "../livekit/liveKitTokenService.js";
 import {
   sendChatMessageNotification,
   sendFriendLiveNotification,
@@ -81,7 +82,7 @@ const voiceNudgeCompleteSchema = z.object({
 const ringNudgeSchema = z.intersection(
   nudgeTargetSchema,
   z.object({
-    durationSeconds: z.union([z.literal(3), z.literal(5), z.literal(10)]),
+    durationSeconds: z.union([z.literal(3), z.literal(6), z.literal(9)]),
     // Optional during migration; backend falls back to RTDB reads if missing.
     recipientDevices: z.array(recipientDeviceSchema).min(1).optional(),
     senderName: z.string().min(1).optional()
@@ -104,6 +105,7 @@ const nudgeAckSchema = z.object({
 const nudgeResponseSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("accept") }),
   z.object({ action: z.literal("decline") }),
+  z.object({ action: z.literal("silence") }),
   z.object({
     action: z.literal("snooze"),
     // Preserve compatibility with installed builds that sent a bare snooze.
@@ -571,7 +573,11 @@ async function resolveFallbackRecipientUserIds(input: {
     }
   }
   // Account deletion removes users/{uid}; app uninstall does not.
-  return filterActiveAccountUserIds(recipientUserIds);
+  const activeUserIds = await filterActiveAccountUserIds(recipientUserIds);
+  const liveUserIds = new Set(
+    await listLiveGroupParticipantUserIds(input.senderUserId, input.groupId)
+  );
+  return activeUserIds.filter((userId) => !liveUserIds.has(userId));
 }
 
 async function readDisplayNameForAck(

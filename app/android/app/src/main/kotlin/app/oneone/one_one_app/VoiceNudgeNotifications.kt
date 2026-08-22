@@ -67,6 +67,7 @@ object VoiceNudgeNotifications {
         isPlaying: Boolean = false,
         largeIcon: Bitmap? = null,
         senderUserId: String? = null,
+        groupName: String? = null,
     ): Notification {
         ensureChannels(context)
         val openIntent = openNudgeIntent(
@@ -90,7 +91,10 @@ object VoiceNudgeNotifications {
         }
         val configured = builder
             .setSmallIcon(nudgeSmallIcon)
-            .setContentTitle("🎙️ $senderName nudged you")
+            .setContentTitle(
+                "🎙️ $senderName nudged you" +
+                    if (groupName.isNullOrBlank()) "" else " in $groupName",
+            )
             .setContentText(
                 sanitizeNotificationCopy(status, FCM_USER_DELIVERY_FAILURE),
             )
@@ -128,6 +132,7 @@ object VoiceNudgeNotifications {
                             groupId,
                             responseUrl,
                             senderName,
+                            groupName,
                             isPlaying,
                         ),
                     ).build(),
@@ -583,6 +588,7 @@ object VoiceNudgeNotifications {
         groupId: String,
         responseUrl: String?,
         senderName: String,
+        groupName: String?,
         isPlaying: Boolean,
     ): PendingIntent {
         val action = if (isPlaying) {
@@ -597,6 +603,7 @@ object VoiceNudgeNotifications {
             putExtra(VoiceNudgeContract.extraGroupId, groupId)
             putExtra(VoiceNudgeContract.extraResponseUrl, responseUrl)
             putExtra(VoiceNudgeContract.extraSenderName, senderName)
+            putExtra(VoiceNudgeContract.extraGroupName, groupName)
         }
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         return if (
