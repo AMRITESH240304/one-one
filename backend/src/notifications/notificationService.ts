@@ -374,6 +374,8 @@ export async function sendChatMessageNotification(input: ChatMessageInput) {
   await requireActiveGroupMember(input.groupId, input.senderUserId);
 
   const senderName = await readDisplayName(input.senderUserId);
+  const senderPhotoUrl = await readProfilePhotoUrl(input.senderUserId);
+  const senderAvatarAsset = await readAvatarAsset(input.senderUserId);
   const messageText = sanitizeChatNotificationText(input.text);
   const messageId = input.messageId?.trim() || undefined;
   const recipientUserIds = await activeRecipientUserIds(input.groupId, input.senderUserId);
@@ -408,6 +410,8 @@ export async function sendChatMessageNotification(input: ChatMessageInput) {
           groupName: group.name,
           senderUserId: input.senderUserId,
           senderName,
+          ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
+          ...(senderAvatarAsset ? { senderAvatarAsset } : {}),
           ...(messageId ? { messageId } : {}),
           ...(messageText ? { messageText } : {}),
           unreadCount: String(count),
