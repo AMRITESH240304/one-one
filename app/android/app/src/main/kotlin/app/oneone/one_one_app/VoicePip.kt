@@ -84,8 +84,15 @@ class VoicePipActionReceiver : BroadcastReceiver() {
 }
 
 class VoiceSessionService : Service() {
+    /** Session ID that was active when this service instance started.
+     *  Passed to [ActiveVoiceSessionStore.markAwayBestEffort] so it can
+     *  bail out if Flutter saved a newer session before we finish shutting down. */
+    private var capturedSessionId: String? = null
+
     override fun onCreate() {
         super.onCreate()
+        // Capture BEFORE any concurrent save() can overwrite the prefs.
+        capturedSessionId = ActiveVoiceSessionStore.readServiceSessionId(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
@@ -175,7 +182,7 @@ class VoiceSessionService : Service() {
             "task removed — requesting LiveKit disconnect and presence cleanup",
         )
         VoiceSessionTeardownDispatcher.requestTeardown()
-        ActiveVoiceSessionStore.markAwayBestEffort(this)
+        ActiveVoiceSessionStore.markAwayBestEffort(this, capturedSessionId)
         stopSelf()
         super.onTaskRemoved(rootIntent)
     }
@@ -183,7 +190,7 @@ class VoiceSessionService : Service() {
     override fun onDestroy() {
         DeviceLog.info("VoiceSessionService", "service stopped")
         VoiceSessionTeardownDispatcher.requestTeardown()
-        ActiveVoiceSessionStore.markAwayBestEffort(this)
+        ActiveVoiceSessionStore.markAwayBestEffort(this, capturedSessionId)
         super.onDestroy()
     }
 

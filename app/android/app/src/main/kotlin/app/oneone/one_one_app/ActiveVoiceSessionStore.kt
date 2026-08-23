@@ -48,7 +48,25 @@ object ActiveVoiceSessionStore {
             .apply()
     }
 
-    fun markAwayBestEffort(context: Context) {
+    /** Returns the serviceSessionId currently stored, or null if none. Used by
+     *  [VoiceSessionService] to detect whether a newer session was saved before
+     *  it shuts down, in which case [markAwayBestEffort] must not fire. */
+    fun readServiceSessionId(context: Context): String? =
+        context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            .getString(serviceSessionIdKey, null)
+            ?.takeIf { it.isNotBlank() }
+
+    /**
+     * Writes away state to RTDB for the stored session.
+     *
+     * Only proceeds if [capturedSessionId] (the session ID captured by the
+     * service at start time) still matches the currently-stored session ID.
+     * This guards against a scenario where Flutter has already saved a NEW
+     * session (via [save]) before the previous [VoiceSessionService] instance
+     * finishes shutting down — without this check, the service's [onDestroy]
+     * would overwrite the live new session with away.
+     */
+    fun markAwayBestEffort(context: Context, capturedSessionId: String? = null) {
         val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         val groupId = prefs.getString(groupIdKey, null)?.takeIf { it.isNotBlank() } ?: return
         val userId = prefs.getString(userIdKey, null)?.takeIf { it.isNotBlank() } ?: return
@@ -56,6 +74,20 @@ object ActiveVoiceSessionStore {
             prefs.getString(serviceSessionIdKey, null)?.takeIf { it.isNotBlank() } ?: return
         val livekitSessionId =
             prefs.getString(livekitSessionIdKey, null)?.takeIf { it.isNotBlank() } ?: return
+
+        // If the service was started for a specific session, refuse to write
+        // away if a newer session has been saved since (Flutter reconnected
+        // before this service instance finished shutting down).
+        if (capturedSessionId != null && capturedSessionId != serviceSessionId) {
+            DeviceLog.warn(
+                "VoiceSessionService",
+                "markAwayBestEffort skipped — session changed since service started " +
+                    "capturedSuffix=${capturedSessionId.takeLast(6)} " +
+                    "currentSuffix=${serviceSessionId.takeLast(6)}",
+            )
+            return
+        }
+
         val authUid = FirebaseAuth.getInstance().currentUser?.uid
         if (authUid != null && authUid != userId) return
 
