@@ -105,16 +105,23 @@ class VoiceSessionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         DeviceLog.init(this)
+        val inBackground = DeviceLog.wasAppInBackground()
         DeviceLog.info(
             "VoiceSessionService",
-            "onStartCommand called flags=$flags startId=$startId sdk=${Build.VERSION.SDK_INT}",
+            "onStartCommand called flags=$flags startId=$startId " +
+                "sdk=${Build.VERSION.SDK_INT} background=$inBackground",
         )
-        // B1: On API 34+ (and especially 36), starting a foreground service of
-        // type "microphone" requires android.permission.FOREGROUND_SERVICE_MICROPHONE
-        // (declared in the manifest) AND android.permission.RECORD_AUDIO to be
-        // granted at runtime. If RECORD_AUDIO is missing, fail gracefully instead
-        // of crashing the process.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        // On Android 14+ (and especially 15/16), the "microphone" foreground
+        // service type is a foreground-only permission: it cannot be started
+        // while the app is in the background. A backgrounded sender is in
+        // walkie-talkie mode (mic muted) anyway, so start with "mediaPlayback"
+        // instead to keep the process alive and the receiver's audio playing.
+        val useMicrophoneType = !inBackground
+        // B1: On API 34+, a foreground service of type "microphone" additionally
+        // requires android.permission.RECORD_AUDIO to be granted at runtime.
+        // If it is missing, fail gracefully instead of crashing the process.
+        // The mediaPlayback-only background path does not need RECORD_AUDIO.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && useMicrophoneType) {
             val recordGranted = ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.RECORD_AUDIO,
@@ -142,13 +149,17 @@ class VoiceSessionService : Service() {
             }
         }
         try {
-            DeviceLog.info("VoiceSessionService", "startForeground called")
+            val fgsType = if (useMicrophoneType) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            }
+            DeviceLog.info(
+                "VoiceSessionService",
+                "startForeground called type=${if (useMicrophoneType) "microphone" else "mediaPlayback"}",
+            )
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    notificationId,
-                    notification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-                )
+                startForeground(notificationId, notification(), fgsType)
             } else {
                 @Suppress("DEPRECATION")
                 startForeground(notificationId, notification())
@@ -226,9 +237,13 @@ class VoiceSessionService : Service() {
         private const val notificationId = 7012
 
         fun start(context: Context) {
-            // B1: Guard against starting when RECORD_AUDIO isn't granted at
-            // runtime — API 34+ requires it for foreground service type "microphone".
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // B1: Guard against starting a "microphone" foreground service when
+            // RECORD_AUDIO isn't granted at runtime (API 34+ requires it). When
+            // the app is in the background we fall back to "mediaPlayback" (see
+            // onStartCommand), which does not require RECORD_AUDIO.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+                !DeviceLog.wasAppInBackground()
+            ) {
                 val recordGranted = ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.RECORD_AUDIO,
