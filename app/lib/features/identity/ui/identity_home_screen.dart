@@ -203,7 +203,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Timer? _inactivityTimer;
 
   // Daily usage tracker: prevents runaway sessions (e.g. phone left on in a
-  // crowd). Accumulates online seconds and caps at 120 min / user / day.
+  // crowd). Accumulates online seconds and caps at 180 min / user / day.
   int _todayOnlineSeconds = 0;
   String? _todayUsageDateKey;
   Timer? _usagePersistTimer; // Flushes accumulated seconds to RTDB every 30 s.

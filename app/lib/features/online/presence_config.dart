@@ -31,7 +31,7 @@ class PresenceConfig {
   /// Maximum total online time per user per group per day. Beyond this,
   /// the app blocks further "go online" attempts until the next UTC day.
   /// Prevents runaway sessions from unattended devices.
-  static const Duration dailyUsageCap = Duration(minutes: 120);
+  static const Duration dailyUsageCap = Duration(minutes: 180);
 
   /// How long a single continuous stretch of call mode (always-on mic) is
   /// allowed before the local user is automatically switched back to
