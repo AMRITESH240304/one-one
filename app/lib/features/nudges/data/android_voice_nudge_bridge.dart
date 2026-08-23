@@ -246,6 +246,23 @@ class AndroidVoiceNudgeBridge {
     }
   }
 
+  /// Shows a "you are online" shade notification on the sender's device after
+  /// a background auto-connect completes (the app never came to the foreground).
+  Future<void> showYouAreOnlineNotification({
+    required String groupId,
+    String? groupName,
+  }) async {
+    if (!Platform.isAndroid || groupId.isEmpty) return;
+    try {
+      await _channel.invokeMethod<void>('showYouAreOnlineNotification', {
+        'groupId': groupId,
+        if (groupName != null && groupName.isNotEmpty) 'groupName': groupName,
+      });
+    } catch (_) {
+      // Best-effort — the sender is already live.
+    }
+  }
+
   /// B5: Schedule a 10-minute expiry alarm on the sender's device after a
   /// nudge is successfully dispatched.  The native MessagingService
   /// automatically cancels it when a delivery result or accept response

@@ -1054,6 +1054,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // last sent nudge is no longer the active pending state.
     NudgeStatusMemory.instance.clear(action.groupId);
     if (mounted) setState(() {});
+    if (action.action == 'connect' &&
+        _appLifecycle != AppLifecycleState.resumed) {
+      // Sender auto-connected while the app stayed in the background — the
+      // shade notification is the only confirmation they get.
+      final group = _groups
+          .where((candidate) => candidate.groupId == action.groupId)
+          .firstOrNull;
+      unawaited(
+        AndroidVoiceNudgeBridge.shared.showYouAreOnlineNotification(
+          groupId: action.groupId,
+          groupName: group?.name,
+        ),
+      );
+    }
     if (action.action != 'accept') return;
     await _nudgeInbox.mark(
       nudgeId: action.eventId,

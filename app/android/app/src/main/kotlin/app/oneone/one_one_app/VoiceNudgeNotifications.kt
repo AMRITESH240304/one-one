@@ -208,13 +208,21 @@ object VoiceNudgeNotifications {
         responderName: String,
         responseAction: String,
         snoozeMinutes: Int? = null,
+        senderProcessKilled: Boolean = false,
     ): Notification {
         ensureChannels(context)
         val accepted = responseAction == "accept"
-        val body = when (responseAction) {
-            "accept" -> "Tap to join together 🤝"
-            "snooze" -> "They asked you to wait ${snoozeMinutes ?: 5} minutes ⏳"
+        val body = when {
+            accepted && senderProcessKilled -> "Tap to go online 🟢"
+            responseAction == "accept" -> "Tap to join together 🤝"
+            responseAction == "snooze" ->
+                "They asked you to wait ${snoozeMinutes ?: 5} minutes ⏳"
             else -> "They can’t join right now 💤"
+        }
+        val title = if (accepted && senderProcessKilled) {
+            "💬 $responderName accepted your nudge"
+        } else {
+            "💬 $responderName answered your nudge"
         }
         val openIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -240,7 +248,7 @@ object VoiceNudgeNotifications {
         return builder
             .setSmallIcon(appSmallIcon)
             .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
-            .setContentTitle("💬 $responderName answered your nudge")
+            .setContentTitle(title)
             .setContentText(body)
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_SOCIAL)

@@ -721,7 +721,8 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
         val responderName = data["responderName"]?.take(80).orEmpty().ifBlank { "Your friend" }
         // B5: Nudge response arrived — cancel sender's expiry alarm.
         NudgeExpiryTracker.cancelExpiry(this, eventId)
-        if (responseAction == "accept") {
+        val flutterEngineAlive = NudgeActionDispatcher.isAttached()
+        if (responseAction == "accept" && flutterEngineAlive) {
             queueSenderConnectOnAccept(eventId, groupId)
         }
         // Always forward to Flutter so the sender sheet / friend profiles can
@@ -738,21 +739,33 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             ),
         )
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
-        manager.notify(
-            VoiceNudgeNotifications.idFor(eventId),
-            VoiceNudgeNotifications.buildResponse(
-                this,
-                eventId,
-                groupId,
-                responderName,
-                responseAction,
-                snoozeMinutes,
-            ),
-        )
+        // When the sender's app is alive but backgrounded, Flutter connects
+        // LiveKit in the background and posts a "you are online" notification
+        // once the room is live — do not also show the generic response here.
+        val showSystemResponse =
+            responseAction != "accept" ||
+                !flutterEngineAlive ||
+                !DeviceLog.wasAppInBackground()
+        if (showSystemResponse) {
+            manager.notify(
+                VoiceNudgeNotifications.idFor(eventId),
+                VoiceNudgeNotifications.buildResponse(
+                    this,
+                    eventId,
+                    groupId,
+                    responderName,
+                    responseAction,
+                    snoozeMinutes,
+                    senderProcessKilled =
+                        responseAction == "accept" && !flutterEngineAlive,
+                ),
+            )
+        }
         Log.i(
             VoiceNudgeDiagnostics.tag,
             "[NUDGE-ACTION-03] sender received response=$responseAction " +
-                "snoozeMinutes=${snoozeMinutes ?: "none"}",
+                "snoozeMinutes=${snoozeMinutes ?: "none"} " +
+                "flutterAlive=$flutterEngineAlive",
         )
     }
 
@@ -762,34 +775,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             PendingNudgeAction("connect", eventId, groupId),
         )
         NudgeActionDispatcher.signal()
-        if (!DeviceLog.wasAppInBackground()) return
-        val connectIntent = Intent(this, MainActivity::class.java).apply {
-            action = VoiceNudgeContract.actionConnect
-            addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP,
-            )
-            putExtra(VoiceNudgeContract.extraEventId, eventId)
-            putExtra(VoiceNudgeContract.extraGroupId, groupId)
-            putExtra(
-                VoiceNudgeContract.extraNotificationId,
-                VoiceNudgeNotifications.idFor(eventId),
-            )
-        }
-        try {
-            startActivity(connectIntent)
-            Log.i(
-                VoiceNudgeDiagnostics.tag,
-                "[NUDGE-ACTION-04] launched MainActivity for sender connect " +
-                    "eventSuffix=${eventId.takeLast(6)}",
-            )
-        } catch (error: Exception) {
-            VoiceNudgeDiagnostics.logFailure(
-                "[NUDGE-E11] sender connect launch failed",
-                error,
-            )
-        }
+        // Deliberately do NOT start MainActivity here. When the Flutter engine
+        // is alive but backgrounded, Dart connects LiveKit in the background
+        // (kept alive by the voice-session foreground service) and posts the
+        // "you are online" notification itself once the room is live.
     }
 
     /**

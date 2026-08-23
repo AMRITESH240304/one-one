@@ -368,6 +368,40 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(null)
                 }
 
+                // Shown by Flutter after a background auto-connect succeeds:
+                // the sender's app never came to the foreground, so a shade
+                // notification is the only confirmation they get.
+                "showYouAreOnlineNotification" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val groupId = args?.get("groupId")?.toString()
+                    val groupName = args?.get("groupName")?.toString()
+                    val manager =
+                        getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+                    try {
+                        manager.notify(
+                            VoiceNudgeNotifications.idFor("online_$groupId"),
+                            VoiceNudgeNotifications.buildGeneral(
+                                this,
+                                "🟢 You are online",
+                                if (groupName.isNullOrBlank()) {
+                                    "You're live together now."
+                                } else {
+                                    "You're live in $groupName."
+                                },
+                                groupId,
+                            ),
+                        )
+                        Log.i(
+                            VoiceNudgeDiagnostics.tag,
+                            "[NUDGE-ACTION-05] posted sender 'you are online' notification " +
+                                "groupSuffix=${groupId?.takeLast(6) ?: "none"}",
+                        )
+                    } catch (error: SecurityException) {
+                        VoiceNudgeDiagnostics.logFailure("[NUDGE-E12] Notification permission", error)
+                    }
+                    result.success(null)
+                }
+
                 else -> result.notImplemented()
             }
         }

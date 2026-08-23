@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:lucide_flutter/lucide_flutter.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
@@ -1175,6 +1176,26 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     return NudgeTarget.selectedFriends(selected);
   }
 
+  /// Requests microphone permission so a later background auto-connect can
+  /// start the LiveKit session without showing a foreground dialog. No-op if
+  /// it is already granted or the platform cannot request it right now.
+  Future<void> _ensureMicrophonePermission() async {
+    try {
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        LogManager.log(
+          LogLevel.warn,
+          'NudgeService',
+          'Microphone permission not granted at send time; background '
+              'auto-connect may require reopening the app',
+          groupId: widget.group.groupId,
+        );
+      }
+    } catch (_) {
+      // Best-effort — the normal go-online path still re-checks permission.
+    }
+  }
+
   Future<void> _send(
     Future<Object?> Function() action, {
     required NudgeKind kind,
@@ -1192,6 +1213,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       });
       return;
     }
+    // Best-effort: make sure the microphone permission is granted while the
+    // sender is still in the foreground. If the app is backgrounded and the
+    // receiver later accepts, the LiveKit session can auto-connect in the
+    // background without a foreground permission dialog.
+    unawaited(_ensureMicrophonePermission());
     setState(() {
       _busy = true;
       _message = null;
