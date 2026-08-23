@@ -240,29 +240,10 @@ export function createNotificationRoutes() {
           targetUserIds
         });
 
-        const devices: Array<{ userId: string; deviceId: string; fcmToken: string; displayName?: string }> = [];
-        for (const uid of recipientUserIds) {
-          const devSnap = await db.ref(`userDevices/${uid}`).get();
-          if (!devSnap.exists()) continue;
-          const recipientDisplayName = await readDisplayNameForAck(db, uid);
-          const devs = devSnap.val() as Record<string, unknown>;
-          for (const [devId, dv] of Object.entries(devs)) {
-            if (
-              typeof dv === "object" && dv !== null &&
-              (dv as Record<string, unknown>).deviceState === "active" &&
-              (dv as Record<string, unknown>).platform === "android"
-            ) {
-              const tok = (dv as Record<string, unknown>).fcmToken;
-              if (typeof tok === "string" && tok) {
-                devices.push({ userId: uid, deviceId: devId, fcmToken: tok, displayName: recipientDisplayName });
-              }
-            }
-          }
-        }
-        recipientDevices = devices;
-
-        const nameSnap = await db.ref(`users/${authRequest.auth.uid}/displayName`).get();
-        senderName = nameSnap.val()?.toString() || "Someone";
+        [recipientDevices, senderName] = await Promise.all([
+          collectFallbackRecipientDevices(db, recipientUserIds),
+          readFallbackSenderName(db, authRequest.auth.uid)
+        ]);
       }
 
       const result = await sendRingNudge({
@@ -309,31 +290,10 @@ export function createNotificationRoutes() {
           targetUserIds
         });
 
-        // Read recipient devices (FCM tokens) from RTDB
-        const devices: Array<{ userId: string; deviceId: string; fcmToken: string; displayName?: string }> = [];
-        for (const uid of recipientUserIds) {
-          const devSnap = await db.ref(`userDevices/${uid}`).get();
-          if (!devSnap.exists()) continue;
-          const recipientDisplayName = await readDisplayNameForAck(db, uid);
-          const devs = devSnap.val() as Record<string, unknown>;
-          for (const [devId, dv] of Object.entries(devs)) {
-            if (
-              typeof dv === "object" && dv !== null &&
-              (dv as Record<string, unknown>).deviceState === "active" &&
-              (dv as Record<string, unknown>).platform === "android"
-            ) {
-              const tok = (dv as Record<string, unknown>).fcmToken;
-              if (typeof tok === "string" && tok) {
-                devices.push({ userId: uid, deviceId: devId, fcmToken: tok, displayName: recipientDisplayName });
-              }
-            }
-          }
-        }
-        recipientDevices = devices;
-
-        // Read display name from RTDB
-        const nameSnap = await db.ref(`users/${authRequest.auth.uid}/displayName`).get();
-        senderName = nameSnap.val()?.toString() || "Someone";
+        [recipientDevices, senderName] = await Promise.all([
+          collectFallbackRecipientDevices(db, recipientUserIds),
+          readFallbackSenderName(db, authRequest.auth.uid)
+        ]);
       }
 
       const result = await initiateVoiceNudgeUpload({
@@ -586,4 +546,55 @@ async function readDisplayNameForAck(
   const snapshot = await db.ref(`users/${userId}/displayName`).get();
   const name = snapshot.val()?.toString().trim();
   return name || undefined;
+}
+
+type FallbackRecipientDevice = {
+  userId: string;
+  deviceId: string;
+  fcmToken: string;
+  displayName?: string;
+};
+
+async function collectFallbackRecipientDevices(
+  db: ReturnType<typeof getRealtimeDatabase>,
+  recipientUserIds: string[]
+): Promise<FallbackRecipientDevice[]> {
+  const perUser = await Promise.all(
+    recipientUserIds.map(async (uid) => {
+      const [devSnap, recipientDisplayName] = await Promise.all([
+        db.ref(`userDevices/${uid}`).get(),
+        readDisplayNameForAck(db, uid)
+      ]);
+      if (!devSnap.exists()) return [];
+      const devs = devSnap.val() as Record<string, unknown>;
+      const devices: FallbackRecipientDevice[] = [];
+      for (const [devId, dv] of Object.entries(devs)) {
+        if (
+          typeof dv === "object" && dv !== null &&
+          (dv as Record<string, unknown>).deviceState === "active" &&
+          (dv as Record<string, unknown>).platform === "android"
+        ) {
+          const tok = (dv as Record<string, unknown>).fcmToken;
+          if (typeof tok === "string" && tok) {
+            devices.push({
+              userId: uid,
+              deviceId: devId,
+              fcmToken: tok,
+              displayName: recipientDisplayName
+            });
+          }
+        }
+      }
+      return devices;
+    })
+  );
+  return perUser.flat();
+}
+
+async function readFallbackSenderName(
+  db: ReturnType<typeof getRealtimeDatabase>,
+  senderUserId: string
+): Promise<string> {
+  const name = await readDisplayNameForAck(db, senderUserId);
+  return name ?? "Someone";
 }

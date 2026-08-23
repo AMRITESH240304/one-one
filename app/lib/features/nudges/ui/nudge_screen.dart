@@ -34,12 +34,17 @@ Future<void> showNudgeBottomSheet(
   required List<GroupMemberSummary> members,
   required Color accent,
   Set<String> onlineUserIds = const {},
+  /// When true, LiveKit (or PTT) holds the hardware mic — voice recording
+  /// must wait until the caller mutes. Re-checked on each press.
+  bool Function()? isLiveMicrophoneInUse,
 }) async {
   await showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     useSafeArea: false,
     backgroundColor: Colors.transparent,
+    // Barrier/drag dismiss stay on; PopScope blocks them while holding to
+    // record so a slip of the finger cannot close the sheet mid-nudge.
     isDismissible: true,
     enableDrag: true,
     builder: (_) => _QuickNudgeSheet(
@@ -48,6 +53,7 @@ Future<void> showNudgeBottomSheet(
       members: members,
       accent: accent,
       onlineUserIds: onlineUserIds,
+      isLiveMicrophoneInUse: isLiveMicrophoneInUse,
     ),
   );
 }
@@ -59,6 +65,7 @@ class _QuickNudgeSheet extends StatefulWidget {
     required this.members,
     required this.accent,
     required this.onlineUserIds,
+    this.isLiveMicrophoneInUse,
   });
 
   final GroupSummary group;
@@ -66,6 +73,7 @@ class _QuickNudgeSheet extends StatefulWidget {
   final List<GroupMemberSummary> members;
   final Color accent;
   final Set<String> onlineUserIds;
+  final bool Function()? isLiveMicrophoneInUse;
 
   @override
   State<_QuickNudgeSheet> createState() => _QuickNudgeSheetState();
@@ -123,6 +131,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   // the correlation key (nudgeId) for the rest of the sender-side trace.
   String? _voiceRequestId;
   String? _voiceNudgeId;
+  /// Signed-URL reservation kicked off at record-start so backend RTDB work
+  /// overlaps the hold instead of blocking after record-end.
+  Future<Map<String, dynamic>>? _voiceUploadReservation;
   final Stopwatch _voiceNudgeWatch = Stopwatch();
   bool _voiceConfirmationLogged = false;
   Timer? _deliveryTimeoutTimer;
@@ -1000,11 +1011,20 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     return seconds <= 1 ? 'wait 1s' : 'wait ${seconds.ceil()}s';
   }
 
+  /// Hardware mic is held by the live session — voice nudge cannot record.
+  bool get _liveMicBlocksVoice =>
+      widget.isLiveMicrophoneInUse?.call() ?? false;
+
+  /// Block sheet dismiss (back, barrier, drag) for the whole press-and-hold.
+  bool get _blockDismissWhileHolding =>
+      _pointerHeld || _recording || _startingRecording;
+
   void _scheduleAutoDismiss() {
     _autoDismissTimer?.cancel();
     _autoDismissTimer = Timer(_autoDismissDelay, () {
       if (!mounted) return;
-      if (_recording ||
+      if (_pointerHeld ||
+          _recording ||
           _startingRecording ||
           _finishingRecording ||
           _awaitingEventId != null) {
@@ -1288,6 +1308,17 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   Future<void> _beginRecording() async {
     if (!_canSend || _startingRecording) return;
     if (_cooldownRemaining(NudgeKind.voice) > Duration.zero) return;
+    if (_liveMicBlocksVoice) {
+      if (mounted) {
+        setState(() {
+          _message = 'Mute your mic first to send a voice nudge.';
+          _messageIsError = false;
+          _messageIsWarning = true;
+          _messagePending = false;
+        });
+      }
+      return;
+    }
     _startingRecording = true;
     try {
       if (!await _recorder.hasPermission()) {
@@ -1305,6 +1336,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       );
       await _recorder.start(VoiceNudgeAudio.recordConfig, path: file.path);
       if (!mounted) {
+        _voiceUploadReservation = null;
         await _recorder.stop();
         return;
       }
@@ -1319,6 +1351,13 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _voiceRequestId = const Uuid().v4();
       _voiceNudgeId = null;
       _voiceConfirmationLogged = false;
+      // Reserve the signed write URL while the user holds — the backend
+      // recipient lookup (~4s on groups) finishes before record-end.
+      _voiceUploadReservation = _repository.initiateVoiceUpload(
+        groupId: widget.group.groupId,
+        target: _effectiveTarget(),
+        durationMs: VoiceNudgeAudio.maxRecordingDuration.inMilliseconds,
+      );
       LogManager.log(
         LogLevel.info,
         'NudgeService',
@@ -1326,7 +1365,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
             'encoder=aacLc bitRate=${VoiceNudgeAudio.bitRate} '
             'sampleRate=${VoiceNudgeAudio.sampleRate} '
             'channels=${VoiceNudgeAudio.numChannels} '
-            'capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds}',
+            'capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds} '
+            'uploadReserveAtStart=true',
         groupId: widget.group.groupId,
       );
       _recordingTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
@@ -1345,6 +1385,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         await _finishRecording(send: _sendAfterPointerEnd);
       }
     } catch (error) {
+      _voiceUploadReservation = null;
       if (mounted) {
         setState(() {
           _message = _friendlyError(error);
@@ -1403,13 +1444,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     var sent = false;
     String? voiceEventId;
     final minMs = VoiceNudgeAudio.minRecordingDuration.inMilliseconds;
-    final uploadReservation = send && durationMs >= minMs
-        ? _repository.initiateVoiceUpload(
-            groupId: widget.group.groupId,
-            target: _effectiveTarget(),
-            durationMs: durationMs,
-          )
-        : null;
+    final uploadReservation =
+        send && durationMs >= minMs ? _voiceUploadReservation : null;
+    _voiceUploadReservation = null;
     try {
       // AAC-LC encoding happens inside the recorder while recording; the
       // stop() call only flushes/finalizes the M4A container. This is the
@@ -1547,7 +1584,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     final actionEnabled = _canSend;
     final ringEnabled = actionEnabled && ringCooldown <= Duration.zero;
     final pushEnabled = actionEnabled && pushCooldown <= Duration.zero;
-    final voiceEnabled = _canSend && voiceCooldown <= Duration.zero;
+    final voiceBlockedByLiveMic = _liveMicBlocksVoice;
+    final voiceEnabled =
+        _canSend && voiceCooldown <= Duration.zero && !voiceBlockedByLiveMic;
     final recordingProgress =
         (_elapsed.inMilliseconds /
                 VoiceNudgeAudio.maxRecordingDuration.inMilliseconds)
@@ -1559,7 +1598,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _friends.isEmpty || _nudgeableFriends.isEmpty || _message != null;
 
     return PopScope(
-      canPop: true,
+      canPop: !_blockDismissWhileHolding,
       child: Material(
         color: const Color(0xff141414),
         borderRadius: BorderRadius.vertical(top: Radius.circular(28.r)),
@@ -1608,7 +1647,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                             ),
                           ),
                           IconButton(
-                            onPressed: () => Navigator.of(context).pop(),
+                            onPressed: _blockDismissWhileHolding
+                                ? null
+                                : () => Navigator.of(context).pop(),
                             icon: const Icon(Icons.close_rounded),
                             color: Colors.white38,
                             iconSize: 20.sp,
@@ -1864,6 +1905,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     required double recordingProgress,
     required Duration voiceCooldown,
   }) {
+    final muteFirstLabel = _liveMicBlocksVoice && !_recording && !_sendingVoice;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -1874,10 +1916,22 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
               ? 'Recording voice nudge, release to send'
               : _sendingVoice
               ? 'Sending voice nudge'
+              : muteFirstLabel
+              ? 'Mute your microphone first to record a voice nudge'
               : 'Voice nudge, press and hold to record',
           child: Listener(
             onPointerDown: (_) {
-              if (!voiceEnabled) return;
+              if (!voiceEnabled) {
+                if (_liveMicBlocksVoice) {
+                  setState(() {
+                    _message = 'Mute your mic first to send a voice nudge.';
+                    _messageIsError = false;
+                    _messageIsWarning = true;
+                    _messagePending = false;
+                  });
+                }
+                return;
+              }
               // Fixed default while holding to record (not Settings intensity).
               unawaited(HapticFeedback.lightImpact());
               // Lock back/close on the same frame as press — before async
@@ -1942,7 +1996,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                           ),
                         ),
                         Icon(
-                          _recording
+                          muteFirstLabel
+                              ? Icons.mic_off_rounded
+                              : _recording
                               ? Icons.mic_rounded
                               : Icons.mic_none_rounded,
                           size: 42.sp,
@@ -1965,6 +2021,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
               ? '${(_elapsed.inMilliseconds / 1000).toStringAsFixed(1)} / 6.0s'
               : _sendingVoice
               ? 'Sending\u2026'
+              : muteFirstLabel
+              ? 'Mute first'
               : 'Hold to speak',
           style: TextStyle(
             color: _recording || _sendingVoice

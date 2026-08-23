@@ -263,6 +263,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   StreamSubscription<void>? _processTeardownSubscription;
   late final PeerReconnectCoordinator _peerReconnect;
   bool _inPictureInPicture = false;
+  /// True when another route (settings, group action, etc.) covers home.
+  bool _routeCovered = false;
   String? _preferredGroupId;
 
   @override
@@ -430,17 +432,28 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   void didPush() => _showPipOverlayIfLive();
 
   @override
-  void didPopNext() => _showPipOverlayIfLive();
+  void didPopNext() {
+    _routeCovered = false;
+    _showPipOverlayIfLive();
+  }
 
   /// Another route was pushed on top of home — show PiP if currently live.
   @override
-  void didPushNext() => _showPipOverlayIfLive();
+  void didPushNext() {
+    _routeCovered = true;
+    _showPipOverlayIfLive();
+  }
 
   // ── In-app PiP overlay helpers ───────────────────────────────────────────
 
-  /// Keep the floating live-session control available on every relevant route.
+  /// Keep the floating live-session control available when live but not already
+  /// on the active group's home screen (PiP is for returning from other routes).
   void _showPipOverlayIfLive() {
     if (!_isOnline) return;
+    if (_isViewingActiveGroup && !_routeCovered) {
+      _hidePipOverlay();
+      return;
+    }
     LiveSessionOverlayController.instance.setSession(
       LiveSessionOverlayData(
         member: _localLiveMember,
@@ -1290,10 +1303,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
     final next = queue.first;
-    if (_nudgeInbox.wasGroupAcceptedRecently(next.groupId)) {
-      await _autoAcceptRecentGroupNudge(next);
-      return;
-    }
+    // Always show accept/decline — never auto-accept from a prior accept in
+    // this group (ring/nudge position must stay an explicit choice).
     _promptRestoreGroupId ??= _selectedGroup?.groupId;
     await _focusGroupForIncomingNudge(next);
     if (!mounted) return;
@@ -1331,47 +1342,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       }
       unawaited(_presentIncomingNudgePrompt());
     });
-  }
-
-  Future<void> _autoAcceptRecentGroupNudge(ActiveNudge nudge) async {
-    if (_incomingPromptBusy || _nudgeActionInFlight) return;
-    final pending = _nudgeInbox.activeInGroup(nudge.groupId);
-    if (pending.isEmpty) return;
-
-    setState(() => _incomingPromptBusy = true);
-    try {
-      for (final event in pending) {
-        if (_processedNudgeEventIds.contains(event.nudgeId)) continue;
-        _processedNudgeEventIds.add(event.nudgeId);
-        unawaited(
-          _nudgeRepository.respond(
-            groupId: event.groupId,
-            eventId: event.nudgeId,
-            action: 'accept',
-          ),
-        );
-        unawaited(_nudgeActionBridge.dismissIncomingNudge(event.nudgeId));
-      }
-      await _nudgeInbox.markAllInGroup(
-        groupId: nudge.groupId,
-        status: ActiveNudgeStatus.accepted,
-      );
-      if (!_isViewingActiveGroup || !_isOnline) {
-        await _processNudgeAction(
-          NudgeNotificationAction(
-            action: 'accept',
-            eventId: nudge.nudgeId,
-            groupId: nudge.groupId,
-            senderUserId: nudge.senderId,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _incomingPromptBusy = false);
-      if (mounted) {
-        await _presentIncomingNudgePrompt(ignoreInFlight: true);
-      }
-    }
   }
 
   Future<void> _acceptIncomingNudge(ActiveNudge nudge) async {
@@ -2154,6 +2124,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _listenToAvailability(group.groupId);
     _listenToChatMessages(group.groupId);
     _listenToEmojiBursts(group.groupId);
+    _showPipOverlayIfLive();
   }
 
   Future<void> _onGroupCarouselChanged(int index) async {
@@ -2365,8 +2336,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       unawaited(_goAway());
       return;
     }
+    // Already live in another group — nudge this one instead of auto-switching.
+    // Switching voice rooms only happens after an explicit accept/connect.
     if (_isOnline) {
-      unawaited(_switchVoiceGroup());
+      _openNudges();
       return;
     }
     // If someone else is already online in this group, let the user join
@@ -3894,6 +3867,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         members: _displayMembers,
         accent: accentColorForKey(_session.settings.accentColorKey),
         onlineUserIds: onlineUserIds,
+        // LiveKit holds the hardware mic while unmuted / PTT — voice nudge
+        // recording cannot share it. Caller must mute first.
+        isLiveMicrophoneInUse: () =>
+            _isOnline && (_microphoneEnabled || _talkSession != null),
       ),
     );
   }
@@ -4290,7 +4267,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     ),
                   ),
                 ],
-                if (_message != null) ...[
+                if (_message != null &&
+                    !(_isOnline && viewingActiveGroup)) ...[
                   SizedBox(height: 10.h),
                   Padding(
                     padding: EdgeInsets.symmetric(horizontal: 24.w),
@@ -4306,33 +4284,41 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 // Middle band: ephemeral bubbles sit here (own=right,
                 // others=left). Empty Expanded keeps layout stable so
                 // the feed doesn't jump the carousel when it appears.
-                // Align to bottom so bubbles sit lower (near the status
-                // hint) instead of floating mid-screen. Clip overflow
-                // instead of scrolling — the home layout is fixed and
-                // sized for the rolling window of five short bubbles.
+                // Bottom-align the feed; scroll when the rolling window
+                // exceeds available height instead of clipping the top pill.
                 Expanded(
                   child: Padding(
                     padding: EdgeInsets.fromLTRB(16.w, 0, 16.w, 14.h),
-                    child: ClipRect(
-                      child: OverflowBox(
-                        alignment: Alignment.bottomCenter,
-                        maxHeight: double.infinity,
-                        child: ChatBubbleFeed(
-                          messages: _chatMessages,
-                          currentUserId: _session.userId,
-                          displayNameForUserId: _chatDisplayNameForUser,
-                          accent: accent,
-                          onExpire: _dismissExpiredChatMessage,
-                          opacity: _chatFeedOpacity,
-                        ),
-                      ),
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        return SingleChildScrollView(
+                          reverse: true,
+                          physics: const ClampingScrollPhysics(),
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              minHeight: constraints.maxHeight,
+                            ),
+                            child: Align(
+                              alignment: Alignment.bottomCenter,
+                              child: ChatBubbleFeed(
+                                messages: _chatMessages,
+                                currentUserId: _session.userId,
+                                displayNameForUserId: _chatDisplayNameForUser,
+                                accent: accent,
+                                onExpire: _dismissExpiredChatMessage,
+                                opacity: _chatFeedOpacity,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
                 // Status hint: collapsed when keyboard is open so the
                 // message feed gets more space above the keyboard.
-                if (!(viewingActiveGroup &&
-                    !_isCallMode &&
+                if (!(_isOnline &&
+                    viewingActiveGroup &&
                     !_isSessionConnecting))
                   AnimatedOpacity(
                     duration: const Duration(milliseconds: 180),
@@ -4356,7 +4342,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                                           : 'In a call — mic muted')
                                     : 'Tap to Talk')
                               : _isOnline
-                              ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
+                              ? 'connected to ${activeGroup?.name ?? 'another group'} • tap to nudge this group'
                               : showGoLive
                               ? 'Someone is live — tap Join? to join'
                               : !_serviceReady
@@ -4423,7 +4409,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           talkBusy: _talkBusy,
                           callMode: _isCallMode,
                           accent: accent,
-                          nudgeGroupId: groupAllOffline
+                          nudgeGroupId:
+                              (groupAllOffline ||
+                                  (_isOnline && !viewingActiveGroup))
                               ? focusedGroup?.groupId
                               : null,
                           goLiveGroupId: showGoLive
@@ -5850,7 +5838,10 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
           focused &&
           !widget.connecting &&
           !connectedToThisGroup &&
-          (widget.connectedGroupId != null || widget.nudgeGroupId == null),
+          // Direct join only when offline. While live elsewhere, the main
+          // button is nudge-only (no auto-switch into this group).
+          widget.connectedGroupId == null &&
+          widget.nudgeGroupId == null,
       talkActive: widget.talkActive && actuallySelected,
       talkBusy: widget.talkBusy,
       callMode: widget.callMode,
@@ -6098,9 +6089,8 @@ class _MainAvatarCircle extends StatelessWidget {
   final bool callMode;
   final Color accent;
 
-  /// True when the whole group is offline and this is the focused card —
-  /// the circle becomes a nudge trigger instead of join/talk, with member
-  /// photos dimmed and a subtle sleeping "Z" animation.
+  /// True when this focused card should open the nudge sheet (👋) instead of
+  /// join/talk — whole group offline, or live elsewhere viewing this group.
   final bool nudgeMode;
 
   /// True when an offline user can directly join an active LiveKit room.

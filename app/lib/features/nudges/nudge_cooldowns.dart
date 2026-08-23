@@ -9,7 +9,7 @@
 class NudgeCooldowns {
   NudgeCooldowns._();
 
-  static const Duration ring = Duration(seconds: 20);
+  static const Duration ring = Duration.zero;
   static const Duration voice = Duration(seconds: 60);
   static const Duration push = Duration(seconds: 10);
 
