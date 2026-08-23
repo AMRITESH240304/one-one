@@ -108,8 +108,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   // rather than the _NudgeStatus text widget.
   bool _showDeliveryBadges = false;
 
-  // Whether to show "Confirming if everyone received…" text during delivery wait.
-  // True for voice nudges only (ring skips step 2 per spec).
+  // Whether to show live delivery status text during the wait (voice/ring/push).
   bool _showConfirmingText = false;
 
   // Tracks what kind of nudge was last sent, used to decide which badges to show.
@@ -137,12 +136,22 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   final Stopwatch _voiceNudgeWatch = Stopwatch();
   bool _voiceConfirmationLogged = false;
   Timer? _deliveryTimeoutTimer;
+  Timer? _earlyFinalizeTimer;
   final Map<String, _PendingRecipient> _expectedRecipients = {};
   final Map<String, NudgeDeliveryResult> _resultsByUserId = {};
   final Map<String, NudgeRecipientReply> _repliesByUserId = {};
   MediaVolumeFeedback _rtdbVolumeFeedback = MediaVolumeFeedback.none;
 
-  static const _deliveryConfirmationTimeout = Duration(seconds: 12);
+  /// Hard cap on how long the sender waits for delivery acks after send.
+  static const _deliveryConfirmationTimeout = Duration(seconds: 4);
+  /// After the first genuine "played" ack, collect stragglers briefly then
+  /// finalize — avoids blocking on offline recipients for 4 seconds.
+  /// Resets on each new played result, so this is the idle gap after the
+  /// last confirmation, not a fixed window from the first.
+  static const _earlyFinalizeGrace = Duration(milliseconds: 1500);
+  /// Brief beat so single-recipient sends show "Started playing…" before the
+  /// final confirmed status replaces it in the same status pill.
+  static const _singleRecipientFinalizeGrace = Duration(milliseconds: 400);
 
   @override
   void initState() {
@@ -303,7 +312,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     _recordingTimer?.cancel();
     _recordingCapTimer?.cancel();
     _cooldownTicker?.cancel();
-    _deliveryTimeoutTimer?.cancel();
+    _cancelDeliveryWaitTimers();
     _autoDismissTimer?.cancel();
     unawaited(_deliverySub?.cancel());
     unawaited(_responseSub?.cancel());
@@ -452,16 +461,20 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     required List<_PendingRecipient> expected,
     required String waitingMessage,
   }) async {
-    // Load RTDB volume for badge fallback data — but do not surface volume
-    // warnings as text here; they appear as avatar badges after finalization.
-    final feedback = await _loadVolumeFeedback(expected);
-    if (!mounted) return;
-    _rtdbVolumeFeedback = feedback;
+    // Start the confirmation window and timer immediately — do NOT await
+    // _loadVolumeFeedback first (that RTDB call can take up to 2s and was
+    // delaying both the "Delivering…" text and the hard timeout start).
     _beginAwaitingDeliveryConfirmation(
       eventId,
       waitingMessage: waitingMessage,
       expected: expected,
     );
+    // Load volume feedback concurrently; only needed for avatar badges which
+    // appear after finalization, so latency here is not user-visible.
+    final feedback = await _loadVolumeFeedback(expected);
+    if (mounted && _awaitingEventId == eventId) {
+      _rtdbVolumeFeedback = feedback;
+    }
   }
 
   void _beginAwaitingDeliveryConfirmation(
@@ -477,7 +490,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           'expected=[${expected.map((e) => '${e.displayName}:${e.userId}').join(', ')}]',
       groupId: widget.group.groupId,
     );
-    _deliveryTimeoutTimer?.cancel();
+    _cancelDeliveryWaitTimers();
     _autoDismissTimer?.cancel();
     setState(() {
       _awaitingEventId = eventId;
@@ -569,17 +582,90 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     }
 
     _resultsByUserId[matchedId] = result;
+    _refreshInProgressDeliveryUi();
 
     final expectedCount = _expectedRecipients.isEmpty
         ? 1
         : _expectedRecipients.length;
     if (_resultsByUserId.length >= expectedCount) {
-      _deliveryTimeoutTimer?.cancel();
+      _cancelDeliveryWaitTimers();
       _finalizeDeliverySummary(timedOut: false);
+    } else if (result.played) {
+      _scheduleEarlyFinalizeAfterPlayed();
+      setState(() {});
     } else {
-      // Partial progress: trigger rebuild so in-flight badges update live.
       setState(() {});
     }
+  }
+
+  void _refreshInProgressDeliveryUi() {
+    if (_awaitingEventId == null || !_showConfirmingText) return;
+    _message = _buildInProgressDeliveryMessage();
+    _messageIsError = false;
+    _messageIsWarning = false;
+    _messagePending = true;
+  }
+
+  String _deliveryResultFirstName(NudgeDeliveryResult result) {
+    final full = result.recipientName?.trim();
+    if (full != null && full.isNotEmpty) {
+      return full.split(RegExp(r'\s+')).first;
+    }
+    final userId = result.recipientUserId;
+    if (userId != null) {
+      final pending = _expectedRecipients[userId];
+      if (pending != null) {
+        return pending.displayName.trim().split(RegExp(r'\s+')).first;
+      }
+    }
+    return 'Someone';
+  }
+
+  /// Live status line while awaiting acks — updates the moment playback starts
+  /// on a receiver, before the final per-person summary replaces it.
+  String _buildInProgressDeliveryMessage() {
+    final results = _resultsByUserId.values.toList(growable: false);
+    final played = results.where((r) => r.played).toList(growable: false);
+
+    if (played.isNotEmpty) {
+      final names = played.map(_deliveryResultFirstName).toList(growable: false);
+      if (_lastSentNudgeKind == NudgeKind.voice) {
+        if (names.length == 1) {
+          return 'Started playing on ${names.first}\'s device\u2026';
+        }
+        return 'Started playing for ${_joinNames(names)}\u2026';
+      }
+      if (names.length == 1) {
+        return '${names.first} received it\u2026';
+      }
+      return '${_joinNames(names)} received it\u2026';
+    }
+
+    return switch (_lastSentNudgeKind) {
+      NudgeKind.voice => 'Delivering voice nudge\u2026',
+      NudgeKind.ring => 'Delivering ring nudge\u2026',
+      NudgeKind.push => 'Delivering nudge\u2026',
+      null => 'Confirming if they received\u2026',
+    };
+  }
+
+  void _cancelDeliveryWaitTimers() {
+    _deliveryTimeoutTimer?.cancel();
+    _earlyFinalizeTimer?.cancel();
+  }
+
+  /// Voice/ring/push: once someone genuinely played, don't hold the sender on
+  /// "Confirming…" until every offline device times out.
+  void _scheduleEarlyFinalizeAfterPlayed() {
+    _earlyFinalizeTimer?.cancel();
+    final grace = _expectedRecipients.length <= 1
+        ? _singleRecipientFinalizeGrace
+        : _earlyFinalizeGrace;
+    _earlyFinalizeTimer = Timer(grace, () {
+      if (!mounted || _awaitingEventId == null) return;
+      _cancelDeliveryWaitTimers();
+      _finalizeDeliverySummary(timedOut: false);
+    });
   }
 
   void _onRecipientResponse(NudgeRecipientResponse response) {
@@ -863,7 +949,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       if (_lastSentNudgeKind == NudgeKind.push) {
         return 'Nudge received on ${name.trim().split(RegExp(r'\s+')).first}\u2019s device';
       }
-      return 'Nudge successfully playing on $name\u2019s device';
+      return 'Played on ${name.trim().split(RegExp(r'\s+')).first}\u2019s device';
     }
     return 'Everyone received the nudge \u2713';
   }
@@ -1052,7 +1138,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       ),
       kind: NudgeKind.ring,
       awaitsDeliveryConfirmation: true,
-      waitingMessage: 'Confirming if they received\u2026',
+      waitingMessage: 'Delivering ring nudge\u2026',
     );
   }
 
@@ -1071,7 +1157,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       ),
       kind: NudgeKind.push,
       awaitsDeliveryConfirmation: true,
-      waitingMessage: 'Confirming if they received\u2026',
+      waitingMessage: 'Delivering ring nudge\u2026',
     );
   }
 
@@ -1478,18 +1564,31 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         return;
       }
       final file = File(path);
+      // Overlap reading the M4A off disk with the upload-url reservation that
+      // was kicked off at record-start — avoids serializing on slow paths.
+      Uint8List audio;
       Map<String, dynamic>? initiatedUpload;
-      if (uploadReservation != null) {
-        try {
-          initiatedUpload = await uploadReservation;
-        } catch (_) {
-          initiatedUpload = null;
+      try {
+        if (uploadReservation != null) {
+          final parallel = await Future.wait<Object?>([
+            file.readAsBytes(),
+            uploadReservation,
+          ]);
+          audio = parallel.first as Uint8List;
+          if (parallel.length > 1 && parallel[1] is Map) {
+            initiatedUpload = parallel[1] as Map<String, dynamic>;
+          }
+        } else {
+          audio = await file.readAsBytes();
         }
+      } catch (_) {
+        audio = await file.readAsBytes();
+        initiatedUpload = null;
       }
       final response = await _repository.sendVoice(
         groupId: widget.group.groupId,
         target: _effectiveTarget(),
-        audio: await file.readAsBytes(),
+        audio: audio,
         durationMs: durationMs,
         initiatedUpload: initiatedUpload,
       );
@@ -1536,14 +1635,13 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           _elapsed = Duration.zero;
         });
         if (sent && voiceEventId != null && voiceEventId.isNotEmpty) {
-          // Voice nudge: show step 2 "Confirming if everyone received"
-          // then transition to avatar badges on finalization.
+          // Voice nudge: delivering → started playing → confirmed summary.
           _lastSentNudgeKind = NudgeKind.voice;
           _showConfirmingText = true;
           await _prepareDeliveryWait(
             eventId: voiceEventId,
             expected: _expectedRecipients.values.toList(growable: false),
-            waitingMessage: 'Confirming if everyone received\u2026',
+            waitingMessage: 'Delivering voice nudge\u2026',
           );
         } else if (sent) {
           await _showImmediateSendOutcome(

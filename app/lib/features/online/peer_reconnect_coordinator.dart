@@ -18,12 +18,15 @@ class PeerReconnectCoordinator {
   final void Function(String userId) onBackLive;
 
   final Map<String, Timer> _pendingLoss = {};
+  final Set<String> _lossConfirmed = {};
 
   void peerLeft(String userId) {
     if (userId.isEmpty) return;
     _pendingLoss[userId]?.cancel();
+    _lossConfirmed.remove(userId);
     _pendingLoss[userId] = Timer(window, () {
       _pendingLoss.remove(userId);
+      _lossConfirmed.add(userId);
       onLostConnection(userId);
     });
   }
@@ -31,10 +34,12 @@ class PeerReconnectCoordinator {
   bool peerJoined(String userId) {
     if (userId.isEmpty) return false;
     final pending = _pendingLoss.remove(userId);
-    if (pending == null) return false;
-    pending.cancel();
-    onBackLive(userId);
-    return true;
+    pending?.cancel();
+    if (_lossConfirmed.remove(userId)) {
+      onBackLive(userId);
+      return true;
+    }
+    return pending != null;
   }
 
   void clear() {
@@ -42,5 +47,6 @@ class PeerReconnectCoordinator {
       timer.cancel();
     }
     _pendingLoss.clear();
+    _lossConfirmed.clear();
   }
 }

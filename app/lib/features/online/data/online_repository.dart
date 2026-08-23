@@ -60,6 +60,14 @@ class OnlineRepository {
       startedAt: now,
     );
 
+    // Drop stale server-side onDisconnect handlers before writing a new
+    // session. Otherwise a prior connection's teardown can fire mid-handshake
+    // and flash the member away between goOnline and markLive.
+    await _cancelScheduledPresenceTeardown(
+      groupId: group.groupId,
+      userId: identity.userId,
+    );
+
     await _database.ref().update({
       'appServiceSessions/$serviceSessionId': {
         'groupId': group.groupId,
@@ -246,6 +254,45 @@ class OnlineRepository {
       // Best-effort — RTDB presence is already away; missing the push is
       // non-fatal (foreground snackbars still cover the same cases).
     }
+  }
+
+  /// Cancels any onDisconnect teardown queued for this member's current or
+  /// previous session handles so a fresh go-online is not interrupted.
+  Future<void> _cancelScheduledPresenceTeardown({
+    required String groupId,
+    required String userId,
+  }) async {
+    final availabilityRef = _database.ref(
+      'memberAvailability/$groupId/$userId',
+    );
+    final cancels = <Future<void>>[availabilityRef.onDisconnect().cancel()];
+    try {
+      final snapshot = await availabilityRef.get();
+      final value = snapshot.value;
+      if (value is Map) {
+        final serviceId = value['activeServiceSessionId']?.toString();
+        final livekitId = value['activeLivekitSessionId']?.toString();
+        if (serviceId != null && serviceId.isNotEmpty) {
+          cancels.add(
+            _database
+                .ref('appServiceSessions/$serviceId')
+                .onDisconnect()
+                .cancel(),
+          );
+        }
+        if (livekitId != null && livekitId.isNotEmpty) {
+          cancels.add(
+            _database
+                .ref('livekitSessions/$livekitId')
+                .onDisconnect()
+                .cancel(),
+          );
+        }
+      }
+    } catch (_) {
+      // Best-effort — the availability cancel above is the critical one.
+    }
+    await Future.wait(cancels);
   }
 
   Future<void> _scheduleAwayOnDisconnect(OnlineSession session) async {

@@ -21,10 +21,29 @@ void main() {
         async.elapse(const Duration(seconds: 20));
 
         expect(lost, isEmpty);
-        expect(back, ['friend']);
+        expect(back, isEmpty);
       });
     },
   );
+
+  test('shows back live only after a confirmed loss was shown', () {
+    fakeAsync((async) {
+      final lost = <String>[];
+      final back = <String>[];
+      final coordinator = PeerReconnectCoordinator(
+        window: const Duration(seconds: 15),
+        onLostConnection: lost.add,
+        onBackLive: back.add,
+      );
+
+      coordinator.peerLeft('friend');
+      async.elapse(const Duration(seconds: 15));
+      expect(lost, ['friend']);
+
+      expect(coordinator.peerJoined('friend'), isTrue);
+      expect(back, ['friend']);
+    });
+  });
 
   test('shows lost connection if the peer does not rejoin in time', () {
     fakeAsync((async) {
