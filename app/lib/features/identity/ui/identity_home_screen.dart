@@ -1306,10 +1306,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
     final next = queue.first;
-    if (_nudgeInbox.wasGroupAcceptedRecently(next.groupId)) {
-      await _autoAcceptRecentGroupNudge(next);
-      return;
-    }
+    // Always show accept/decline — never auto-accept from a prior accept in
+    // this group (ring/nudge position must stay an explicit choice).
     _promptRestoreGroupId ??= _selectedGroup?.groupId;
     await _focusGroupForIncomingNudge(next);
     if (!mounted) return;
@@ -1347,47 +1345,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       }
       unawaited(_presentIncomingNudgePrompt());
     });
-  }
-
-  Future<void> _autoAcceptRecentGroupNudge(ActiveNudge nudge) async {
-    if (_incomingPromptBusy || _nudgeActionInFlight) return;
-    final pending = _nudgeInbox.activeInGroup(nudge.groupId);
-    if (pending.isEmpty) return;
-
-    setState(() => _incomingPromptBusy = true);
-    try {
-      for (final event in pending) {
-        if (_processedNudgeEventIds.contains(event.nudgeId)) continue;
-        _processedNudgeEventIds.add(event.nudgeId);
-        unawaited(
-          _nudgeRepository.respond(
-            groupId: event.groupId,
-            eventId: event.nudgeId,
-            action: 'accept',
-          ),
-        );
-        unawaited(_nudgeActionBridge.dismissIncomingNudge(event.nudgeId));
-      }
-      await _nudgeInbox.markAllInGroup(
-        groupId: nudge.groupId,
-        status: ActiveNudgeStatus.accepted,
-      );
-      if (!_isViewingActiveGroup || !_isOnline) {
-        await _processNudgeAction(
-          NudgeNotificationAction(
-            action: 'accept',
-            eventId: nudge.nudgeId,
-            groupId: nudge.groupId,
-            senderUserId: nudge.senderId,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _incomingPromptBusy = false);
-      if (mounted) {
-        await _presentIncomingNudgePrompt(ignoreInFlight: true);
-      }
-    }
   }
 
   Future<void> _acceptIncomingNudge(ActiveNudge nudge) async {
@@ -2379,8 +2336,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       unawaited(_goAway());
       return;
     }
+    // Already live in another group — nudge this one instead of auto-switching.
+    // Switching voice rooms only happens after an explicit accept/connect.
     if (_isOnline) {
-      unawaited(_switchVoiceGroup());
+      _openNudges();
       return;
     }
     // If someone else is already online in this group, let the user join
@@ -4000,6 +3959,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         members: _displayMembers,
         accent: accentColorForKey(_session.settings.accentColorKey),
         onlineUserIds: onlineUserIds,
+        // LiveKit holds the hardware mic while unmuted / PTT — voice nudge
+        // recording cannot share it. Caller must mute first.
+        isLiveMicrophoneInUse: () =>
+            _isOnline && (_microphoneEnabled || _talkSession != null),
       ),
     );
   }
@@ -4459,7 +4422,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                                           : 'In a call — mic muted')
                                     : 'Tap to Talk')
                               : _isOnline
-                              ? 'connected to ${activeGroup?.name ?? 'another group'} • tap this group to join'
+                              ? 'connected to ${activeGroup?.name ?? 'another group'} • tap to nudge this group'
                               : showGoLive
                               ? 'Someone is live — tap Join? to join'
                               : !_serviceReady
@@ -4526,7 +4489,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           talkBusy: _talkBusy,
                           callMode: _isCallMode,
                           accent: accent,
-                          nudgeGroupId: groupAllOffline
+                          nudgeGroupId:
+                              (groupAllOffline ||
+                                  (_isOnline && !viewingActiveGroup))
                               ? focusedGroup?.groupId
                               : null,
                           goLiveGroupId: showGoLive
@@ -5953,7 +5918,10 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
           focused &&
           !widget.connecting &&
           !connectedToThisGroup &&
-          (widget.connectedGroupId != null || widget.nudgeGroupId == null),
+          // Direct join only when offline. While live elsewhere, the main
+          // button is nudge-only (no auto-switch into this group).
+          widget.connectedGroupId == null &&
+          widget.nudgeGroupId == null,
       talkActive: widget.talkActive && actuallySelected,
       talkBusy: widget.talkBusy,
       callMode: widget.callMode,
@@ -6201,9 +6169,8 @@ class _MainAvatarCircle extends StatelessWidget {
   final bool callMode;
   final Color accent;
 
-  /// True when the whole group is offline and this is the focused card —
-  /// the circle becomes a nudge trigger instead of join/talk, with member
-  /// photos dimmed and a subtle sleeping "Z" animation.
+  /// True when this focused card should open the nudge sheet (👋) instead of
+  /// join/talk — whole group offline, or live elsewhere viewing this group.
   final bool nudgeMode;
 
   /// True when an offline user can directly join an active LiveKit room.
