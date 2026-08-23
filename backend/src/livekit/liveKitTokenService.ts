@@ -1,5 +1,4 @@
 import { getRealtimeDatabase } from "../firebase/database.js";
-import { ParticipantInfo_State } from "livekit-server-sdk";
 import {
   requireActiveGroup,
   requireActiveGroupMember,
@@ -7,11 +6,7 @@ import {
   requireActiveUserDevice
 } from "../groups/groupService.js";
 import { HttpError } from "../http/httpError.js";
-import {
-  createLiveKitRoomServiceClient,
-  createLiveKitToken,
-  isLiveKitNotFound
-} from "./tokens.js";
+import { createLiveKitToken } from "./tokens.js";
 
 const tokenTtlSeconds = 60 * 60;
 
@@ -79,44 +74,6 @@ export async function issueGroupLiveKitToken(input: IssueGroupLiveKitTokenInput)
   };
 }
 
-export async function listLiveGroupParticipantUserIds(userId: string, groupId: string) {
-  const db = getRealtimeDatabase();
-  await requireActiveUser(userId);
-  const group = await requireActiveGroup(groupId);
-  await requireActiveGroupMember(groupId, userId);
-
-  const client = createLiveKitRoomServiceClient();
-  if (!client) {
-    throw new HttpError(503, "livekit_not_configured", "LiveKit is not configured.");
-  }
-
-  let identities: string[];
-  try {
-    const roomName = await requireActiveLiveKitRoomName(groupId, group.livekitRoomName);
-    identities = (await client.listParticipants(roomName))
-      .filter((participant) => participant.state === ParticipantInfo_State.ACTIVE)
-      .map((participant) => participant.identity);
-  } catch (error) {
-    if (isLiveKitNotFound(error)) return [];
-    throw error;
-  }
-
-  const members = (await db.ref(`groupMembers/${groupId}`).get()).val();
-  if (!isRecord(members)) return [];
-
-  return [
-    ...new Set(
-      identities
-        .map((identity) => userIdFromGroupParticipantIdentity(groupId, identity))
-        .filter((participantUserId): participantUserId is string => {
-          if (!participantUserId) return false;
-          const member = members[participantUserId];
-          return isRecord(member) && (member.memberState ?? "active") === "active";
-        })
-    )
-  ];
-}
-
 async function requireActiveLiveKitRoomName(groupId: string, fallback: string) {
   const snapshot = await getRealtimeDatabase().ref(`livekitRooms/${groupId}`).get();
   if (!snapshot.exists()) {
@@ -131,10 +88,6 @@ async function requireActiveLiveKitRoomName(groupId: string, fallback: string) {
 export function userIdFromGroupParticipantIdentity(groupId: string, identity: string) {
   const [identityGroupId, participantUserId, deviceId] = identity.split(":");
   return identityGroupId === groupId && participantUserId && deviceId ? participantUserId : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function nowSeconds() {

@@ -10,8 +10,7 @@ import {
 import { config } from "../config.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
-import { requireActiveGroup } from "../groups/groupService.js";
-import { listLiveGroupParticipantUserIds } from "../livekit/liveKitTokenService.js";
+import { listInVoiceSessionUserIds, requireActiveGroup } from "../groups/groupService.js";
 import { createAckTicket } from "./nudgeDeliveryService.js";
 import {
   createUploadTicket,
@@ -197,7 +196,7 @@ async function dispatchVoiceNudgeFromContext(ctx: {
   recipientDevices: RecipientDevice[];
 }) {
   const [liveParticipantUserIds, group, audioBytes] = await Promise.all([
-    listLiveGroupParticipantUserIds(ctx.senderUserId, ctx.groupId),
+    listInVoiceSessionUserIds(ctx.groupId),
     requireActiveGroup(ctx.groupId),
     verifyClientUploadedVoiceObject(ctx.eventId, ctx.storagePath)
   ]);
@@ -400,7 +399,7 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
   const now = nowSeconds();
   const [group, liveIds, suppressionSnapshot] = await Promise.all([
     requireActiveGroup(input.groupId),
-    listLiveGroupParticipantUserIds(input.senderUserId, input.groupId),
+    listInVoiceSessionUserIds(input.groupId),
     getRealtimeDatabase().ref(`ringSuppressions/${input.groupId}`).get()
   ]);
   const liveUserIds = new Set(liveIds);

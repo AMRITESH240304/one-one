@@ -678,6 +678,41 @@ export async function filterActiveAccountUserIds(userIds: string[]) {
   return active;
 }
 
+const inVoiceSessionStates = new Set([
+  "connecting",
+  "live",
+  "talking",
+  "listening",
+  "connected"
+]);
+
+/**
+ * User IDs currently in an active voice session for a group, read from RTDB
+ * `memberAvailability` presence. Mirrors the client's `isInVoiceSessionAt`
+ * check (desiredState online + effectiveState in a voice-session state + not
+ * stale), so no LiveKit server round-trip is needed.
+ */
+export async function listInVoiceSessionUserIds(groupId: string): Promise<string[]> {
+  const snapshot = await getRealtimeDatabase().ref(`memberAvailability/${groupId}`).get();
+  if (!snapshot.exists()) return [];
+
+  const value = snapshot.val();
+  if (!isRecord(value)) return [];
+
+  const now = nowSeconds();
+  const userIds: string[] = [];
+  for (const [userId, raw] of Object.entries(value)) {
+    if (!isRecord(raw)) continue;
+    if ((raw.desiredState ?? "away") !== "online") continue;
+    const staleAfterAt = readNumber(raw.staleAfterAt, 0);
+    if (staleAfterAt > 0 && staleAfterAt <= now) continue;
+    const effectiveState = String(raw.effectiveState ?? "");
+    if (!inVoiceSessionStates.has(effectiveState)) continue;
+    userIds.push(userId);
+  }
+  return userIds;
+}
+
 export async function requireActiveUser(userId: string) {
   const ref = getRealtimeDatabase().ref(`users/${userId}`);
   const snapshot = await ref.get();

@@ -1,7 +1,7 @@
 import express, { Router } from "express";
 import { z } from "zod";
 import { getRealtimeDatabase } from "../firebase/database.js";
-import { filterActiveAccountUserIds } from "../groups/groupService.js";
+import { filterActiveAccountUserIds, listInVoiceSessionUserIds } from "../groups/groupService.js";
 import { requireFirebaseAuth, type AuthenticatedRequest } from "../firebase/auth.js";
 import { asyncHandler } from "../http/asyncHandler.js";
 import {
@@ -16,7 +16,6 @@ import {
 import { maxVoiceNudgeBytes } from "../notifications/voiceNudgeValidation.js";
 import { respondToNudge } from "../notifications/nudgeResponseService.js";
 import { recordNudgeDelivery, verifyAckTicket } from "../notifications/nudgeDeliveryService.js";
-import { listLiveGroupParticipantUserIds } from "../livekit/liveKitTokenService.js";
 import {
   sendChatMessageNotification,
   sendFriendLiveNotification,
@@ -535,7 +534,7 @@ async function resolveFallbackRecipientUserIds(input: {
   // Account deletion removes users/{uid}; app uninstall does not.
   const activeUserIds = await filterActiveAccountUserIds(recipientUserIds);
   const liveUserIds = new Set(
-    await listLiveGroupParticipantUserIds(input.senderUserId, input.groupId)
+    await listInVoiceSessionUserIds(input.groupId)
   );
   return activeUserIds.filter((userId) => !liveUserIds.has(userId));
 }

@@ -151,8 +151,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   GroupSummary? _selectedGroup;
   StreamSubscription<DatabaseEvent>? _availabilitySubscription;
   Timer? _availabilityExpiryTimer;
-  Set<String> _liveKitParticipantUserIds = {};
-  int _liveKitPresenceRequestId = 0;
+  bool _hasAvailabilitySnapshot = false;
   StreamSubscription<DatabaseEvent>? _membersSubscription;
   StreamSubscription<DatabaseEvent>? _userGroupsSubscription;
   final List<StreamSubscription<DatabaseEvent>> _memberProfileSubscriptions =
@@ -192,8 +191,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   bool _liveSessionActiveOnBackground = false;
 
   final Set<String> _processedNudgeEventIds = {};
-  Set<String> _connectedLiveKitUserIds = {};
-  bool _participantJoinNotifiersReady = false;
 
   // Automatic-offline-on-disconnect (with grace period) bookkeeping. See
   // _evaluatePeerPresenceForAutoOffline for the state machine.
@@ -556,19 +553,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       try {
         unawaited(_refreshDeviceRegistration());
         unawaited(_reportMediaVolume());
-        final groupId = _selectedGroup?.groupId;
-        if (groupId != null) unawaited(_refreshLiveKitParticipants(groupId));
-        final room = _room;
-        if (_onlineSession != null && room != null) {
-          if (room.connectionState == ConnectionState.connected) {
-            _syncConnectedLiveKitUsers(room);
-            _syncPipSessionState();
-          } else if (room.connectionState == ConnectionState.disconnected) {
-            unawaited(
-              _handleConnectionLoss('Connection lost. You are now offline.'),
-            );
-          }
-        }
         // Notification Accept/Connect taps are queued natively and consumed
         // here. Opening the app by itself must not start a LiveKit session —
         // `_goOnline` still requires `_explicitJoinIntent`.
@@ -1500,7 +1484,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   void _listenToAvailability(String groupId) {
     unawaited(_availabilitySubscription?.cancel());
-    unawaited(_refreshLiveKitParticipants(groupId));
+    _hasAvailabilitySnapshot = false;
     _availabilitySubscription = AppDatabase.instance()
         .ref('memberAvailability/$groupId')
         .onValue
@@ -1518,42 +1502,39 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           }
 
           if (!mounted || _selectedGroup?.groupId != groupId) return;
-          final previousVoiceUserIds = _availability.entries
-              .where((entry) => entry.value.isInVoiceSession)
-              .map((entry) => entry.key)
-              .toSet();
-          final nextVoiceUserIds = next.entries
-              .where((entry) => entry.value.isInVoiceSession)
-              .map((entry) => entry.key)
-              .toSet();
-          setState(() => _availability = next);
-          if (previousVoiceUserIds.length != nextVoiceUserIds.length ||
-              !previousVoiceUserIds.containsAll(nextVoiceUserIds)) {
-            unawaited(_refreshLiveKitParticipants(groupId));
+          if (_hasAvailabilitySnapshot) {
+            final lostPeerIds = _availability.entries
+                .where(
+                  (entry) =>
+                      entry.key != _session.userId &&
+                      entry.value.isLive &&
+                      !(next[entry.key]?.isLive ?? false),
+                )
+                .map((entry) => entry.key)
+                .toList(growable: false);
+            final rejoinedPeerIds = next.entries
+                .where(
+                  (entry) =>
+                      entry.key != _session.userId &&
+                      entry.value.isLive &&
+                      !(_availability[entry.key]?.isLive ?? false),
+                )
+                .map((entry) => entry.key)
+                .toList(growable: false);
+            for (final userId in lostPeerIds) {
+              _peerReconnect.peerLeft(userId);
+            }
+            for (final userId in rejoinedPeerIds) {
+              _peerReconnect.peerJoined(userId);
+            }
           }
+          setState(() => _availability = next);
+          _hasAvailabilitySnapshot = true;
           _scheduleAvailabilityExpiryRefresh();
           if (_onlineSession?.groupId == groupId) {
-            _evaluatePeerPresenceForAutoOffline();
+            _evaluatePeerPresenceForAutoOffline(next);
           }
         });
-  }
-
-  Future<Set<String>> _refreshLiveKitParticipants(String groupId) async {
-    final requestId = ++_liveKitPresenceRequestId;
-    Set<String> userIds;
-    try {
-      userIds = await _onlineRepository.liveParticipantUserIds(groupId);
-    } catch (_) {
-      // Never promote cached/RTDB presence to live when LiveKit cannot verify it.
-      userIds = {};
-    }
-    if (!mounted ||
-        requestId != _liveKitPresenceRequestId ||
-        _selectedGroup?.groupId != groupId) {
-      return userIds;
-    }
-    setState(() => _liveKitParticipantUserIds = userIds);
-    return userIds;
   }
 
   /// Live-syncs the last [ChatMessageRepository.visibleLimit] chat bubbles
@@ -1874,7 +1855,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// The countdown only runs while we remain alone uninterrupted. Any other
   /// member rejoining — including still-connecting — cancels/resets it; a
   /// later drop back to one member starts a fresh minute.
-  void _evaluatePeerPresenceForAutoOffline() {
+  void _evaluatePeerPresenceForAutoOffline(
+    Map<String, MemberAvailability> availability,
+  ) {
     if (!_isOnline) {
       _peerWasLiveWithMe = false;
       _peerDisconnectGraceTimer?.cancel();
@@ -1882,7 +1865,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
 
-    final anyPeerInSession = _connectedLiveKitUserIds.isNotEmpty;
+    final anyPeerInSession = _anyOtherMemberInVoiceSession(availability);
 
     if (anyPeerInSession) {
       _peerWasLiveWithMe = true;
@@ -1904,12 +1887,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       if (!mounted || !_isOnline) return;
       // Re-check at fire time: a rejoin may have landed after the last
       // evaluation (or while this callback was already queued).
-      if (_connectedLiveKitUserIds.isNotEmpty) return;
+      if (_anyOtherMemberInVoiceSession(_availability)) return;
       unawaited(_goAway(reason: 'peer_left'));
       _showPresenceSnackbar(
         'The other participant has gone offline. You are now offline.',
       );
     });
+  }
+
+  bool _anyOtherMemberInVoiceSession(
+    Map<String, MemberAvailability> availability,
+  ) {
+    return availability.entries.any(
+      (entry) => entry.key != _session.userId && entry.value.isInVoiceSession,
+    );
   }
 
   /// Marks the last time voice activity was detected (local or remote) and
@@ -2091,7 +2082,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       // lone-member grace timer can start without waiting for another RTDB
       // write.
       if (_onlineSession != null) {
-        _evaluatePeerPresenceForAutoOffline();
+        _evaluatePeerPresenceForAutoOffline(_availability);
       }
       return;
     }
@@ -2102,10 +2093,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       () {
         if (!mounted) return;
         setState(() {});
-        final groupId = _selectedGroup?.groupId;
-        if (groupId != null) unawaited(_refreshLiveKitParticipants(groupId));
         if (_onlineSession != null) {
-          _evaluatePeerPresenceForAutoOffline();
+          _evaluatePeerPresenceForAutoOffline(_availability);
         }
         _scheduleAvailabilityExpiryRefresh();
       },
@@ -2119,9 +2108,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _selectedGroup = group;
       _members = cachedMembers ?? const [];
       _availability = {};
-      _liveKitParticipantUserIds = groupId == _onlineSession?.groupId
-          ? {..._connectedLiveKitUserIds, _session.userId}
-          : {};
       _chatMessages = const [];
       _chatFeedOpacity = 1;
       _chatVisibleAfterCreatedAt = 0;
@@ -2359,7 +2345,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // If someone else is already online in this group, let the user join
     // directly — no nudge required since the room is already active.
     if (_anyPeerOnline) {
-      unawaited(_joinLiveGroupIfStillActive());
+      unawaited(_goOnline(userIntent: true));
       return;
     }
     // Nobody is online yet — the room doesn't exist. Prompt the user to
@@ -2371,40 +2357,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   /// True when at least one other group member is actively online.
   bool get _anyPeerOnline {
-    return _liveKitParticipantUserIds.any(
-      (userId) => userId != _session.userId,
+    return _availability.entries.any(
+      (entry) => entry.key != _session.userId && entry.value.isLive,
     );
-  }
-
-  Future<void> _joinLiveGroupIfStillActive() async {
-    final group = _selectedGroup;
-    if (group == null || _busy) return;
-    setState(() {
-      _busy = true;
-      _state = 'connecting';
-      _message = null;
-    });
-    final userIds = await _refreshLiveKitParticipants(group.groupId);
-    if (!mounted) return;
-    if (_selectedGroup?.groupId != group.groupId) {
-      setState(() {
-        _busy = false;
-        _state = _isOnline ? 'live' : 'away';
-      });
-      return;
-    }
-    setState(() {
-      _busy = false;
-      _state = 'away';
-    });
-    if (!userIds.any((userId) => userId != _session.userId)) {
-      _showPresenceSnackbar(
-        'Nobody is live now. Send a nudge to go online together.',
-      );
-      return;
-    }
-    _showPresenceSnackbar('Someone is live — joining now.');
-    await _goOnline(userIntent: true);
   }
 
   Future<void> _goOnline({bool userIntent = false}) async {
@@ -2477,7 +2432,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final startInCallMode = _availability.entries.any(
       (entry) =>
           entry.key != _session.userId &&
-          _liveKitParticipantUserIds.contains(entry.key) &&
+          entry.value.isLive &&
           entry.value.isCallMode,
     );
     final startingConnectionMode = startInCallMode
@@ -2527,9 +2482,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _state = 'live';
         _message = LiveKitStatus.live;
       });
-      final room = _room;
-      if (room != null) _syncConnectedLiveKitUsers(room);
-      _participantJoinNotifiersReady = true;
       // Ensure remote emoji bursts reattach after going live (bootstrap may
       // have left a dead stream after a prior permission blip).
       _listenToEmojiBursts(group.groupId);
@@ -3329,23 +3281,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     });
   }
 
-  void _syncConnectedLiveKitUsers(Room room) {
-    final userIds = room.remoteParticipants.values
-        .map(
-          (participant) => _participantUserIdFromIdentity(participant.identity),
-        )
-        .whereType<String>()
-        .where((userId) => userId != _session.userId)
-        .toSet();
-    _connectedLiveKitUserIds = userIds;
-    _evaluatePeerPresenceForAutoOffline();
-    if (mounted && _selectedGroup?.groupId == _onlineSession?.groupId) {
-      setState(
-        () => _liveKitParticipantUserIds = {...userIds, _session.userId},
-      );
-    }
-  }
-
   void _updateParticipantConnectionQuality(
     Participant participant,
     ConnectionQuality quality,
@@ -3390,13 +3325,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             _logLocalParticipantPermissions(room);
           })
           ..on<RoomReconnectingEvent>((_) {
-            _participantJoinNotifiersReady = false;
             _setStateAndMessage('reconnecting', LiveKitStatus.reconnecting);
           })
           ..on<RoomReconnectedEvent>((_) {
             _syncConnectionQualities(room);
-            _syncConnectedLiveKitUsers(room);
-            _participantJoinNotifiersReady = true;
             _logLocalParticipantPermissions(room);
             // Reconnection can drop the local audio track — restore it based on
             // the current talk/call state so the participant never silently
@@ -3420,29 +3352,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               event.participant.identity,
             );
             if (userId != null && userId != _session.userId) {
-              final firstDevice = _connectedLiveKitUserIds.add(userId);
-              _evaluatePeerPresenceForAutoOffline();
-              final reconnected = _peerReconnect.peerJoined(userId);
-              if (mounted &&
-                  _selectedGroup?.groupId == _onlineSession?.groupId) {
-                setState(
-                  () => _liveKitParticipantUserIds = {
-                    ..._liveKitParticipantUserIds,
-                    userId,
-                  },
-                );
-              }
-              if (firstDevice &&
-                  !reconnected &&
-                  _participantJoinNotifiersReady) {
-                final name = _chatDisplayNameForUser(
-                  userId,
-                  event.participant.name.trim(),
-                );
-                _showPresenceSnackbar(
-                  '${name.isEmpty ? 'A participant' : name} joined',
-                );
-              }
+              _peerReconnect.peerJoined(userId);
             }
           })
           ..on<ParticipantDisconnectedEvent>((event) {
@@ -3450,24 +3360,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               event.participant.identity,
             );
             if (userId != null && userId != _session.userId) {
-              final stillConnected = room.remoteParticipants.values.any(
-                (participant) =>
-                    _participantUserIdFromIdentity(participant.identity) ==
-                    userId,
-              );
-              if (!stillConnected) {
-                _connectedLiveKitUserIds.remove(userId);
-                _evaluatePeerPresenceForAutoOffline();
-                _peerReconnect.peerLeft(userId);
-                if (mounted &&
-                    _selectedGroup?.groupId == _onlineSession?.groupId) {
-                  setState(
-                    () => _liveKitParticipantUserIds = {
-                      ..._liveKitParticipantUserIds.where((id) => id != userId),
-                    },
-                  );
-                }
-              }
+              _peerReconnect.peerLeft(userId);
             }
           })
           ..on<ParticipantConnectionQualityUpdatedEvent>((event) {
@@ -3735,8 +3628,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _hardwareAudioDeviceSubscription = null;
     _soloGuard?.detach();
     _soloGuard = null;
-    _connectedLiveKitUserIds = {};
-    _participantJoinNotifiersReady = false;
     _speakingUserIds = const {};
     _clearConnectionQualities();
     _callAudio.onSessionEnded();
@@ -3963,8 +3854,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // Sender-side warm: prefetch this device's LiveKit token now so that if
     // the nudge is accepted and both sides go online, joining is instant.
     unawaited(_prefetchLiveKit(group: group));
-    final onlineUserIds = {..._liveKitParticipantUserIds};
-    if (_isOnline) onlineUserIds.add(_session.userId);
+    final onlineUserIds = <String>{
+      for (final entry in _availability.entries)
+        if (entry.value.isLive || entry.value.isInVoiceSession) entry.key,
+      if (_isOnline) _session.userId,
+    };
     unawaited(
       showNudgeBottomSheet(
         context,
@@ -4254,12 +4148,14 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     // whether the call-mode controls render at all.
     final friends = _friends;
     final anyFriendOnline = friends.any(
-      (friend) => _liveKitParticipantUserIds.contains(friend.userId),
+      (friend) =>
+          (_availability[friend.userId] ?? MemberAvailability.away).isLive,
     );
     final allFriendsOnline =
         friends.isNotEmpty &&
         friends.every(
-          (friend) => _liveKitParticipantUserIds.contains(friend.userId),
+          (friend) =>
+              (_availability[friend.userId] ?? MemberAvailability.away).isLive,
         );
     final groupAllOffline = !live && !anyFriendOnline;
     final groupAllOnline = live && allFriendsOnline;
@@ -4268,7 +4164,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final showGoLive = !_isOnline && anyFriendOnline;
     final liveAvailability = <String, MemberAvailability>{
       for (final friend in friends)
-        friend.userId: _liveKitParticipantUserIds.contains(friend.userId)
+        friend.userId: (_availability[friend.userId] ?? MemberAvailability.away)
+                .isLive
             ? MemberAvailability(
                 desiredState: 'online',
                 effectiveState: _speakingUserIds.contains(friend.userId)
@@ -4279,7 +4176,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     _availability[friend.userId]?.connectionMode ??
                     MemberAvailability.walkieTalkieMode,
               )
-            : MemberAvailability.away,
+            : (_availability[friend.userId] ?? MemberAvailability.away),
     };
     // Offline chips ↔ online emoji bar, and fade past bubbles on go-live.
     _syncChatVisibilityForOnlineState(anyMemberOnline);
