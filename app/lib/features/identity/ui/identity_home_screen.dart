@@ -221,6 +221,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   bool _loadingGroups = true;
   bool _busy = false;
+  /// Sync lock so concurrent auto-connect paths (FCM accept + native pending
+  /// action) cannot both run [goOnline] and flash live→connecting→live.
+  bool _goOnlineInFlight = false;
   bool _audioOutputBusy = false;
   bool _audioMuteBusy = false;
   bool _microphoneMutedByUser = false;
@@ -1022,6 +1025,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       );
       return;
     }
+    // Mark before awaiting goOnline so a parallel FCM/native path with the
+    // same eventId cannot start a second connect mid-handshake.
+    _processedNudgeEventIds.add(action.eventId);
     // [DEBUG] Go-live latency tracing added Aug 12. Remove before production
     // release.
     final step2StartedAt = _goLiveStepStart(
@@ -1053,10 +1059,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
     if (!mounted) return;
     if (!_isOnline) {
+      _processedNudgeEventIds.remove(action.eventId);
       _explicitJoinIntent = false;
       throw StateError('Could not enter the nudge group.');
     }
-    _processedNudgeEventIds.add(action.eventId);
     // Entered (or is entering) via nudge — remember so a later
     // single-user-in-room bug report can explain how it occurred.
     _enteredViaNudge = true;
@@ -1154,7 +1160,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Future<void> _connectSenderAfterNudgeAccept(
     NudgeRecipientResponse response,
   ) async {
-    if (_nudgeActionInFlight) return;
+    if (_nudgeActionInFlight || _goOnlineInFlight || _isOnline) return;
     if (_processedNudgeEventIds.contains(response.eventId)) return;
     final action = NudgeNotificationAction(
       action: 'connect',
@@ -2444,6 +2450,20 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       );
       return;
     }
+    // Must be sync (not just `_busy` from a later setState) — accept FCM and
+    // native pending-connect can both enter here within the same event loop
+    // turn and otherwise each write a new session (live → connecting → live).
+    if (_goOnlineInFlight || _busy) {
+      LogManager.log(
+        LogLevel.info,
+        'PresenceRing',
+        'goOnline skipped — already in flight '
+            '(inFlight=$_goOnlineInFlight busy=$_busy isOnline=$_isOnline)',
+        userId: _session.userId,
+        groupId: _selectedGroup?.groupId,
+      );
+      return;
+    }
     _explicitJoinIntent = true;
     // Going online resets the nudge-origin marker; the nudge path re-asserts
     // it after a successful connect so manual joins are never mislabeled.
@@ -2464,6 +2484,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
 
+    _goOnlineInFlight = true;
     setState(() {
       _busy = true;
       _state = 'connecting';
@@ -2482,6 +2503,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
     if (_todayOnlineSeconds >= PresenceConfig.dailyUsageCap.inSeconds) {
       _explicitJoinIntent = false;
+      _goOnlineInFlight = false;
       if (!mounted) return;
       unawaited(
         AnalyticsService.logDailyUsageCapReached(groupId: group.groupId),
@@ -2613,6 +2635,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         _message = LiveKitStatus.sanitizeError(error);
       });
     } finally {
+      _goOnlineInFlight = false;
       if (mounted) {
         setState(() => _busy = false);
       }
