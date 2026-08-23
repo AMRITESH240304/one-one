@@ -196,15 +196,16 @@ async function dispatchVoiceNudgeFromContext(ctx: {
   recipientUserIds: string[];
   recipientDevices: RecipientDevice[];
 }) {
-  const liveUserIds = new Set(
-    await listLiveGroupParticipantUserIds(ctx.senderUserId, ctx.groupId)
-  );
+  const [liveParticipantUserIds, group, audioBytes] = await Promise.all([
+    listLiveGroupParticipantUserIds(ctx.senderUserId, ctx.groupId),
+    requireActiveGroup(ctx.groupId),
+    verifyClientUploadedVoiceObject(ctx.eventId, ctx.storagePath)
+  ]);
+  const liveUserIds = new Set(liveParticipantUserIds);
   const recipientDevices = ctx.recipientDevices.filter(
     (device) => device.userId !== ctx.senderUserId && !liveUserIds.has(device.userId)
   );
   const recipientUserIds = [...new Set(recipientDevices.map((device) => device.userId))];
-  const group = await requireActiveGroup(ctx.groupId);
-  const audioBytes = await verifyClientUploadedVoiceObject(ctx.eventId, ctx.storagePath);
 
   logger.info(
     {
