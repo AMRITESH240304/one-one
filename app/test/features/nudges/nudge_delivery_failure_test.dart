@@ -5,48 +5,24 @@ import 'package:one_one_app/features/nudges/nudge_status_memory.dart';
 
 void main() {
   group('NudgeDeliveryFailure', () {
-    test('classifies receiver-side permission and policy failures', () {
-      for (final reason in [
-        'permission_denied_notifications',
+    test('normalizes delivery failure reasons', () {
+      expect(
+        NudgeDeliveryFailure.canonicalReason('permission_denied_foreground_service'),
         'background_fg_service_blocked',
-        'permission_denied_foreground_service',
-        'timeout',
-        'fcm_not_delivered',
-        'app_force_stopped',
-      ]) {
-        expect(
-          NudgeDeliveryFailure.isReceiverDeviceBlocked(reason),
-          isTrue,
-          reason: reason,
-        );
-      }
-    });
-
-    test('classifies Duo-side playback failures', () {
-      for (final reason in [
-        'playback_error',
-        'playback_service_start_error',
-        'download_error',
-        'download_failed',
-      ]) {
-        final result = NudgeDeliveryResult(
-          eventId: 'evt',
-          status: 'failed',
-          reason: reason,
-        );
-        expect(result.isReceiverDeviceBlocked, isFalse, reason: reason);
-        expect(result.isDuoBug, isTrue, reason: reason);
-      }
-    });
-
-    test('timeout on device is a lock, not a Duo bug', () {
-      const result = NudgeDeliveryResult(
-        eventId: 'evt',
-        status: 'failed',
-        reason: 'timeout',
       );
-      expect(result.isReceiverDeviceBlocked, isTrue);
-      expect(result.isDuoBug, isFalse);
+      expect(
+        NudgeDeliveryFailure.canonicalReason('download_error'),
+        'download_failed',
+      );
+      expect(
+        NudgeDeliveryFailure.canonicalReason('playback_service_start_error'),
+        'playback_error',
+      );
+      expect(
+        NudgeDeliveryFailure.canonicalReason('playback_error'),
+        'playback_error',
+      );
+      expect(NudgeDeliveryFailure.canonicalReason(null), isNull);
     });
   });
 
@@ -62,7 +38,7 @@ void main() {
       memory.clear('group-a');
     });
 
-    test('reopen keeps lock when deviceBlocked + failureReason are stored', () {
+    test('reopen keeps failureReason for failed recipients', () {
       memory.record(
         'group-a',
         LastNudgeState(
@@ -76,14 +52,12 @@ void main() {
               userId: 'u1',
               displayName: 'Ada',
               failed: true,
-              deviceBlocked: true,
               failureReason: 'battery_optimization_active',
             ),
             LastNudgeRecipientSignifier(
               userId: 'u2',
               displayName: 'Bob',
               failed: true,
-              deviceBlocked: false,
               failureReason: 'playback_error',
             ),
           ],
@@ -91,25 +65,8 @@ void main() {
       );
 
       final restored = memory.forGroup('group-a')!;
-      expect(restored.signifiers[0].deviceBlocked, isTrue);
       expect(restored.signifiers[0].failureReason, 'battery_optimization_active');
-      expect(restored.signifiers[1].deviceBlocked, isFalse);
       expect(restored.signifiers[1].failureReason, 'playback_error');
-
-      // Mimic sheet restore classification.
-      final lockResult = NudgeDeliveryResult(
-        eventId: restored.eventId,
-        status: 'failed',
-        reason: restored.signifiers[0].failureReason,
-      );
-      final skullResult = NudgeDeliveryResult(
-        eventId: restored.eventId,
-        status: 'failed',
-        reason: restored.signifiers[1].failureReason,
-      );
-      expect(lockResult.isReceiverDeviceBlocked, isTrue);
-      expect(skullResult.isReceiverDeviceBlocked, isFalse);
-      expect(skullResult.isDuoBug, isTrue);
     });
 
     test('decline with newer eventId still updates same group', () {
@@ -140,7 +97,7 @@ void main() {
       );
     });
 
-    test('decline/snooze reply preserves deviceBlocked', () {
+    test('decline/snooze reply preserves failureReason', () {
       memory.record(
         'group-a',
         LastNudgeState(
@@ -154,7 +111,6 @@ void main() {
               userId: 'u1',
               displayName: 'Ada',
               failed: true,
-              deviceBlocked: true,
               failureReason: 'timeout',
             ),
           ],
@@ -172,13 +128,9 @@ void main() {
 
       final signifier = memory.forGroup('group-a')!.signifiers.single;
       expect(signifier.reply, NudgeRecipientReply.declined);
-      expect(signifier.deviceBlocked, isTrue);
       expect(signifier.failureReason, 'timeout');
       expect(signifier.failed, isTrue);
-      expect(
-        memory.forGroup('group-a')!.message,
-        contains('Duo may be closed or restricted'),
-      );
+      expect(memory.forGroup('group-a')!.message, 'Ada declined');
     });
   });
 }

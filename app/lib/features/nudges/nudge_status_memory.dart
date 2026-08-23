@@ -12,7 +12,6 @@ class LastNudgeRecipientSignifier {
     required this.failed,
     this.band,
     this.reply,
-    this.deviceBlocked = false,
     this.failureReason,
   });
 
@@ -20,13 +19,9 @@ class LastNudgeRecipientSignifier {
   final String displayName;
   final bool failed;
 
-  /// When [failed] is true, whether the recipient's own device/OS blocked
-  /// delivery (lock signifier) vs a Duo-side failure (skull signifier).
-  final bool deviceBlocked;
-
   /// Machine-readable delivery failure reason (e.g. `timeout`,
-  /// `playback_error`). Preserved so reopen restores the same lock/skull
-  /// classification instead of collapsing to a synthetic reason.
+  /// `playback_error`). Preserved so reopen restores the same failure
+  /// summary instead of collapsing to a synthetic reason.
   final String? failureReason;
   final MediaVolumeBand? band;
 
@@ -38,7 +33,6 @@ class LastNudgeRecipientSignifier {
     String? userId,
     String? displayName,
     bool? failed,
-    bool? deviceBlocked,
     String? failureReason,
     MediaVolumeBand? band,
     NudgeRecipientReply? reply,
@@ -48,7 +42,6 @@ class LastNudgeRecipientSignifier {
       userId: userId ?? this.userId,
       displayName: displayName ?? this.displayName,
       failed: failed ?? this.failed,
-      deviceBlocked: deviceBlocked ?? this.deviceBlocked,
       failureReason: failureReason ?? this.failureReason,
       band: band ?? this.band,
       reply: clearReply ? null : (reply ?? this.reply),
@@ -185,16 +178,10 @@ class NudgeStatusMemory {
         : LastNudgeStatus.snoozed;
 
     final signifiers = <LastNudgeRecipientSignifier>[
-      ...(existing?.signifiers ?? const []),
+      ...existing.signifiers,
     ];
     final index = signifiers.indexWhere((s) => s.userId == responderUserId);
     final prior = index >= 0 ? signifiers[index] : null;
-
-    // Preserve lock/skull classification across decline/snooze so reopen
-    // cannot flip icons. If delivery was device-blocked, keep that reason
-    // in the sender-facing status line too.
-    final blockHint = _senderFacingBlockHint(prior);
-    final message = blockHint == null ? replyLabel : '$replyLabel — $blockHint';
 
     final updated = LastNudgeRecipientSignifier(
       userId: responderUserId,
@@ -202,7 +189,6 @@ class NudgeStatusMemory {
           ? (prior?.displayName ?? 'Friend')
           : responderName.trim(),
       failed: prior?.failed ?? false,
-      deviceBlocked: prior?.deviceBlocked ?? false,
       failureReason: prior?.failureReason,
       band: prior?.band,
       reply: reply,
@@ -218,34 +204,13 @@ class NudgeStatusMemory {
       LastNudgeState(
         eventId: eventId,
         status: status,
-        message: message,
+        message: replyLabel,
         at: DateTime.now(),
-        kind: existing?.kind,
+        kind: existing.kind,
         signifiers: signifiers,
       ),
     );
     return true;
-  }
-
-  /// Short sender-facing hint when a prior delivery failure was device-blocked.
-  static String? _senderFacingBlockHint(LastNudgeRecipientSignifier? prior) {
-    if (prior == null || !prior.failed || !prior.deviceBlocked) return null;
-    final reason = prior.failureReason?.trim();
-    if (reason == null || reason.isEmpty) {
-      return 'their phone blocked delivery';
-    }
-    return switch (reason) {
-      'permission_denied_notifications' =>
-        'notifications are off on their phone',
-      'permission_denied_microphone' => 'microphone access is blocked',
-      'background_fg_service_blocked' ||
-      'permission_denied_foreground_service' =>
-        'their phone blocked background playback',
-      'battery_optimization_active' => 'battery restrictions may be blocking Duo',
-      'fcm_not_delivered' || 'app_force_stopped' || 'timeout' =>
-        'Duo may be closed or restricted on their phone',
-      _ => 'their phone blocked delivery',
-    };
   }
 
   static String _firstName(String displayName) {
