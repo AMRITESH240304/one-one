@@ -104,11 +104,16 @@ class VoiceSessionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        intent?.getStringExtra(EXTRA_SERVICE_SESSION_ID)?.takeIf { it.isNotBlank() }
+            ?.let { capturedSessionId = it }
         DeviceLog.init(this)
         val inBackground = DeviceLog.wasAppInBackground()
         DeviceLog.info(
-            "VoiceSessionService",
-            "onStartCommand called flags=$flags startId=$startId " +
+            "PresenceRing",
+            "VoiceSessionService.onStartCommand " +
+                "capturedSuffix=${capturedSessionId?.takeLast(6) ?: "none"} " +
+                "storedSuffix=${ActiveVoiceSessionStore.readServiceSessionId(this)?.takeLast(6) ?: "none"} " +
+                "flags=$flags startId=$startId " +
                 "sdk=${Build.VERSION.SDK_INT} background=$inBackground",
         )
         // On Android 14+ (and especially 15/16), the "microphone" foreground
@@ -189,21 +194,42 @@ class VoiceSessionService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         DeviceLog.info(
-            "VoiceSessionService",
-            "task removed — requesting LiveKit disconnect and presence cleanup",
+            "PresenceRing",
+            "VoiceSessionService.onTaskRemoved capturedSuffix=${capturedSessionId?.takeLast(6) ?: "none"}",
         )
-        VoiceSessionTeardownDispatcher.requestTeardown()
-        ActiveVoiceSessionStore.markAwayBestEffort(this, capturedSessionId)
+        if (shouldRunSessionCleanup()) {
+            VoiceSessionTeardownDispatcher.requestTeardown()
+            ActiveVoiceSessionStore.markAwayBestEffort(this, capturedSessionId)
+        } else {
+            DeviceLog.warn(
+                "PresenceRing",
+                "VoiceSessionService.onTaskRemoved skipped teardown — session superseded",
+            )
+        }
         stopSelf()
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
-        DeviceLog.info("VoiceSessionService", "service stopped")
-        VoiceSessionTeardownDispatcher.requestTeardown()
-        ActiveVoiceSessionStore.markAwayBestEffort(this, capturedSessionId)
+        DeviceLog.info(
+            "PresenceRing",
+            "VoiceSessionService.onDestroy capturedSuffix=${capturedSessionId?.takeLast(6) ?: "none"}",
+        )
+        if (shouldRunSessionCleanup()) {
+            VoiceSessionTeardownDispatcher.requestTeardown()
+            ActiveVoiceSessionStore.markAwayBestEffort(this, capturedSessionId)
+        } else {
+            DeviceLog.warn(
+                "PresenceRing",
+                "VoiceSessionService.onDestroy skipped teardown — session superseded",
+            )
+        }
         super.onDestroy()
     }
+
+    /** Only tear down when this service instance still owns the stored session. */
+    private fun shouldRunSessionCleanup(): Boolean =
+        ActiveVoiceSessionStore.sessionStillOwned(this, capturedSessionId)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -235,8 +261,9 @@ class VoiceSessionService : Service() {
     companion object {
         private const val channelId = "active_voice_session"
         private const val notificationId = 7012
+        const val EXTRA_SERVICE_SESSION_ID = "serviceSessionId"
 
-        fun start(context: Context) {
+        fun start(context: Context, serviceSessionId: String? = null) {
             // B1: Guard against starting a "microphone" foreground service when
             // RECORD_AUDIO isn't granted at runtime (API 34+ requires it). When
             // the app is in the background we fall back to "mediaPlayback" (see
@@ -258,6 +285,9 @@ class VoiceSessionService : Service() {
                 }
             }
             val intent = Intent(context, VoiceSessionService::class.java)
+            if (!serviceSessionId.isNullOrBlank()) {
+                intent.putExtra(EXTRA_SERVICE_SESSION_ID, serviceSessionId)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {

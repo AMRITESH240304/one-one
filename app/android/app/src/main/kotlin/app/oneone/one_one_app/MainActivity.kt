@@ -220,8 +220,9 @@ class MainActivity : FlutterFragmentActivity() {
                     } else {
                         ActiveVoiceSessionStore.clear(this)
                     }
+                    val serviceSessionId = arguments?.get("serviceSessionId")?.toString()
                     if (voiceSessionActive && !wasActive) {
-                        VoiceSessionService.start(this)
+                        VoiceSessionService.start(this, serviceSessionId)
                     } else if (!voiceSessionActive && wasActive) {
                         VoiceSessionService.stop(this)
                     }

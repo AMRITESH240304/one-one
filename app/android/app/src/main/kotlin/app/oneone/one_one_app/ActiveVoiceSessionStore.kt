@@ -38,14 +38,24 @@ object ActiveVoiceSessionStore {
             .putString(deviceIdKey, deviceId ?: "")
             .putString(serviceSessionIdKey, serviceSessionId)
             .putString(livekitSessionIdKey, livekitSessionId)
-            .apply()
+            .commit()
+        DeviceLog.info(
+            "PresenceRing",
+            "ActiveVoiceSessionStore.save sessionSuffix=${serviceSessionId.takeLast(6)} " +
+                "groupId=$groupId userId=$userId",
+        )
     }
 
     fun clear(context: Context) {
+        val previous = readServiceSessionId(context)
         context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             .edit()
             .clear()
-            .apply()
+            .commit()
+        DeviceLog.info(
+            "PresenceRing",
+            "ActiveVoiceSessionStore.clear previousSessionSuffix=${previous?.takeLast(6) ?: "none"}",
+        )
     }
 
     /** Returns the serviceSessionId currently stored, or null if none. Used by
@@ -66,7 +76,30 @@ object ActiveVoiceSessionStore {
      * finishes shutting down — without this check, the service's [onDestroy]
      * would overwrite the live new session with away.
      */
+    /**
+     * True when [serviceSessionId] is still the session this service instance
+     * was started for. When false, an old [VoiceSessionService] is shutting
+     * down after Flutter already saved a newer live session — it must not write
+     * away or ask Dart to tear down the new session.
+     */
+    fun sessionStillOwned(
+        context: Context,
+        serviceSessionId: String?,
+    ): Boolean {
+        if (serviceSessionId.isNullOrBlank()) return false
+        val current = readServiceSessionId(context) ?: return true
+        return current == serviceSessionId
+    }
+
     fun markAwayBestEffort(context: Context, capturedSessionId: String? = null) {
+        if (capturedSessionId.isNullOrBlank()) {
+            DeviceLog.warn(
+                "PresenceRing",
+                "markAwayBestEffort skipped — no captured session id on this service instance",
+            )
+            return
+        }
+
         val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         val groupId = prefs.getString(groupIdKey, null)?.takeIf { it.isNotBlank() } ?: return
         val userId = prefs.getString(userIdKey, null)?.takeIf { it.isNotBlank() } ?: return
@@ -75,13 +108,10 @@ object ActiveVoiceSessionStore {
         val livekitSessionId =
             prefs.getString(livekitSessionIdKey, null)?.takeIf { it.isNotBlank() } ?: return
 
-        // If the service was started for a specific session, refuse to write
-        // away if a newer session has been saved since (Flutter reconnected
-        // before this service instance finished shutting down).
-        if (capturedSessionId != null && capturedSessionId != serviceSessionId) {
+        if (!sessionStillOwned(context, capturedSessionId)) {
             DeviceLog.warn(
-                "VoiceSessionService",
-                "markAwayBestEffort skipped — session changed since service started " +
+                "PresenceRing",
+                "markAwayBestEffort skipped — session superseded " +
                     "capturedSuffix=${capturedSessionId.takeLast(6)} " +
                     "currentSuffix=${serviceSessionId.takeLast(6)}",
             )
@@ -121,8 +151,9 @@ object ActiveVoiceSessionStore {
                 .reference
                 .updateChildren(updates)
             DeviceLog.info(
-                "VoiceSessionService",
-                "Queued RTDB away write after process teardown groupId=$groupId",
+                "PresenceRing",
+                "markAwayBestEffort RTDB away write " +
+                    "sessionSuffix=${serviceSessionId.takeLast(6)} groupId=$groupId",
             )
         } catch (error: Exception) {
             DeviceLog.warn(

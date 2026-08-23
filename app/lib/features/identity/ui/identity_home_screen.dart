@@ -618,6 +618,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   }
 
   void _syncPipSessionState() {
+    final session = _onlineSession;
+    LogManager.log(
+      LogLevel.info,
+      'PresenceRing',
+      'syncPipSessionState active=${session != null} '
+          'sessionSuffix=${session == null ? "none" : session.serviceSessionId.substring(session.serviceSessionId.length - 6)} '
+          'state=$_state',
+      userId: _session.userId,
+      groupId: session?.groupId ?? _selectedGroup?.groupId,
+    );
     unawaited(
       _voicePipBridge.setSessionState(
         active: _onlineSession != null,
@@ -1516,6 +1526,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           }
 
           if (!mounted || _selectedGroup?.groupId != groupId) return;
+          _logFriendRingTransitions(groupId: groupId, next: next, raw: value);
           if (_hasAvailabilitySnapshot) {
             final lostPeerIds = _availability.entries
                 .where(
@@ -1549,6 +1560,52 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             _evaluatePeerPresenceForAutoOffline(next);
           }
         });
+  }
+
+  /// Logs green-ring (isLive) transitions for friends on the home strip.
+  void _logFriendRingTransitions({
+    required String groupId,
+    required Map<String, MemberAvailability> next,
+    required Object? raw,
+  }) {
+    final rawByUserId = <String, Map<Object?, Object?>>{};
+    if (raw is Map<Object?, Object?>) {
+      for (final entry in raw.entries) {
+        final value = entry.value;
+        if (value is Map<Object?, Object?>) {
+          rawByUserId[entry.key.toString()] = value;
+        }
+      }
+    }
+
+    for (final friend in _friends) {
+      final userId = friend.userId;
+      final prevLive =
+          (_availability[userId] ?? MemberAvailability.away).isLive;
+      final nextAvail = next[userId] ?? MemberAvailability.away;
+      final nextLive = nextAvail.isLive;
+      if (!_hasAvailabilitySnapshot || prevLive == nextLive) continue;
+
+      final rawEntry = rawByUserId[userId];
+      final activeSessionId = rawEntry?['activeServiceSessionId']?.toString();
+      final sessionSuffix = activeSessionId == null || activeSessionId.isEmpty
+          ? 'none'
+          : activeSessionId.length <= 6
+          ? activeSessionId
+          : activeSessionId.substring(activeSessionId.length - 6);
+
+      LogManager.log(
+        LogLevel.info,
+        'PresenceRing',
+        'UI ring ${prevLive ? "live" : "grey"} -> ${nextLive ? "live" : "grey"} '
+            'peer=${friend.displayName} userId=$userId '
+            'effective=${nextAvail.effectiveState} desired=${nextAvail.desiredState} '
+            'canAudio=${nextAvail.canReceiveLiveAudio} sessionSuffix=$sessionSuffix '
+            'localOnline=$_isOnline localState=$_state',
+        userId: _session.userId,
+        groupId: groupId,
+      );
+    }
   }
 
   /// Live-syncs the last [ChatMessageRepository.visibleLimit] chat bubbles
@@ -3697,6 +3754,15 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _usagePersistTimer = null;
     _onlineSession = null;
     _talkSession = null;
+    if (session != null) {
+      LogManager.log(
+        LogLevel.warn,
+        'PresenceRing',
+        'processTeardown goAway sessionSuffix=${session.serviceSessionId.substring(session.serviceSessionId.length - 6)}',
+        userId: _session.userId,
+        groupId: session.groupId,
+      );
+    }
     LogManager.log(
       LogLevel.warn,
       'LiveKitManager',
