@@ -266,6 +266,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   StreamSubscription<void>? _processTeardownSubscription;
   late final PeerReconnectCoordinator _peerReconnect;
   bool _inPictureInPicture = false;
+  /// True when another route (settings, group action, etc.) covers home.
+  bool _routeCovered = false;
   String? _preferredGroupId;
 
   @override
@@ -433,17 +435,28 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   void didPush() => _showPipOverlayIfLive();
 
   @override
-  void didPopNext() => _showPipOverlayIfLive();
+  void didPopNext() {
+    _routeCovered = false;
+    _showPipOverlayIfLive();
+  }
 
   /// Another route was pushed on top of home — show PiP if currently live.
   @override
-  void didPushNext() => _showPipOverlayIfLive();
+  void didPushNext() {
+    _routeCovered = true;
+    _showPipOverlayIfLive();
+  }
 
   // ── In-app PiP overlay helpers ───────────────────────────────────────────
 
-  /// Keep the floating live-session control available on every relevant route.
+  /// Keep the floating live-session control available when live but not already
+  /// on the active group's home screen (PiP is for returning from other routes).
   void _showPipOverlayIfLive() {
     if (!_isOnline) return;
+    if (_isViewingActiveGroup && !_routeCovered) {
+      _hidePipOverlay();
+      return;
+    }
     LiveSessionOverlayController.instance.setSession(
       LiveSessionOverlayData(
         member: _localLiveMember,
@@ -2125,6 +2138,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     _listenToAvailability(group.groupId);
     _listenToChatMessages(group.groupId);
     _listenToEmojiBursts(group.groupId);
+    _showPipOverlayIfLive();
   }
 
   Future<void> _onGroupCarouselChanged(int index) async {
@@ -4356,7 +4370,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     ),
                   ),
                 ],
-                if (_message != null) ...[
+                if (_message != null &&
+                    !(_isOnline && viewingActiveGroup)) ...[
                   SizedBox(height: 10.h),
                   Padding(
                     padding: EdgeInsets.symmetric(horizontal: 24.w),
@@ -4372,33 +4387,41 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 // Middle band: ephemeral bubbles sit here (own=right,
                 // others=left). Empty Expanded keeps layout stable so
                 // the feed doesn't jump the carousel when it appears.
-                // Align to bottom so bubbles sit lower (near the status
-                // hint) instead of floating mid-screen. Clip overflow
-                // instead of scrolling — the home layout is fixed and
-                // sized for the rolling window of five short bubbles.
+                // Bottom-align the feed; scroll when the rolling window
+                // exceeds available height instead of clipping the top pill.
                 Expanded(
                   child: Padding(
                     padding: EdgeInsets.fromLTRB(16.w, 0, 16.w, 14.h),
-                    child: ClipRect(
-                      child: OverflowBox(
-                        alignment: Alignment.bottomCenter,
-                        maxHeight: double.infinity,
-                        child: ChatBubbleFeed(
-                          messages: _chatMessages,
-                          currentUserId: _session.userId,
-                          displayNameForUserId: _chatDisplayNameForUser,
-                          accent: accent,
-                          onExpire: _dismissExpiredChatMessage,
-                          opacity: _chatFeedOpacity,
-                        ),
-                      ),
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        return SingleChildScrollView(
+                          reverse: true,
+                          physics: const ClampingScrollPhysics(),
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              minHeight: constraints.maxHeight,
+                            ),
+                            child: Align(
+                              alignment: Alignment.bottomCenter,
+                              child: ChatBubbleFeed(
+                                messages: _chatMessages,
+                                currentUserId: _session.userId,
+                                displayNameForUserId: _chatDisplayNameForUser,
+                                accent: accent,
+                                onExpire: _dismissExpiredChatMessage,
+                                opacity: _chatFeedOpacity,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
                 // Status hint: collapsed when keyboard is open so the
                 // message feed gets more space above the keyboard.
-                if (!(viewingActiveGroup &&
-                    !_isCallMode &&
+                if (!(_isOnline &&
+                    viewingActiveGroup &&
                     !_isSessionConnecting))
                   AnimatedOpacity(
                     duration: const Duration(milliseconds: 180),

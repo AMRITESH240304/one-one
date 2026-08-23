@@ -131,6 +131,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   // the correlation key (nudgeId) for the rest of the sender-side trace.
   String? _voiceRequestId;
   String? _voiceNudgeId;
+  /// Signed-URL reservation kicked off at record-start so backend RTDB work
+  /// overlaps the hold instead of blocking after record-end.
+  Future<Map<String, dynamic>>? _voiceUploadReservation;
   final Stopwatch _voiceNudgeWatch = Stopwatch();
   bool _voiceConfirmationLogged = false;
   Timer? _deliveryTimeoutTimer;
@@ -1333,6 +1336,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       );
       await _recorder.start(VoiceNudgeAudio.recordConfig, path: file.path);
       if (!mounted) {
+        _voiceUploadReservation = null;
         await _recorder.stop();
         return;
       }
@@ -1347,6 +1351,13 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       _voiceRequestId = const Uuid().v4();
       _voiceNudgeId = null;
       _voiceConfirmationLogged = false;
+      // Reserve the signed write URL while the user holds — the backend
+      // recipient lookup (~4s on groups) finishes before record-end.
+      _voiceUploadReservation = _repository.initiateVoiceUpload(
+        groupId: widget.group.groupId,
+        target: _effectiveTarget(),
+        durationMs: VoiceNudgeAudio.maxRecordingDuration.inMilliseconds,
+      );
       LogManager.log(
         LogLevel.info,
         'NudgeService',
@@ -1354,7 +1365,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
             'encoder=aacLc bitRate=${VoiceNudgeAudio.bitRate} '
             'sampleRate=${VoiceNudgeAudio.sampleRate} '
             'channels=${VoiceNudgeAudio.numChannels} '
-            'capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds}',
+            'capMs=${VoiceNudgeAudio.maxRecordingDuration.inMilliseconds} '
+            'uploadReserveAtStart=true',
         groupId: widget.group.groupId,
       );
       _recordingTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
@@ -1373,6 +1385,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         await _finishRecording(send: _sendAfterPointerEnd);
       }
     } catch (error) {
+      _voiceUploadReservation = null;
       if (mounted) {
         setState(() {
           _message = _friendlyError(error);
@@ -1431,13 +1444,9 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     var sent = false;
     String? voiceEventId;
     final minMs = VoiceNudgeAudio.minRecordingDuration.inMilliseconds;
-    final uploadReservation = send && durationMs >= minMs
-        ? _repository.initiateVoiceUpload(
-            groupId: widget.group.groupId,
-            target: _effectiveTarget(),
-            durationMs: durationMs,
-          )
-        : null;
+    final uploadReservation =
+        send && durationMs >= minMs ? _voiceUploadReservation : null;
+    _voiceUploadReservation = null;
     try {
       // AAC-LC encoding happens inside the recorder while recording; the
       // stop() call only flushes/finalizes the M4A container. This is the
