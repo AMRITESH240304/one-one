@@ -7,6 +7,7 @@ import {
 import { config } from "../config.js";
 import {
   filterActiveAccountUserIds,
+  listInVoiceSessionUserIds,
   requireActiveGroup,
   requireActiveGroupMember,
   requireActiveUser,
@@ -14,7 +15,6 @@ import {
 } from "../groups/groupService.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
-import { listLiveGroupParticipantUserIds } from "../livekit/liveKitTokenService.js";
 import { chatUnreadTtlSeconds, nextChatUnread } from "./chatUnread.js";
 import { createAckTicket } from "./nudgeDeliveryService.js";
 import { enforceNudgeRateLimits } from "./nudgeRateLimiter.js";
@@ -289,7 +289,7 @@ export async function sendNudgeNotification(input: NudgeInput) {
         ? uniqueRecipientIds(input.targetUserIds, input.senderUserId)
         : await activeRecipientUserIds(input.groupId, input.senderUserId);
   const liveUserIds = new Set(
-    await listLiveGroupParticipantUserIds(input.senderUserId, input.groupId)
+    await listInVoiceSessionUserIds(input.groupId)
   );
   recipientUserIds = recipientUserIds.filter((userId) => !liveUserIds.has(userId));
   await enforceNudgeRateLimits({
