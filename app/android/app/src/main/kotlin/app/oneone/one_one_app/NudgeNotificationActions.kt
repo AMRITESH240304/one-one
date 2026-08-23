@@ -78,6 +78,9 @@ object NudgeActionDispatcher {
         if (channel === methodChannel) channel = null
     }
 
+    /** True when the Flutter engine (MainActivity) is attached in this process. */
+    fun isAttached(): Boolean = channel != null
+
     fun signal() {
         Handler(Looper.getMainLooper()).post {
             channel?.invokeMethod("onNudgeActionAvailable", null)
