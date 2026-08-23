@@ -219,10 +219,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           eventId: last.eventId,
           status: signifier.failed ? 'failed' : 'played',
           reason: signifier.failed
-              ? (signifier.failureReason ??
-                    (signifier.deviceBlocked
-                        ? 'battery_optimization_active'
-                        : 'unknown'))
+              ? (signifier.failureReason ?? 'unknown')
               : null,
           attention: switch (signifier.band) {
             MediaVolumeBand.muted => 'volume_muted',
@@ -418,13 +415,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     return result != null && !result.played;
   }
 
-  /// True when delivery failed because the recipient's own device/OS blocked
-  /// it (permissions, force-stop, battery policy, etc.) — lock signifier.
-  bool _isDeviceLockedFailure(String userId) {
-    if (!_isDeliveryFailed(userId)) return false;
-    return _resultsByUserId[userId]?.isReceiverDeviceBlocked ?? false;
-  }
-
   NudgeRecipientReply? _replyFor(String userId) {
     if (!_showDeliveryBadges) return null;
     return _repliesByUserId[userId];
@@ -549,6 +539,20 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           'recipientName=${result.recipientName ?? '-'}',
       groupId: widget.group.groupId,
     );
+    if (result.played && result.attention != null) {
+      // Silent case: the nudge genuinely played but the recipient likely did
+      // not hear it. Log explicitly so on-device logs explain the muted / low
+      // volume state when they are retrieved for debugging.
+      LogManager.log(
+        LogLevel.warn,
+        'NudgeService',
+        'NUDGE_SILENT_PLAYBACK nudgeId=${result.eventId} '
+            'attention=${result.attention} '
+            'recipientUserId=${result.recipientUserId ?? '-'} '
+            'recipientName=${result.recipientName ?? '-'}',
+        groupId: widget.group.groupId,
+      );
+    }
     if (result.played && _voiceNudgeId == result.eventId) {
       LogManager.log(
         LogLevel.info,
@@ -924,8 +928,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           failed.first.reason,
         );
       }
-      // Prefer per-person reason lines when there are only a couple of failures
-      // so the sender learns *why* (lock vs Duo) instead of a generic miss.
+      // Prefer per-person lines when there are only a couple of failures so
+      // the sender sees exactly who did not receive the nudge.
       if (failed.length <= 2) {
         return failed
             .map((f) => _shortFailureWithReason(nameOf(f), f.reason))
@@ -998,27 +1002,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   String _shortFailureWithReason(String name, String? reason) {
     switch (NudgeDeliveryFailure.canonicalReason(reason)) {
-      case 'permission_denied_notifications':
-        return 'Nudge did not reach $name \u2014 notifications are turned off '
-            'on their phone. Ask them to re-enable Duo notifications.';
-      case 'permission_denied_microphone':
-        return 'Nudge did not reach $name \u2014 microphone access was blocked '
-            'on their phone.';
-      case 'background_fg_service_blocked':
-      case 'permission_denied_foreground_service':
-        return 'Nudge did not reach $name \u2014 their phone blocked the app '
-            'from playing it. Ask them to reopen Duo.';
-      case 'battery_optimization_active':
-        return 'Nudge did not reach $name \u2014 battery restrictions on their '
-            'phone may be blocking Duo in the background.';
-      case 'fcm_not_delivered':
-      case 'app_force_stopped':
-      case 'timeout':
-        return 'Nudge did not reach $name \u2014 their phone may have Duo closed, '
-            'force-stopped, or restricted. Ask them to reopen the app.';
       case 'playback_error':
-      case 'playback_service_start_error':
-      case 'download_error':
       case 'download_failed':
         return 'Nudge did not reach $name \u2014 something went wrong on '
             'Duo\u2019s end.';
@@ -1058,9 +1042,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   List<LastNudgeRecipientSignifier> _snapshotSignifiers() {
     // Read results directly — do NOT gate on [_showDeliveryBadges]. Finalize
-    // snapshots signifiers before flipping that flag; using the badge helpers
-    // here previously forced every failure to deviceBlocked=false (skull), so
-    // reopening the sheet flipped lock → skull with no real state change.
+    // snapshots signifiers before flipping that flag so reopen restores the
+    // same per-recipient failure state.
     final signifiers = <LastNudgeRecipientSignifier>[];
     for (final pending in _expectedRecipients.values) {
       final result = _resultsByUserId[pending.userId];
@@ -1070,7 +1053,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           userId: pending.userId,
           displayName: pending.displayName,
           failed: failed,
-          deviceBlocked: failed && (result?.isReceiverDeviceBlocked ?? false),
           failureReason: failed ? result?.reason : null,
           band: _snapshotBandFor(pending.userId),
           reply: _repliesByUserId[pending.userId],
@@ -1818,9 +1800,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                               builder: (context) {
                                 final online = _isOnline(friend.userId);
                                 final failed = _isDeliveryFailed(friend.userId);
-                                final deviceLocked = _isDeviceLockedFailure(
-                                  friend.userId,
-                                );
                                 final reply = _replyFor(friend.userId);
                                 final volumeBand = _volumeBandFor(
                                   friend.userId,
@@ -1850,7 +1829,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
                                     child: _buildFriendAvatar(
                                       friend: friend,
                                       failed: failed,
-                                      deviceLocked: deviceLocked,
                                     ),
                                   ),
                                 );
@@ -1952,12 +1930,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     );
   }
 
-  /// Builds a friend's avatar with optional failure overlay:
-  /// lock (recipient device blocked) or skull (Duo/unknown failure).
+  /// Builds a friend's avatar with an optional skull overlay when the nudge
+  /// was not received.
   Widget _buildFriendAvatar({
     required GroupMemberSummary friend,
     required bool failed,
-    required bool deviceLocked,
   }) {
     final baseAvatar = ProfileAvatar(
       key: ValueKey(friend.userId),
@@ -1981,14 +1958,12 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
     if (!failed) return baseAvatar;
 
-    // Grayscale + lock/skull for "nudge not received" states.
-    final overlay = deviceLocked
-        ? Icon(LucideIcons.lock, color: Colors.white70, size: 18.sp)
-        : Text(
-            '\u{1F480}',
-            textScaler: TextScaler.noScaling,
-            style: TextStyle(fontSize: 18.sp),
-          );
+    // Grayscale + skull for "nudge not received" states.
+    final overlay = Text(
+      '\u{1F480}',
+      textScaler: TextScaler.noScaling,
+      style: TextStyle(fontSize: 18.sp),
+    );
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -2447,10 +2422,6 @@ class _AvatarCornerBadge extends StatelessWidget {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: const Color(0xff1c1c1c),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.28),
-          width: 1.2,
-        ),
       ),
       child: Center(
         child: Icon(icon, size: 15.sp, color: color),
@@ -2571,7 +2542,7 @@ class _NudgeRecipient extends StatelessWidget {
 //
 // Shown for send progress, delivery confirmation ("received"), errors, and
 // empty-group / everyone-online guards. Avatar badges still show per-person
-// lock / skull / volume on top of this.
+// skull / volume on top of this.
 
 class _NudgeStatus extends StatelessWidget {
   const _NudgeStatus({

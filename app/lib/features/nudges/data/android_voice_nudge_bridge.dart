@@ -556,49 +556,6 @@ class NudgeDeliveryResult {
     };
   }
 
-  /// Machine-readable failure reasons where the recipient's own device/OS
-  /// blocked delivery (permissions revoked, app force-stopped, battery policy,
-  /// etc.). Used for the lock signifier on the sender UI.
-  static const Set<String> receiverDeviceReasons = {
-    'permission_denied_foreground_service',
-    'background_fg_service_blocked',
-    'permission_denied_notifications',
-    'permission_denied_microphone',
-    'fcm_not_delivered',
-    'app_force_stopped',
-    'battery_optimization_active',
-    'timeout',
-  };
-
-  /// Classifies a failed nudge into where the fault lies:
-  /// - `duo`             -> a bug on Duo's end (reportable; prompt the sender)
-  /// - `receiver_device` -> the recipient's device/OS/permissions blocked it
-  /// - `unknown`         -> not enough signal to attribute the failure
-  String? get failureSource {
-    if (played) return null;
-    final normalized = NudgeDeliveryFailure.canonicalReason(reason);
-    if (NudgeDeliveryFailure.isReceiverDeviceBlocked(normalized)) {
-      return 'receiver_device';
-    }
-    switch (normalized) {
-      case 'playback_error':
-      case 'playback_service_start_error':
-      case 'download_error':
-      case 'download_failed':
-        return 'duo';
-      default:
-        return 'unknown';
-    }
-  }
-
-  /// True when the recipient's phone settings or OS policy blocked delivery.
-  bool get isReceiverDeviceBlocked => failureSource == 'receiver_device';
-
-  /// True when playback genuinely failed due to a Duo-side bug (as opposed to
-  /// a receiver-device condition like muted volume or a blocked FGS). These
-  /// are the cases worth prompting the sender to file a report.
-  bool get isDuoBug => failureSource == 'duo';
-
   static NudgeDeliveryResult? tryParse(Map<String, dynamic> raw) {
     final eventId = raw['eventId']?.toString().trim() ?? '';
     final status = raw['status']?.toString().trim() ?? '';
@@ -624,7 +581,7 @@ class NudgeDeliveryResult {
   }
 }
 
-/// Shared delivery-failure normalization and receiver-device classification.
+/// Shared delivery-failure reason normalization.
 abstract final class NudgeDeliveryFailure {
   static String? canonicalReason(String? reason) {
     if (reason == null || reason.trim().isEmpty) return null;
@@ -638,12 +595,6 @@ abstract final class NudgeDeliveryFailure {
       default:
         return reason.trim();
     }
-  }
-
-  static bool isReceiverDeviceBlocked(String? reason) {
-    final normalized = canonicalReason(reason);
-    if (normalized == null) return false;
-    return NudgeDeliveryResult.receiverDeviceReasons.contains(normalized);
   }
 }
 

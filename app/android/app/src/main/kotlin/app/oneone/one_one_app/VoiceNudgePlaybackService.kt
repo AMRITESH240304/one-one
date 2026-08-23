@@ -1139,11 +1139,18 @@ class VoiceNudgePlaybackService : Service() {
         val health = activeHealth
         val attention = health?.attentionReason()
         if (attention != null) {
+            // Silent case: playback genuinely started but the recipient likely
+            // did not hear it (muted / very low / low volume). Log the full
+            // device state so retrieved on-device logs can explain why.
             DeviceLog.warn(
                 "NudgeService",
-                "Nudge not delivered: volume too low " +
-                    "(attention=$attention volume=${health.streamVolume}/${health.streamMaxVolume}) " +
-                    "eventId=${request.eventId}",
+                "NUDGE_SILENT_PLAYBACK nudgeId=${request.eventId} " +
+                    "attention=$attention " +
+                    "volumePercent=${health.volumePercent} " +
+                    "volume=${health.streamVolume}/${health.streamMaxVolume} " +
+                    "muted=${health.streamMuted} dnd=${health.dndActive} " +
+                    "ringerMode=${health.ringerMode} " +
+                    "notificationsEnabled=${health.notificationsEnabled}",
                 groupId = request.groupId,
             )
             VoiceNudgeDiagnostics.recordNudgeFailure(
@@ -1447,15 +1454,21 @@ class VoiceNudgePlaybackService : Service() {
         if (dndActive) {
             DeviceLog.warn(
                 "NudgeService",
-                "Nudge not delivered: DND active eventId=${request.eventId}",
+                "NUDGE_SILENT_PLAYBACK nudgeId=${request.eventId} reason=dnd_active " +
+                    "volumePercent=${health.volumePercent} " +
+                    "volume=${health.streamVolume}/${health.streamMaxVolume} " +
+                    "muted=${health.streamMuted}",
                 groupId = request.groupId,
             )
         }
         if (health.attentionReason() != null) {
             DeviceLog.warn(
                 "NudgeService",
-                "Nudge not delivered: volume too low " +
-                    "(${health.volumeLevel}) eventId=${request.eventId}",
+                "NUDGE_SILENT_PLAYBACK nudgeId=${request.eventId} " +
+                    "reason=${health.attentionReason()} " +
+                    "volumePercent=${health.volumePercent} " +
+                    "volume=${health.streamVolume}/${health.streamMaxVolume} " +
+                    "muted=${health.streamMuted}",
                 groupId = request.groupId,
             )
         }
