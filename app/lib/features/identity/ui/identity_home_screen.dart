@@ -57,15 +57,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   StreamSubscription<DatabaseEvent>? _chatMessagesSubscription;
   StreamSubscription<Map<String, dynamic>>? _emojiBurstSubscription;
 
-  /// Opacity of the middle chat feed (for go-online fade-out).
-  double _chatFeedOpacity = 1;
-
-  /// When non-zero, ignore RTDB rows with `createdAt` before this (unix sec).
-  /// Raised when the group goes online so offline coordination bubbles clear.
-  int _chatVisibleAfterCreatedAt = 0;
-  bool? _prevAnyMemberOnline;
-  bool _chatOnlineClearInFlight = false;
-
   /// App is assumed foreground at startup; lifecycle callbacks keep it current.
   AppLifecycleState _appLifecycle = AppLifecycleState.resumed;
   GroupSummary? _selectedGroup;
@@ -1549,8 +1540,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         .listen(
           (event) {
             if (!mounted || _selectedGroup?.groupId != groupId) return;
-            // Don't repopulate mid fade-out while going online.
-            if (_chatOnlineClearInFlight) return;
             final value = event.snapshot.value;
             final messages = <GroupChatMessage>[];
             // Accept any Map shape Firebase returns (String/Object keys).
@@ -1561,11 +1550,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                   entry.value,
                 );
                 if (parsed == null || parsed.isExpired) continue;
-                if (parsed.createdAt < _chatVisibleAfterCreatedAt) continue;
                 messages.add(parsed);
               }
             }
-            messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+            // Deterministic order: createdAt, then messageId (not arrival order).
+            messages.sort((a, b) {
+              final byTime = a.createdAt.compareTo(b.createdAt);
+              return byTime != 0
+                  ? byTime
+                  : a.messageId.compareTo(b.messageId);
+            });
             final window = messages.length > ChatMessageRepository.visibleLimit
                 ? messages.sublist(
                     messages.length - ChatMessageRepository.visibleLimit,
@@ -1636,67 +1630,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             });
           },
         );
-  }
-
-  /// When the group transitions offline → anyone live, fade and drop past
-  /// bubbles so the middle stays clean for emoji / voice. Newer messages
-  /// (created after this gate) can still appear while online.
-  ///
-  /// Safe to call from [build] — state mutations are deferred to the next
-  /// frame so we never [setState] during layout.
-  void _syncChatVisibilityForOnlineState(bool anyMemberOnline) {
-    final previous = _prevAnyMemberOnline;
-    if (previous == anyMemberOnline) return;
-    _prevAnyMemberOnline = anyMemberOnline;
-
-    if (previous == null) {
-      // First build this session: if already live, hide history that was
-      // exchanged while offline without animating a flash.
-      if (anyMemberOnline) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          setState(() {
-            _chatVisibleAfterCreatedAt =
-                DateTime.now().millisecondsSinceEpoch ~/ 1000;
-            _chatMessages = const [];
-            _chatFeedOpacity = 1;
-          });
-        });
-      }
-      return;
-    }
-
-    if (!previous && anyMemberOnline) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        unawaited(_fadeOutPastChatMessagesForOnline());
-      });
-    } else if (previous && !anyMemberOnline) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        setState(() {
-          _chatVisibleAfterCreatedAt = 0;
-          _chatFeedOpacity = 1;
-          _chatOnlineClearInFlight = false;
-        });
-        final groupId = _selectedGroup?.groupId;
-        if (groupId != null) _listenToChatMessages(groupId);
-      });
-    }
-  }
-
-  Future<void> _fadeOutPastChatMessagesForOnline() async {
-    if (!mounted || _chatOnlineClearInFlight) return;
-    _chatOnlineClearInFlight = true;
-    setState(() => _chatFeedOpacity = 0);
-    await Future<void>.delayed(const Duration(milliseconds: 340));
-    if (!mounted) return;
-    setState(() {
-      _chatVisibleAfterCreatedAt =
-          DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      _chatMessages = const [];
-      _chatFeedOpacity = 1;
-      _chatOnlineClearInFlight = false;
-    });
   }
 
   Future<void> _clearOpenedChatPiles() async {
@@ -2106,10 +2039,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _members = cachedMembers ?? const [];
       _availability = {};
       _chatMessages = const [];
-      _chatFeedOpacity = 1;
-      _chatVisibleAfterCreatedAt = 0;
-      _prevAnyMemberOnline = null;
-      _chatOnlineClearInFlight = false;
     });
     _peerReconnect.clear();
     unawaited(LastActiveGroupStore.write(_session.userId, group.groupId));
@@ -4201,9 +4130,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               )
             : (_availability[friend.userId] ?? MemberAvailability.away),
     };
-    // Offline chips ↔ online emoji bar, and fade past bubbles on go-live.
-    _syncChatVisibilityForOnlineState(anyMemberOnline);
-
     // Live nav-bar / home-indicator inset (gesture pill vs 3-button). Uses
     // viewPadding as a fallback because modal routes and Android
     // edge-to-edge often report padding.bottom as 0. Captured here, before
@@ -4329,7 +4255,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                                 displayNameForUserId: _chatDisplayNameForUser,
                                 accent: accent,
                                 onExpire: _dismissExpiredChatMessage,
-                                opacity: _chatFeedOpacity,
                               ),
                             ),
                           ),

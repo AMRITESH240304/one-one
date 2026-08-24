@@ -109,22 +109,19 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   final Stopwatch _voiceNudgeWatch = Stopwatch();
   bool _voiceConfirmationLogged = false;
   Timer? _deliveryTimeoutTimer;
-  Timer? _earlyFinalizeTimer;
+  /// Wall-clock when the confirmation window for [_awaitingEventId] started.
+  DateTime? _deliveryWaitStartedAt;
   final Map<String, _PendingRecipient> _expectedRecipients = {};
   final Map<String, NudgeDeliveryResult> _resultsByUserId = {};
   final Map<String, NudgeRecipientReply> _repliesByUserId = {};
   MediaVolumeFeedback _rtdbVolumeFeedback = MediaVolumeFeedback.none;
 
-  /// Hard cap on how long the sender waits for delivery acks after send.
-  static const _deliveryConfirmationTimeout = Duration(seconds: 4);
-  /// After the first genuine "played" ack, collect stragglers briefly then
-  /// finalize — avoids blocking on offline recipients for 4 seconds.
-  /// Resets on each new played result, so this is the idle gap after the
-  /// last confirmation, not a fixed window from the first.
-  static const _earlyFinalizeGrace = Duration(milliseconds: 1500);
-  /// Brief beat so single-recipient sends show "Started playing…" before the
-  /// final confirmed status replaces it in the same status pill.
-  static const _singleRecipientFinalizeGrace = Duration(milliseconds: 400);
+  /// Initial wait for delivery/ack status after send. Missing acks at this
+  /// point enter a grace buffer — they are NOT marked dead yet.
+  static const _deliveryStatusCheckTimeout = Duration(seconds: 4);
+  /// Extra buffer after the status check before a conclusive timeout/dead
+  /// state. Total confirmation window ≈ 7s (4s + 3s).
+  static const _deliveryGracePeriod = Duration(seconds: 3);
 
   @override
   void initState() {
@@ -446,15 +443,21 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     required List<_PendingRecipient> expected,
   }) {
     if (eventId == null || eventId.isEmpty) return;
+    final sentAt = DateTime.now();
     LogManager.log(
       LogLevel.info,
       'NudgeService',
       'Awaiting delivery confirmation eventId=$eventId '
+          'sentAt=${sentAt.toIso8601String()} '
+          'statusCheckMs=${_deliveryStatusCheckTimeout.inMilliseconds} '
+          'graceMs=${_deliveryGracePeriod.inMilliseconds} '
+          'totalWindowMs=${_deliveryStatusCheckTimeout.inMilliseconds + _deliveryGracePeriod.inMilliseconds} '
           'expected=[${expected.map((e) => '${e.displayName}:${e.userId}').join(', ')}]',
       groupId: widget.group.groupId,
     );
     _cancelDeliveryWaitTimers();
     _autoDismissTimer?.cancel();
+    _deliveryWaitStartedAt = sentAt;
     setState(() {
       _awaitingEventId = eventId;
       _lastEventId = eventId;
@@ -484,10 +487,85 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           ),
       ],
     );
-    _deliveryTimeoutTimer = Timer(_deliveryConfirmationTimeout, () {
+    // Phase 1: wait for acks. Do NOT mark anyone dead when this fires —
+    // enter the grace buffer instead (see [_onDeliveryStatusCheckElapsed]).
+    _deliveryTimeoutTimer = Timer(_deliveryStatusCheckTimeout, () {
       if (!mounted || _awaitingEventId != eventId) return;
+      _onDeliveryStatusCheckElapsed(eventId);
+    });
+  }
+
+  /// Called ~4s after send when some recipients may still be pending.
+  /// Enters a short grace buffer; conclusive failure only after grace ends.
+  void _onDeliveryStatusCheckElapsed(String eventId) {
+    final pending = _pendingRecipientIds();
+    final elapsedMs = _deliveryElapsedMs();
+    final checkAt = DateTime.now();
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Delivery status check eventId=$eventId '
+          'checkAt=${checkAt.toIso8601String()} '
+          'elapsedSinceSentMs=$elapsedMs '
+          'acked=[${_resultsByUserId.entries.map((e) => '${e.key}:${e.value.status}').join(', ')}] '
+          'pending=[${pending.map((id) {
+            final p = _expectedRecipients[id];
+            return '${p?.displayName ?? '?'}:$id';
+          }).join(', ')}]',
+      groupId: widget.group.groupId,
+    );
+
+    if (pending.isEmpty) {
+      _cancelDeliveryWaitTimers();
+      _finalizeDeliverySummary(timedOut: false);
+      return;
+    }
+
+    // Phase 2: grace/buffer — still pending, not dead yet.
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Delivery grace period start eventId=$eventId '
+          'graceAt=${checkAt.toIso8601String()} '
+          'graceMs=${_deliveryGracePeriod.inMilliseconds} '
+          'pending=[${pending.map((id) {
+            final p = _expectedRecipients[id];
+            return '${p?.displayName ?? '?'}:$id';
+          }).join(', ')}]',
+      groupId: widget.group.groupId,
+    );
+    _deliveryTimeoutTimer = Timer(_deliveryGracePeriod, () {
+      if (!mounted || _awaitingEventId != eventId) return;
+      final timeoutAt = DateTime.now();
+      LogManager.log(
+        LogLevel.warn,
+        'NudgeService',
+        'Delivery confirmation final timeout eventId=$eventId '
+            'timeoutAt=${timeoutAt.toIso8601String()} '
+            'elapsedSinceSentMs=${_deliveryElapsedMs()} '
+            'stillPending=[${_pendingRecipientIds().map((id) {
+              final p = _expectedRecipients[id];
+              return '${p?.displayName ?? '?'}:$id';
+            }).join(', ')}]',
+        groupId: widget.group.groupId,
+      );
       _finalizeDeliverySummary(timedOut: true);
     });
+  }
+
+  List<String> _pendingRecipientIds() {
+    if (_expectedRecipients.isEmpty) {
+      return _resultsByUserId.isEmpty ? const ['unknown'] : const [];
+    }
+    return _expectedRecipients.keys
+        .where((id) => !_resultsByUserId.containsKey(id))
+        .toList(growable: false);
+  }
+
+  int _deliveryElapsedMs() {
+    final started = _deliveryWaitStartedAt;
+    if (started == null) return -1;
+    return DateTime.now().difference(started).inMilliseconds;
   }
 
   void _onDeliveryResult(NudgeDeliveryResult result) {
@@ -497,15 +575,19 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         LogLevel.warn,
         'NudgeService',
         'Delivery result ignored: eventId mismatch result=${result.eventId} '
-            'awaiting=${_awaitingEventId} status=${result.status}',
+            'awaiting=$_awaitingEventId status=${result.status} '
+            'elapsedSinceSentMs=${_deliveryElapsedMs()}',
         groupId: widget.group.groupId,
       );
       return;
     }
+    final ackAt = DateTime.now();
     LogManager.log(
       LogLevel.info,
       'NudgeService',
       'Delivery result matched eventId=${result.eventId} status=${result.status} '
+          'ackAt=${ackAt.toIso8601String()} '
+          'elapsedSinceSentMs=${_deliveryElapsedMs()} '
           'reason=${result.reason ?? '-'} attention=${result.attention ?? '-'} '
           'recipientUserId=${result.recipientUserId ?? '-'} '
           'recipientName=${result.recipientName ?? '-'}',
@@ -533,7 +615,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
             'recipientUserId=${result.recipientUserId ?? '-'} '
             'recipientName=${result.recipientName ?? '-'} '
             'attention=${result.attention ?? '-'} '
-            'elapsedSinceRecordEndMs=${_voiceNudgeWatch.elapsedMilliseconds}',
+            'elapsedSinceRecordEndMs=${_voiceNudgeWatch.elapsedMilliseconds} '
+            'elapsedSinceSentMs=${_deliveryElapsedMs()}',
         groupId: widget.group.groupId,
       );
     }
@@ -565,12 +648,16 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         ? 1
         : _expectedRecipients.length;
     if (_resultsByUserId.length >= expectedCount) {
+      // All expected recipients resolved — cancel any pending status-check /
+      // grace failure timer immediately so a stale timeout cannot overwrite
+      // a successful late ack.
       _cancelDeliveryWaitTimers();
       _finalizeDeliverySummary(timedOut: false);
-    } else if (result.played) {
-      _scheduleEarlyFinalizeAfterPlayed();
-      setState(() {});
     } else {
+      // Keep waiting independently for remaining recipients through the full
+      // confirmation window (status check + grace). Do not early-finalize:
+      // that used to synthesize failed/unknown for stragglers ~1.5s after the
+      // first played ack and show the skull incorrectly.
       setState(() {});
     }
   }
@@ -628,21 +715,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   void _cancelDeliveryWaitTimers() {
     _deliveryTimeoutTimer?.cancel();
-    _earlyFinalizeTimer?.cancel();
-  }
-
-  /// Voice/ring/push: once someone genuinely played, don't hold the sender on
-  /// "Confirming…" until every offline device times out.
-  void _scheduleEarlyFinalizeAfterPlayed() {
-    _earlyFinalizeTimer?.cancel();
-    final grace = _expectedRecipients.length <= 1
-        ? _singleRecipientFinalizeGrace
-        : _earlyFinalizeGrace;
-    _earlyFinalizeTimer = Timer(grace, () {
-      if (!mounted || _awaitingEventId == null) return;
-      _cancelDeliveryWaitTimers();
-      _finalizeDeliverySummary(timedOut: false);
-    });
+    _deliveryTimeoutTimer = null;
   }
 
   void _onRecipientResponse(NudgeRecipientResponse response) {
@@ -721,6 +794,14 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
 
   void _finalizeDeliverySummary({required bool timedOut}) {
     if (!mounted) return;
+    // Claim this wait cycle immediately so a racing status-check/grace timer
+    // cannot re-enter and overwrite a successful ack with synthesized failures.
+    final eventId = _awaitingEventId;
+    if (eventId == null) return;
+    _awaitingEventId = null;
+    _cancelDeliveryWaitTimers();
+
+    final elapsedMs = _deliveryElapsedMs();
     if (_voiceNudgeId != null && !_voiceConfirmationLogged) {
       _voiceConfirmationLogged = true;
       _voiceNudgeWatch.stop();
@@ -730,7 +811,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           LogLevel.warn,
           'NudgeService',
           'VOICE_NUDGE_CONFIRMATION_TIMEOUT nudgeId=$_voiceNudgeId '
-              'totalMs=$totalMs',
+              'totalMs=$totalMs elapsedSinceSentMs=$elapsedMs',
           groupId: widget.group.groupId,
         );
       } else {
@@ -738,7 +819,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           LogLevel.info,
           'NudgeService',
           'VOICE_NUDGE_CONFIRMATION_RECEIVED nudgeId=$_voiceNudgeId '
-              'VOICE_NUDGE_TOTAL_TIME nudgeId=$_voiceNudgeId totalMs=$totalMs',
+              'VOICE_NUDGE_TOTAL_TIME nudgeId=$_voiceNudgeId totalMs=$totalMs '
+              'elapsedSinceSentMs=$elapsedMs',
           groupId: widget.group.groupId,
         );
       }
@@ -747,23 +829,29 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       timedOut ? LogLevel.warn : LogLevel.info,
       'NudgeService',
       'Finalizing delivery summary timedOut=$timedOut '
+          'eventId=$eventId '
+          'finalizeAt=${DateTime.now().toIso8601String()} '
+          'elapsedSinceSentMs=$elapsedMs '
           'results=[${_resultsByUserId.entries.map((e) => '${e.key}:${e.value.status}').join(', ')}] '
           'expected=[${_expectedRecipients.keys.join(', ')}]',
       groupId: widget.group.groupId,
     );
     final expected = _expectedRecipients.values.toList(growable: false);
-    // Synthesize timeout failures for anyone without a result.
+    // Synthesize timeout failures only after the full confirmation window
+    // (status check + grace). Recipients are evaluated independently — only
+    // those still missing a result become conclusive failures.
     for (final pending in expected) {
       if (!_resultsByUserId.containsKey(pending.userId)) {
         LogManager.log(
           LogLevel.warn,
           'NudgeService',
           'No delivery result for ${pending.displayName} (${pending.userId}); '
-              'synthesizing failed/${timedOut ? 'timeout' : 'unknown'}',
+              'synthesizing failed/${timedOut ? 'timeout' : 'unknown'} '
+              'elapsedSinceSentMs=$elapsedMs',
           groupId: widget.group.groupId,
         );
         _resultsByUserId[pending.userId] = NudgeDeliveryResult(
-          eventId: _awaitingEventId ?? '',
+          eventId: eventId,
           status: 'failed',
           reason: timedOut ? 'timeout' : 'unknown',
           recipientUserId: pending.userId,
@@ -771,6 +859,8 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         );
       }
     }
+
+    _deliveryWaitStartedAt = null;
 
     // Persist failure summaries so they can be shown on sheet reopen.
     final failed = <NudgeDeliveryResult>[];
