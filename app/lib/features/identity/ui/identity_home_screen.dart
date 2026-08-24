@@ -5209,7 +5209,8 @@ class _NudgeReplyBadge extends StatelessWidget {
       alignment: Alignment.center,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: const Color(0xff1c1c1c),
+        // Match the away moon badge grey (Color(0xff2a2a2a)).
+        color: const Color(0xff2a2a2a),
         border: Border.all(
           color: Colors.white.withValues(alpha: 0.28),
           width: 1,
