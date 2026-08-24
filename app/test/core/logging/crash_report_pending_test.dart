@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/core/logging/crash_report_pending.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('pending crash report flag can be set and cleared', () async {

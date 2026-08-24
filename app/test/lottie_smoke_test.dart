@@ -1,6 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lottie/lottie.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   for (final asset in [

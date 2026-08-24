@@ -1,4 +1,4 @@
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:one_one_app/one_one.dart';
 
 const _pendingKey = 'device_log_crash_report_pending';
 

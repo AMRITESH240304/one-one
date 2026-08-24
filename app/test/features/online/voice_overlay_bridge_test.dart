@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/online/voice_overlay_bridge.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('call-mode timeout announcement matches the spoken overlay copy', () {

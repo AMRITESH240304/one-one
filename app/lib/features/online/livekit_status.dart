@@ -1,4 +1,4 @@
-import '../../core/logging/user_facing_copy.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Maps LiveKit / connection internals to short, user-facing status copy.
 class LiveKitStatus {

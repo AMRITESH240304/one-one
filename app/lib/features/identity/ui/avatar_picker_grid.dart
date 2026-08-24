@@ -1,6 +1,4 @@
-import 'package:flutter/material.dart';
-
-import '../data/avatar_assets.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Single scrollable preset-avatar picker spanning every pack.
 ///

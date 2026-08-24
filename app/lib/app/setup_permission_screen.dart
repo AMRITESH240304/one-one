@@ -1,11 +1,4 @@
-import 'dart:async';
-import 'dart:io';
-import 'dart:math' as math;
-
-import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:one_one_app/one_one.dart';
 
 enum _SetupStep { mic, notification, background }
 
@@ -289,7 +282,7 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
           final maxHeight = constraints.maxHeight.isFinite
               ? constraints.maxHeight
               : MediaQuery.sizeOf(context).height;
-          final scale = math.min(
+          final scale = min(
                 maxWidth / visual.imageWidth,
                 maxHeight / visual.imageHeight,
               ) *

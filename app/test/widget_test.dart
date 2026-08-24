@@ -1,7 +1,8 @@
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:one_one_app/phase1_spike/phase1_spike_app.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   testWidgets('Phase 1 spike screen loads', (WidgetTester tester) async {

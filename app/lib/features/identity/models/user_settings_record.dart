@@ -1,4 +1,4 @@
-import 'haptics_intensity.dart';
+import 'package:one_one_app/one_one.dart';
 
 class UserSettingsRecord {
   const UserSettingsRecord({

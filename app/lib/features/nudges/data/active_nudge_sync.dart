@@ -1,7 +1,4 @@
-import 'package:firebase_database/firebase_database.dart';
-
-import '../../../core/firebase/app_database.dart';
-import '../models/active_nudge.dart';
+import 'package:one_one_app/one_one.dart';
 
 const _nudgeEventTypes = {'nudge', 'ring_nudge', 'voice_nudge'};
 

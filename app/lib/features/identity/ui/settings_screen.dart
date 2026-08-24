@@ -1,28 +1,4 @@
-import 'dart:async';
-
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:permission_handler/permission_handler.dart';
-import '../../../app/accent_theme.dart';
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/logging/debug_logs_sheet.dart';
-import '../../../core/logging/send_feedback_sheet.dart';
-import '../../../core/ui/bottom_system_inset.dart';
-import '../../groups/models/group_summary.dart';
-import '../../subscriptions/eleven_pro_paywall_screen.dart';
-import '../../subscriptions/subscription_management_sheet.dart';
-import '../../nudges/nudge_haptics.dart';
-import '../data/avatar_assets.dart';
-import '../data/identity_repository.dart';
-import '../home_visual_variant.dart';
-import '../models/haptics_intensity.dart';
-import '../models/identity_session.dart';
-import 'avatar_picker_grid.dart';
-import 'legal_document_screen.dart';
-import 'profile_avatar.dart';
-import 'profile_photo_editor.dart';
+import 'package:one_one_app/one_one.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({

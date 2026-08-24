@@ -1,6 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/core/ui/bottom_system_inset.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   testWidgets('uses viewPadding when padding.bottom is stripped', (

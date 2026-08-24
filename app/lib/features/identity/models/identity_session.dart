@@ -1,6 +1,4 @@
-import 'app_user_profile.dart';
-import 'user_device_record.dart';
-import 'user_settings_record.dart';
+import 'package:one_one_app/one_one.dart';
 
 class IdentitySession {
   const IdentitySession({

@@ -1,6 +1,4 @@
-import 'package:audioplayers/audioplayers.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Short start/stop tones and haptics for push-to-talk.
 class TalkFeedback {

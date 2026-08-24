@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/identity/home_visual_variant.dart';
-import 'package:one_one_app/features/identity/models/haptics_intensity.dart';
-import 'package:one_one_app/features/identity/models/user_settings_record.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   group('HapticsIntensity', () {

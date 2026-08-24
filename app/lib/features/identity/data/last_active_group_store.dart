@@ -1,4 +1,4 @@
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Persists which group the user was last active in so cold launches (app
 /// killed and reopened) can restore focus to that group instead of always

@@ -1,6 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/service_status/service_status_gate.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('remote service states are parsed safely', () {

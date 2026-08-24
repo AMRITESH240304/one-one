@@ -1,23 +1,4 @@
-import 'dart:async';
-import 'dart:isolate';
-
-import 'package:firebase_core/firebase_core.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:google_fonts/google_fonts.dart';
-
-import 'app/one_one_app.dart';
-import 'app/startup_performance.dart';
-import 'core/firebase/crashlytics_service.dart';
-import 'core/firebase/firebase_analytics_service.dart';
-import 'core/firebase/firebase_bootstrap.dart';
-import 'core/firebase/firebase_performance_service.dart';
-import 'core/logging/log_level.dart';
-import 'core/logging/log_manager.dart';
-import 'features/online/livekit_connection_warmer.dart';
-import 'features/subscriptions/revenue_cat_service.dart';
+import 'package:one_one_app/one_one.dart';
 
 final RawReceivePort _isolateErrorPort = RawReceivePort((dynamic pair) {
   final errorAndStack = pair as List<dynamic>;

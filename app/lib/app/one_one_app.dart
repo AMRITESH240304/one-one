@@ -1,27 +1,4 @@
-import 'dart:async';
-
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import 'accent_theme.dart';
-import 'brand_splash_screen.dart';
-import 'firebase_setup_blocked_screen.dart';
-import 'google_auth_screen.dart';
-import 'startup_gate_screen.dart';
-import 'startup_performance.dart';
-import '../core/firebase/crashlytics_service.dart';
-import '../core/firebase/firebase_analytics_service.dart';
-import '../core/firebase/firebase_bootstrap.dart';
-import '../core/logging/log_level.dart';
-import '../core/logging/log_manager.dart';
-import '../core/ui/bottom_system_inset.dart';
-import '../features/online/live_session_overlay_controller.dart';
-import '../features/service_status/service_status_gate.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Global navigator key used by the in-app live-session PiP overlay to pop
 /// back to the home screen from any route without requiring a BuildContext.

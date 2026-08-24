@@ -1,7 +1,6 @@
-import 'dart:math' as math;
-import 'dart:typed_data';
-
 import 'package:image/image.dart' as image_lib;
+
+import 'package:one_one_app/one_one.dart';
 
 /// Local resize + JPEG encode for user-uploaded profile photos.
 ///
@@ -24,7 +23,7 @@ class ProfilePhotoOptimizer {
 
     var working = decoded;
     if (working.width != working.height) {
-      final side = math.min(working.width, working.height);
+      final side = min(working.width, working.height);
       final offsetX = ((working.width - side) / 2).floor();
       final offsetY = ((working.height - side) / 2).floor();
       working = image_lib.copyCrop(

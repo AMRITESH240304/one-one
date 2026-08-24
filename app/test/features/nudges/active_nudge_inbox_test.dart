@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/nudges/data/active_nudge_inbox.dart';
-import 'package:one_one_app/features/nudges/data/active_nudge_sync.dart';
-import 'package:one_one_app/features/nudges/models/active_nudge.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   group('ActiveNudge', () {

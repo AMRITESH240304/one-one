@@ -1,84 +1,4 @@
-import 'dart:async';
-import 'dart:math' as math;
-import 'dart:ui';
-
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:firebase_database/firebase_database.dart';
-import 'package:flutter/material.dart' hide ConnectionState;
-import 'package:flutter/services.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:livekit_client/livekit_client.dart';
-import 'package:livekit_noise_filter/livekit_noise_filter.dart';
-import 'package:lucide_flutter/lucide_flutter.dart';
-import 'package:permission_handler/permission_handler.dart';
-
-import '../../../app/accent_theme.dart';
-import '../../../app/one_one_app.dart';
-import '../../../app/startup_performance.dart';
-import '../../../core/firebase/app_database.dart';
-import '../../../core/firebase/app_telemetry.dart';
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/firebase/firebase_analytics_service.dart';
-import '../../../core/logging/device_log_report.dart';
-import '../../../core/logging/livekit_lifecycle_logger.dart';
-import '../../../core/logging/log_level.dart';
-import '../../../core/logging/log_manager.dart';
-import '../../../core/logging/post_crash_report_dialog.dart';
-import '../../../core/logging/user_facing_copy.dart';
-import '../../../core/network/api_client.dart';
-import '../../../core/storage/cloudinary_delivery.dart';
-import '../../../core/ui/bottom_system_inset.dart';
-import '../../chat/data/chat_message_repository.dart';
-import '../../chat/models/group_chat_message.dart';
-import '../../chat/ui/chat_bubble_bar.dart';
-import '../../chat/ui/chat_bubble_feed.dart';
-import '../../groups/data/group_repository.dart';
-import '../../groups/data/invite_link_bridge.dart';
-import '../../groups/group_service_readiness.dart';
-import '../../groups/models/group_invite_result.dart';
-import '../../groups/models/group_member_summary.dart';
-import '../../groups/models/group_summary.dart';
-import '../../groups/ui/group_management_screen.dart';
-import '../../online/data/active_online_session_store.dart';
-import '../../online/data/online_repository.dart';
-import '../../online/live_session_overlay_controller.dart';
-import '../../online/livekit_connection_warmer.dart';
-import '../../online/livekit_status.dart';
-import '../../online/models/member_availability.dart';
-import '../../online/models/online_session.dart';
-import '../../online/peer_reconnect_coordinator.dart';
-import '../../online/presence_config.dart';
-import '../../online/solo_participant_guard.dart';
-import '../../online/audio_output_bridge.dart';
-import '../../online/call_audio_route_controller.dart';
-import '../../online/voice_overlay_bridge.dart';
-import '../../online/voice_pip_bridge.dart';
-import '../../nudges/data/android_voice_nudge_bridge.dart';
-import '../../nudges/data/active_nudge_inbox.dart';
-import '../../nudges/data/active_nudge_sync.dart';
-import '../../nudges/data/media_volume_store.dart';
-import '../../nudges/data/nudge_repository.dart';
-import '../../nudges/models/active_nudge.dart';
-import '../../nudges/nudge_status_memory.dart';
-import '../../nudges/ui/incoming_nudge_prompt.dart';
-import '../../nudges/ui/nudge_screen.dart';
-import '../../talk/data/talk_repository.dart';
-import '../../talk/models/emoji_burst.dart';
-import '../../talk/models/talk_session.dart';
-import '../../talk/talk_feedback.dart';
-import '../../talk/ui/emoji_burst_overlay.dart';
-import '../data/identity_home_bootstrap.dart';
-import '../data/identity_repository.dart';
-import '../data/last_active_group_store.dart';
-import '../home_visual_variant.dart';
-import '../models/identity_session.dart';
-import 'group_action_screen.dart';
-import 'lucide_audio_icons.dart';
-import 'no_groups_screen.dart';
-import 'profile_avatar.dart';
-import 'settings_screen.dart';
+import 'package:one_one_app/one_one.dart';
 
 // [DEBUG] Go-live latency tracing helpers added Aug 12. Remove before
 // production release. Logs a numbered start/end pair for each major step of
@@ -5741,7 +5661,7 @@ class _SoftShakeState extends State<_SoftShake>
         // reading as an alert.
         final t = _controller.value;
         final wave = t < 0.45
-            ? math.sin(t / 0.45 * math.pi * 2) * (1 - t / 0.45)
+            ? sin(t / 0.45 * pi * 2) * (1 - t / 0.45)
             : 0.0;
         return Transform.rotate(
           angle: wave * 0.12,
@@ -6494,7 +6414,7 @@ class _MainButtonDotsLoaderState extends State<_MainButtonDotsLoader>
 
   Widget _dot(int index, double diameter) {
     final t = ((_controller.value + (1 - index * 0.22)) % 1.0);
-    final bounce = math.sin(t * math.pi);
+    final bounce = sin(t * pi);
     final scale = 0.55 + 0.45 * bounce;
     final opacity = 0.35 + 0.65 * bounce;
     return Transform.translate(
@@ -6709,7 +6629,7 @@ class _MemberPhotoCollage extends StatelessWidget {
       );
     }
 
-    final columns = math.sqrt(members.length).ceil();
+    final columns = sqrt(members.length).ceil();
     final rows = (members.length / columns).ceil();
 
     Widget tile(GroupMemberSummary member) {

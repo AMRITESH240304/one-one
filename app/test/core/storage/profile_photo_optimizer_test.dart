@@ -1,9 +1,8 @@
-import 'dart:math';
-import 'dart:typed_data';
-
 import 'package:flutter_test/flutter_test.dart';
+
 import 'package:image/image.dart' as image_lib;
-import 'package:one_one_app/core/storage/profile_photo_optimizer.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('large camera-like JPEGs shrink to a 512px JPEG around quality 85', () {

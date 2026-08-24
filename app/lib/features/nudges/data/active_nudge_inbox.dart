@@ -1,9 +1,4 @@
-import 'dart:convert';
-
-import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-import '../models/active_nudge.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Persists accept/decline/snooze so an incoming nudge is not re-prompted
 /// after the user already answered it (in-app or via the notification).

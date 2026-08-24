@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/core/network/api_client.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('decodeJsonObject tolerates non-object backend responses', () {

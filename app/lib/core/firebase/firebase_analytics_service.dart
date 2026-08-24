@@ -1,9 +1,4 @@
-import 'package:firebase_analytics/firebase_analytics.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart';
-
-import '../maps.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Production Analytics wrapper for Duo.
 ///

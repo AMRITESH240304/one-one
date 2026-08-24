@@ -1,6 +1,4 @@
-import 'dart:async';
-
-import 'presence_config.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Debounces "lost connection" UI when a peer leaves and quickly rejoins
 /// (app kill + relaunch, LiveKit identity swap, RTDB onDisconnect race).

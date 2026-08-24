@@ -1,11 +1,4 @@
-import 'dart:async';
-
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_database/firebase_database.dart';
-
-import '../../../core/firebase/app_database.dart';
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/network/api_client.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Reads/writes ephemeral group chat bubbles (Prompt 5).
 ///

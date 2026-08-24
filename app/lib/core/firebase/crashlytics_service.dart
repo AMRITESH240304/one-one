@@ -1,16 +1,4 @@
-import 'dart:async';
-import 'dart:io';
-
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:firebase_crashlytics/firebase_crashlytics.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart';
-import 'package:package_info_plus/package_info_plus.dart';
-
-import '../logging/log_level.dart';
-import '../logging/log_manager.dart';
-import '../logging/user_facing_copy.dart';
-import 'firebase_analytics_service.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Canonical non-fatal nudge failure reasons shown in Crashlytics.
 abstract final class NudgeFailureReason {

@@ -1,7 +1,4 @@
-import 'package:flutter/material.dart';
-
-import '../groups/models/group_member_summary.dart';
-import '../identity/ui/profile_avatar.dart';
+import 'package:one_one_app/one_one.dart';
 
 // ---------------------------------------------------------------------------
 // Data model

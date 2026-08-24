@@ -1,4 +1,4 @@
-import 'audio_output_bridge.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Explicit user-driven output mode for a live session.
 ///

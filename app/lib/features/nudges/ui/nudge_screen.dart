@@ -1,32 +1,4 @@
-import 'dart:async';
-import 'dart:io';
-import 'dart:math' as math;
-
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:lucide_flutter/lucide_flutter.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:record/record.dart';
-import 'package:uuid/uuid.dart';
-
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/logging/log_level.dart';
-import '../../../core/logging/log_manager.dart';
-import '../../../core/logging/user_facing_copy.dart';
-import '../../../core/network/api_client.dart';
-import '../../../core/ui/bottom_system_inset.dart';
-import '../../groups/models/group_member_summary.dart';
-import '../../groups/models/group_summary.dart';
-import '../../identity/ui/profile_avatar.dart';
-import '../data/android_voice_nudge_bridge.dart';
-import '../data/media_volume_store.dart';
-import '../data/nudge_repository.dart';
-import '../data/voice_nudge_audio.dart';
-import '../models/media_volume_reading.dart';
-import '../nudge_cooldowns.dart';
-import '../nudge_failure_memory.dart';
-import '../nudge_status_memory.dart';
+import 'package:one_one_app/one_one.dart';
 
 Future<void> showNudgeBottomSheet(
   BuildContext context, {
@@ -2174,7 +2146,7 @@ class _SendingVoicePulseState extends State<_SendingVoicePulse>
             _ripple((t + 0.0) % 1.0),
             _ripple((t + 0.5) % 1.0),
             Transform.translate(
-              offset: Offset(0, -3.r * math.sin(t * 2 * math.pi)),
+              offset: Offset(0, -3.r * sin(t * 2 * pi)),
               child: Icon(Icons.send_rounded, size: 32.sp, color: Colors.white),
             ),
           ],

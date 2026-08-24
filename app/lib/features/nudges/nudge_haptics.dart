@@ -1,8 +1,4 @@
-import 'dart:async';
-
-import 'package:flutter/services.dart';
-
-import '../identity/models/haptics_intensity.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Flutter-side haptic patterns matching the three Settings tiers.
 ///

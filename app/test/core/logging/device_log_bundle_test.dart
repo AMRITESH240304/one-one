@@ -1,8 +1,6 @@
-import 'dart:io';
-
-import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/core/logging/device_log_bundle.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('bundles retained log files with tagged manifest', () {

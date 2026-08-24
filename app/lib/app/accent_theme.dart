@@ -1,5 +1,4 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
+import 'package:one_one_app/one_one.dart';
 
 class AccentOption {
   const AccentOption({

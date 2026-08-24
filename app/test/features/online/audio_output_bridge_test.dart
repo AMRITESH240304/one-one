@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/online/audio_output_bridge.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('parses native audio-output state maps', () {

@@ -1,12 +1,4 @@
-import 'dart:async';
-
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:firebase_remote_config/firebase_remote_config.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-
-import '../../core/firebase/firebase_analytics_service.dart';
-import '../../core/maps.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Mutable Remote Config defaults. Must stay growable — `setDefaults` is
 /// invoked on every app resume and must never receive `const {}`.

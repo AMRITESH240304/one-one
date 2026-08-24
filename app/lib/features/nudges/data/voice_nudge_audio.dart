@@ -1,4 +1,4 @@
-import 'package:record/record.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Speech-tuned AAC-LC in an M4A container.
 ///

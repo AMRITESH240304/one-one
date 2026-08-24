@@ -1,10 +1,4 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../core/firebase/crashlytics_service.dart';
-import '../features/identity/data/identity_repository.dart';
-import 'brand_splash_screen.dart';
-import 'native_splash_bridge.dart';
+import 'package:one_one_app/one_one.dart';
 
 class GoogleAuthScreen extends StatefulWidget {
   const GoogleAuthScreen({super.key, this.initializing = false});

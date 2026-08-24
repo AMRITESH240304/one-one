@@ -1,7 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/app/brand_splash_screen.dart';
-import 'package:one_one_app/app/google_auth_screen.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   testWidgets('startup underlay matches native splash color and has no logo', (

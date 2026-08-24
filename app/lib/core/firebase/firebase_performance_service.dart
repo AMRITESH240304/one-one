@@ -1,5 +1,4 @@
-import 'package:firebase_performance/firebase_performance.dart';
-import 'package:flutter/foundation.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Thin wrapper around [FirebasePerformance] for traces and HTTP metrics.
 class PerformanceService {

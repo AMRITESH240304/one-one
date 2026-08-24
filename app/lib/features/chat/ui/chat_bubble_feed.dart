@@ -1,10 +1,4 @@
-import 'dart:async';
-import 'dart:ui';
-
-import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../models/group_chat_message.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Renders sent chat bubbles in the group screen's cleared center area. Own
 /// messages align right, others' align left; every bubble shows the

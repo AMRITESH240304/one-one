@@ -1,4 +1,4 @@
-import 'log_level.dart';
+import 'package:one_one_app/one_one.dart';
 
 class LogMetadata {
   const LogMetadata({

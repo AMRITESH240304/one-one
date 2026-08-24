@@ -1,4 +1,4 @@
-import '../../../app/app_config.dart';
+import 'package:one_one_app/one_one.dart';
 
 class GroupInviteResult {
   const GroupInviteResult({

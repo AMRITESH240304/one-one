@@ -1,6 +1,4 @@
-import 'dart:math' as math;
-
-import 'package:flutter/widgets.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Height of the system navigation bar / home-indicator, in logical pixels.
 ///
@@ -14,7 +12,7 @@ double bottomSystemInsetOf(BuildContext context) {
   if (media.viewInsets.bottom > 0) {
     return media.padding.bottom;
   }
-  return math.max(media.padding.bottom, media.viewPadding.bottom);
+  return max(media.padding.bottom, media.viewPadding.bottom);
 }
 
 /// [MediaQuery] whose bottom [MediaQueryData.padding] is at least the live
@@ -22,7 +20,7 @@ double bottomSystemInsetOf(BuildContext context) {
 /// content on Android edge-to-edge without changing the top/status inset.
 MediaQueryData withEnsuredBottomInset(MediaQueryData media) {
   if (media.viewInsets.bottom > 0) return media;
-  final bottom = math.max(media.padding.bottom, media.viewPadding.bottom);
+  final bottom = max(media.padding.bottom, media.viewPadding.bottom);
   if (bottom == media.padding.bottom) return media;
   return media.copyWith(padding: media.padding.copyWith(bottom: bottom));
 }
@@ -45,7 +43,7 @@ class BottomSystemSafeArea extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bottom = math.max(minimum.bottom, bottomSystemInsetOf(context));
+    final bottom = max(minimum.bottom, bottomSystemInsetOf(context));
     return SafeArea(
       top: top,
       bottom: false,

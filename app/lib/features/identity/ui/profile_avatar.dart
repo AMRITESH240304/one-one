@@ -1,11 +1,4 @@
-import 'dart:convert';
-import 'dart:math' as math;
-
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter/material.dart';
-
-import '../../../core/storage/cloudinary_delivery.dart';
-import '../data/avatar_assets.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// First letter of the user's display name for avatar fallbacks.
 String profileDisplayInitial(String displayName) {
@@ -235,7 +228,7 @@ class _ProfileImageState extends State<ProfileImage> {
   int _pixelSizeFor(BuildContext context, BoxConstraints constraints) {
     final width = constraints.maxWidth;
     final height = constraints.maxHeight;
-    final logical = math.max(
+    final logical = max(
       width.isFinite ? width : 0,
       height.isFinite ? height : 0,
     );

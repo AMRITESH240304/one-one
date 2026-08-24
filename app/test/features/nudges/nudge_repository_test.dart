@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/nudges/data/nudge_repository.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('all-friends target emits only the scope', () {

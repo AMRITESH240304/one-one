@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/core/logging/user_facing_copy.dart';
-import 'package:one_one_app/features/online/livekit_status.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   group('UserFacingCopy', () {

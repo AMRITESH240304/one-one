@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/chat/data/chat_message_repository.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   group('ChatMessageRepository.sanitize', () {

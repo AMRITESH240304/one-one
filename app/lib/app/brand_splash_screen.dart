@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Logo-less underlay matching the native Android splash background.
 ///

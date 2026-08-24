@@ -1,9 +1,4 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:purchases_ui_flutter/purchases_ui_flutter.dart';
-
-import '../../app/app_config.dart';
-import '../../core/ui/bottom_system_inset.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Manage Subscription sheet with store management + Team Duo contact.
 ///

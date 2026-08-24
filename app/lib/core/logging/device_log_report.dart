@@ -1,9 +1,4 @@
-import 'package:flutter/foundation.dart';
-
-import '../network/api_client.dart';
-import 'device_log_bundle.dart';
-import 'log_level.dart';
-import 'log_manager.dart';
+import 'package:one_one_app/one_one.dart';
 
 enum DeviceLogReportKind { crash, feedback }
 

@@ -1,5 +1,4 @@
-import '../online/models/member_availability.dart';
-import 'models/group_member_summary.dart';
+import 'package:one_one_app/one_one.dart';
 
 bool groupHasServicePeer({
   required List<GroupMemberSummary> members,

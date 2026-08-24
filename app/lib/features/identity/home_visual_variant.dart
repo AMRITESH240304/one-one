@@ -1,5 +1,4 @@
-import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:one_one_app/one_one.dart';
 
 // ---------------------------------------------------------------------------
 // Enum — 4 pre-release design variants for home screen backdrop evaluation.

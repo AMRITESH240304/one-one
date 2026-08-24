@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/nudges/data/voice_nudge_audio.dart';
-import 'package:record/record.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('voice nudges stay on hardware AAC-LC in an M4A container', () {

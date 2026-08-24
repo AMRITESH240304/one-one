@@ -1,7 +1,4 @@
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_database/firebase_database.dart';
-
-import '../../app/app_config.dart';
+import 'package:one_one_app/one_one.dart';
 
 class AppDatabase {
   const AppDatabase._();

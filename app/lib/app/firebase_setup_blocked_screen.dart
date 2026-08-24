@@ -1,6 +1,4 @@
-import 'package:flutter/material.dart';
-
-import 'native_splash_bridge.dart';
+import 'package:one_one_app/one_one.dart';
 
 class FirebaseSetupBlockedScreen extends StatelessWidget {
   const FirebaseSetupBlockedScreen({super.key, required this.errorText});

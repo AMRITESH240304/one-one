@@ -1,33 +1,4 @@
-import 'dart:async';
-import 'dart:io';
-
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_database/firebase_database.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:google_sign_in/google_sign_in.dart';
-import 'package:package_info_plus/package_info_plus.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-import '../../../app/accent_theme.dart';
-import '../../../app/startup_performance.dart';
-import '../../../core/firebase/app_database.dart';
-import '../../../core/firebase/app_telemetry.dart';
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/firebase/firebase_analytics_service.dart';
-import '../../../core/logging/log_manager.dart';
-import '../../../core/network/api_client.dart';
-import '../../../core/storage/profile_photo_storage.dart';
-import '../../nudges/data/android_voice_nudge_bridge.dart';
-import '../models/app_user_profile.dart';
-import '../models/haptics_intensity.dart';
-import '../models/identity_session.dart';
-import '../models/user_device_record.dart';
-import '../models/user_settings_record.dart';
-import 'avatar_assets.dart';
-import 'device_identity_store.dart';
+import 'package:one_one_app/one_one.dart';
 
 class IdentityRepository {
   IdentityRepository({

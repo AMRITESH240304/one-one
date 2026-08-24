@@ -1,11 +1,6 @@
-import 'dart:convert';
-
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_performance/firebase_performance.dart';
 import 'package:http/http.dart' as http;
 
-import '../../app/app_config.dart';
-import '../firebase/firebase_performance_service.dart';
+import 'package:one_one_app/one_one.dart';
 
 class ApiClient {
   ApiClient({FirebaseAuth? auth, http.Client? httpClient, String? baseUrl})

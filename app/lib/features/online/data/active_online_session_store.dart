@@ -1,8 +1,4 @@
-import 'dart:convert';
-
-import 'package:shared_preferences/shared_preferences.dart';
-
-import '../models/online_session.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Survives process death so a later launch can clear leftover RTDB presence.
 class ActiveOnlineSessionStore {

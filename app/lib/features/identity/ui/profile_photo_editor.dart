@@ -1,13 +1,6 @@
-import 'dart:io';
-
-import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:image_cropper/image_cropper.dart';
-import 'package:image_picker/image_picker.dart';
 
-import '../../../core/storage/cloudinary_delivery.dart';
-import '../../../core/storage/profile_photo_optimizer.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Shared profile-photo editor used by onboarding and Settings.
 ///

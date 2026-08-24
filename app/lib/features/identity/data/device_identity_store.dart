@@ -1,5 +1,4 @@
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:uuid/uuid.dart';
+import 'package:one_one_app/one_one.dart';
 
 class DeviceIdentityStore {
   static const String _installIdKey = 'one_one_install_id';

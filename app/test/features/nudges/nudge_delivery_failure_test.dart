@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/nudges/data/android_voice_nudge_bridge.dart';
-import 'package:one_one_app/features/nudges/nudge_cooldowns.dart';
-import 'package:one_one_app/features/nudges/nudge_status_memory.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   group('NudgeDeliveryFailure', () {

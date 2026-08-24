@@ -1,13 +1,4 @@
-import 'dart:async';
-
-import 'package:firebase_database/firebase_database.dart';
-import 'package:flutter/material.dart';
-
-import '../../../core/firebase/app_database.dart';
-import '../../identity/ui/profile_avatar.dart';
-import '../data/group_repository.dart';
-import '../models/group_member_summary.dart';
-import '../models/group_summary.dart';
+import 'package:one_one_app/one_one.dart';
 
 enum GroupManagementOutcome { membershipEnded, groupDeleted }
 

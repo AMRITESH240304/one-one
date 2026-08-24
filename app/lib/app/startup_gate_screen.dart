@@ -1,27 +1,4 @@
-import 'dart:async';
-
-import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-import '../features/groups/data/group_repository.dart';
-import '../features/groups/data/invite_link_bridge.dart';
-import '../features/groups/models/group_summary.dart';
-import '../features/identity/data/identity_home_bootstrap.dart';
-import '../features/identity/data/identity_repository.dart';
-import '../features/identity/data/last_active_group_store.dart';
-import '../features/identity/models/identity_session.dart';
-import '../features/identity/ui/identity_home_screen.dart';
-import '../features/identity/ui/no_groups_screen.dart';
-import '../core/network/api_client.dart';
-import '../core/firebase/crashlytics_service.dart';
-import 'brand_splash_screen.dart';
-import 'display_name_screen.dart';
-import 'native_splash_bridge.dart';
-import 'profile_picture_screen.dart';
-import 'setup_permission_screen.dart';
-import 'startup_performance.dart';
+import 'package:one_one_app/one_one.dart';
 
 class StartupGateScreen extends StatefulWidget {
   const StartupGateScreen({super.key});

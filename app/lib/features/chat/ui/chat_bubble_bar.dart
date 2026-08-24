@@ -1,11 +1,4 @@
-import 'dart:async';
-
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../../../core/ui/bottom_system_inset.dart';
-import '../data/chat_message_repository.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Bottom messages bar whose content depends on group online state:
 /// - All offline: predefined text chips + pinned keyboard.

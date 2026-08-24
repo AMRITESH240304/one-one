@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:one_one_app/one_one.dart';
 
 enum LegalDocument { terms, privacy }
 

@@ -1,5 +1,4 @@
-import 'models/media_volume_reading.dart';
-import 'nudge_cooldowns.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Explicit reply from a recipient after a nudge was delivered.
 enum NudgeRecipientReply { declined, snoozed }

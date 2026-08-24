@@ -1,8 +1,4 @@
-import 'dart:math' as math;
-
-import 'package:flutter/material.dart';
-
-import '../../online/audio_output_bridge.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Lucide-style call-output glyphs painted in a 24×24 view box.
 ///
@@ -127,8 +123,8 @@ class _LucideAudioPainter extends CustomPainter {
 
     canvas.drawArc(
       const Rect.fromLTWH(3, 3, 18, 18),
-      math.pi,
-      math.pi,
+      pi,
+      pi,
       false,
       stroke,
     );

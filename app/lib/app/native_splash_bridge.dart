@@ -1,6 +1,4 @@
-import 'dart:async';
-
-import 'package:flutter/services.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Bridges to the native Android splash (`MainActivity.installSplashScreen`
 /// + `setKeepOnScreenCondition`). The native splash owns the branded logo

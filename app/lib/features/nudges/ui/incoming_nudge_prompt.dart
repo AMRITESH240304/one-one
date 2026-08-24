@@ -1,8 +1,4 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../../../core/ui/bottom_system_inset.dart';
-import '../models/active_nudge.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// One row of incoming-nudge UI, shared by the dialogue overlay and the
 /// optional multi-nudge list sheet so either surface can be swapped in.

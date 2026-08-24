@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/groups/group_service_readiness.dart';
-import 'package:one_one_app/features/groups/models/group_member_summary.dart';
-import 'package:one_one_app/features/online/models/member_availability.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   const owner = GroupMemberSummary(

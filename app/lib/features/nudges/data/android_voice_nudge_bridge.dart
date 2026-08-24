@@ -1,12 +1,4 @@
-import 'dart:async';
-import 'dart:io';
-
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../identity/models/haptics_intensity.dart';
-import '../models/active_nudge.dart';
+import 'package:one_one_app/one_one.dart';
 
 class AndroidVoiceNudgeBridge {
   static const MethodChannel _channel = MethodChannel('app.oneone/voice_nudge');
