@@ -678,13 +678,17 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           _chatMessages = const [];
         }
       });
+      LogManager.setIdentity(groupId: selected?.groupId ?? '');
       if (selected != null) {
+        unawaited(AppTelemetry.setActiveGroup(selected.groupId));
         unawaited(
           _precacheGroupMemberPhotos(
             membersByGroupId[selected.groupId] ?? const [],
           ),
         );
         _listenToMemberProfiles(membersByGroupId[selected.groupId] ?? const []);
+      } else {
+        unawaited(AppTelemetry.setActiveGroup(null));
       }
       _syncCarouselToSelectedGroup();
 
@@ -2041,6 +2045,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _chatMessages = const [];
     });
     _peerReconnect.clear();
+    // Keep native DeviceLog.groupId in sync so FCM can suppress chat piles
+    // only for the group currently on screen (not every foreground chat).
+    LogManager.setIdentity(groupId: group.groupId);
     unawaited(LastActiveGroupStore.write(_session.userId, group.groupId));
     unawaited(AppTelemetry.setActiveGroup(group.groupId));
     if (cachedMembers == null) {

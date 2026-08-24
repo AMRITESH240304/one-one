@@ -131,6 +131,9 @@ object DeviceLog {
 
     fun currentUserId(): String? = userId.takeIf { it.isNotBlank() && it != "-" }
 
+    /** Group the Flutter UI is currently viewing, if known. */
+    fun currentGroupId(): String? = groupId.takeIf { it.isNotBlank() && it != "-" }
+
     fun wasAppInBackground(): Boolean {
         val info = ActivityManager.RunningAppProcessInfo()
         ActivityManager.getMyMemoryState(info)

@@ -470,7 +470,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
 
     private fun showChatPileNotification(message: RemoteMessage) {
         val groupId = message.data["groupId"]?.takeIf { it.isNotBlank() } ?: return
-        if (!DeviceLog.wasAppInBackground()) {
+        // Foreground + already viewing this group: bubbles are on screen, so
+        // skip the shade. Other groups (and all background deliveries) still
+        // notify — do not broaden this gate to every foreground chat.
+        if (!DeviceLog.wasAppInBackground() && DeviceLog.currentGroupId() == groupId) {
             ChatPileStore.reset(this, groupId)
             VoiceNudgeNotifications.cancelChatPile(this, groupId)
             return
