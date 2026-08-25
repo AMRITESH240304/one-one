@@ -127,6 +127,17 @@
         ".write": "auth != null && newData.child('recipientUserId').val() == auth.uid"
       }
     },
+    "userNudgeDeliveries": {
+      "$senderUserId": {
+        ".read": "auth != null && auth.uid == $senderUserId",
+        "$eventId": {
+          "$recipientUserId": {
+            ".write": "auth != null && auth.uid == $recipientUserId",
+            ".validate": "newData.hasChildren(['eventId', 'status', 'senderUserId', 'recipientUserId']) && newData.child('eventId').val() == $eventId && newData.child('senderUserId').val() == $senderUserId && newData.child('recipientUserId').val() == $recipientUserId && (newData.child('status').val() == 'played' || newData.child('status').val() == 'failed')"
+          }
+        }
+      }
+    },
     "voiceNudges": {
       ".indexOn": ["groupId"],
       ".read": false,

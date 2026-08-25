@@ -1,6 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { getRealtimeDatabase } from "../firebase/database.js";
-import { sendAndroidDataPushes } from "../firebase/messaging.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
 
@@ -104,54 +103,20 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
   const { ticket, status, reason, attention, health } = input;
   const now = nowSeconds();
 
-  // Audit writes (per-event record + per-recipient rollup) run in the
-  // background. They must never delay the real-time sender confirmation, so
-  // the sender push below starts without waiting on these RTDB round trips.
+  // Audit only. Sender-visible delivery status is written directly to RTDB by
+  // the receiving device (userNudgeDeliveries/...) — no Render hop for status.
   void persistDeliveryAudit({ ticket, status, reason, attention, health, now });
-
-  const senderDevices = await collectAndroidDevices(ticket.senderUserId);
-  if (senderDevices.length === 0) {
-    return {
-      eventId: ticket.eventId,
-      status,
-      reason: reason ?? null,
-      attention: attention ?? null,
-      notifiedSenderDevices: 0
-    };
-  }
-
-  const pushResult = await sendAndroidDataPushes(
-    senderDevices.map((fcmToken) => ({
-      token: fcmToken,
-      data: {
-        type: "nudge_delivery_result",
-        eventId: ticket.eventId,
-        groupId: ticket.groupId,
-        kind: ticket.kind,
-        recipientUserId: ticket.recipientUserId,
-        recipientName: ticket.recipientName,
-        status,
-        reason: reason ?? "",
-        attention: attention ?? ""
-      }
-    })),
-    30 * 1000
-  );
 
   return {
     eventId: ticket.eventId,
     status,
     reason: reason ?? null,
-    attention: attention ?? null,
-    notifiedSenderDevices: senderDevices.length,
-    sent: pushResult.successCount
+    attention: attention ?? null
   };
 }
 
 /**
- * Background audit persistence for a delivery outcome. Runs independently of
- * the sender confirmation push so RTDB write/transaction latency never delays
- * the sender from seeing "played". Both writes are individually non-fatal.
+ * Background audit persistence for a delivery outcome. Not used for sender UI.
  */
 async function persistDeliveryAudit(input: {
   ticket: AckTicket;
@@ -211,7 +176,7 @@ async function persistDeliveryAudit(input: {
       attention: attention ?? null,
       health: health ?? null
     },
-    "nudge delivery outcome recorded"
+    "nudge delivery audit recorded"
   );
 }
 
@@ -275,20 +240,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function toNumber(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
-}
-
-async function collectAndroidDevices(userId: string): Promise<string[]> {
-  const snapshot = await getRealtimeDatabase().ref(`userDevices/${userId}`).get();
-  if (!snapshot.exists()) return [];
-  const devices: string[] = [];
-  for (const value of Object.values(snapshot.val() as Record<string, unknown>)) {
-    if (typeof value !== "object" || value === null) continue;
-    const v = value as Record<string, unknown>;
-    if (v.deviceState !== "active" || v.platform !== "android") continue;
-    const fcmToken = v.fcmToken?.toString().trim();
-    if (fcmToken) devices.push(fcmToken);
-  }
-  return devices;
 }
 
 function nowSeconds() {
