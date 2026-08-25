@@ -93,6 +93,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   // immediately — push nudges have no such confirmation and are unaffected.
   StreamSubscription<NudgeDeliveryResult>? _deliverySub;
   StreamSubscription<NudgeRecipientResponse>? _responseSub;
+  StreamSubscription<List<NudgeDeliveryResult>>? _deliveryStatusSub;
   String? _awaitingEventId;
 
   /// Kept after delivery finalize so late decline/snooze replies still match.
@@ -117,10 +118,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   MediaVolumeFeedback _rtdbVolumeFeedback = MediaVolumeFeedback.none;
 
   /// Initial wait for delivery/ack status after send. Missing acks at this
-  /// point enter a grace buffer — they are NOT marked dead yet.
+  /// point trigger an RTDB get; still-missing enter a short grace buffer —
+  /// they are NOT marked dead yet. Live RTDB listen + FCM update instantly.
   static const _deliveryStatusCheckTimeout = Duration(seconds: 4);
-  /// Extra buffer after the status check before a conclusive timeout/dead
-  /// state. Total confirmation window ≈ 7s (4s + 3s).
+  /// Extra buffer after the status-check RTDB get before a conclusive
+  /// timeout/dead state. Total confirmation window ≈ 7s (4s + 3s).
   static const _deliveryGracePeriod = Duration(seconds: 3);
 
   @override
@@ -280,6 +282,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     _recordingCapTimer?.cancel();
     _cooldownTicker?.cancel();
     _cancelDeliveryWaitTimers();
+    _stopDeliveryStatusWatch();
     _autoDismissTimer?.cancel();
     unawaited(_deliverySub?.cancel());
     unawaited(_responseSub?.cancel());
@@ -474,6 +477,7 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
         _messagePending = true;
       }
     });
+    _startDeliveryStatusWatch(eventId);
     _recordLastStatus(
       LastNudgeStatus.waiting,
       'Waiting for receiver',
@@ -496,39 +500,61 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
   }
 
   /// Called ~4s after send when some recipients may still be pending.
-  /// Enters a short grace buffer; conclusive failure only after grace ends.
+  /// Reconciles via RTDB immediately; only enters grace if still incomplete.
   void _onDeliveryStatusCheckElapsed(String eventId) {
-    final pending = _pendingRecipientIds();
-    final elapsedMs = _deliveryElapsedMs();
+    unawaited(_runDeliveryStatusCheck(eventId));
+  }
+
+  Future<void> _runDeliveryStatusCheck(String eventId) async {
+    if (!mounted || _awaitingEventId != eventId) return;
+    final pendingBefore = _pendingRecipientIds();
     final checkAt = DateTime.now();
     LogManager.log(
       LogLevel.info,
       'NudgeService',
       'Delivery status check eventId=$eventId '
           'checkAt=${checkAt.toIso8601String()} '
-          'elapsedSinceSentMs=$elapsedMs '
+          'elapsedSinceSentMs=${_deliveryElapsedMs()} '
           'acked=[${_resultsByUserId.entries.map((e) => '${e.key}:${e.value.status}').join(', ')}] '
-          'pending=[${pending.map((id) {
+          'pending=[${pendingBefore.map((id) {
             final p = _expectedRecipients[id];
             return '${p?.displayName ?? '?'}:$id';
           }).join(', ')}]',
       groupId: widget.group.groupId,
     );
 
-    if (pending.isEmpty) {
+    if (pendingBefore.isEmpty) {
       _cancelDeliveryWaitTimers();
       _finalizeDeliverySummary(timedOut: false);
       return;
     }
 
-    // Phase 2: grace/buffer — still pending, not dead yet.
+    // Authoritative RTDB get — often lands ACKs whose FCM push is still in flight.
+    await _reconcileFromRtdb(eventId, source: 'status_check');
+    if (!mounted || _awaitingEventId != eventId) return;
+
+    final pendingAfter = _pendingRecipientIds();
+    if (pendingAfter.isEmpty) {
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'Delivery status check complete via RTDB eventId=$eventId '
+            'elapsedSinceSentMs=${_deliveryElapsedMs()}',
+        groupId: widget.group.groupId,
+      );
+      _cancelDeliveryWaitTimers();
+      _finalizeDeliverySummary(timedOut: false);
+      return;
+    }
+
+    // Phase 2: short grace — still pending, not dead yet.
     LogManager.log(
       LogLevel.info,
       'NudgeService',
       'Delivery grace period start eventId=$eventId '
-          'graceAt=${checkAt.toIso8601String()} '
+          'graceAt=${DateTime.now().toIso8601String()} '
           'graceMs=${_deliveryGracePeriod.inMilliseconds} '
-          'pending=[${pending.map((id) {
+          'pending=[${pendingAfter.map((id) {
             final p = _expectedRecipients[id];
             return '${p?.displayName ?? '?'}:$id';
           }).join(', ')}]',
@@ -536,21 +562,108 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     );
     _deliveryTimeoutTimer = Timer(_deliveryGracePeriod, () {
       if (!mounted || _awaitingEventId != eventId) return;
-      final timeoutAt = DateTime.now();
+      unawaited(_onDeliveryGraceElapsed(eventId));
+    });
+  }
+
+  /// End of confirmation window: one last RTDB get before any timeout/dead.
+  Future<void> _onDeliveryGraceElapsed(String eventId) async {
+    final timeoutAt = DateTime.now();
+    LogManager.log(
+      LogLevel.warn,
+      'NudgeService',
+      'Delivery confirmation window elapsed eventId=$eventId '
+          'timeoutAt=${timeoutAt.toIso8601String()} '
+          'elapsedSinceSentMs=${_deliveryElapsedMs()} '
+          'stillPendingBeforeReconcile=[${_pendingRecipientIds().map((id) {
+            final p = _expectedRecipients[id];
+            return '${p?.displayName ?? '?'}:$id';
+          }).join(', ')}]',
+      groupId: widget.group.groupId,
+    );
+
+    await _reconcileFromRtdb(eventId, source: 'grace_timeout');
+    if (!mounted || _awaitingEventId != eventId) return;
+
+    final stillPending = _pendingRecipientIds();
+    LogManager.log(
+      stillPending.isEmpty ? LogLevel.info : LogLevel.warn,
+      'NudgeService',
+      'Delivery confirmation after RTDB reconcile eventId=$eventId '
+          'elapsedSinceSentMs=${_deliveryElapsedMs()} '
+          'stillPending=[${stillPending.map((id) {
+            final p = _expectedRecipients[id];
+            return '${p?.displayName ?? '?'}:$id';
+          }).join(', ')}] '
+          'acked=[${_resultsByUserId.entries.map((e) => '${e.key}:${e.value.status}').join(', ')}]',
+      groupId: widget.group.groupId,
+    );
+    _finalizeDeliverySummary(timedOut: stillPending.isNotEmpty);
+  }
+
+  Future<void> _reconcileFromRtdb(
+    String eventId, {
+    required String source,
+  }) async {
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Delivery RTDB reconcile start eventId=$eventId source=$source '
+          'elapsedSinceSentMs=${_deliveryElapsedMs()}',
+      groupId: widget.group.groupId,
+    );
+    final results = await NudgeDeliveryStatusStore.instance.loadFromRtdb(
+      senderUserId: widget.currentUserId,
+      eventId: eventId,
+    );
+    for (final result in results) {
+      _onDeliveryResult(result, source: 'rtdb_$source');
+    }
+  }
+
+  void _startDeliveryStatusWatch(String eventId) {
+    _stopDeliveryStatusWatch();
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Delivery RTDB listen attach eventId=$eventId '
+          'senderUserId=${widget.currentUserId} '
+          'elapsedSinceSentMs=${_deliveryElapsedMs()}',
+      groupId: widget.group.groupId,
+    );
+    _deliveryStatusSub = NudgeDeliveryStatusStore.instance
+        .watch(
+          senderUserId: widget.currentUserId,
+          eventId: eventId,
+        )
+        .listen(
+          (results) {
+            for (final result in results) {
+              _onDeliveryResult(result, source: 'rtdb');
+            }
+          },
+          onError: (Object error) {
+            LogManager.log(
+              LogLevel.warn,
+              'NudgeService',
+              'Delivery RTDB watch error eventId=$eventId detail=$error',
+              groupId: widget.group.groupId,
+            );
+          },
+        );
+  }
+
+  void _stopDeliveryStatusWatch() {
+    if (_deliveryStatusSub != null) {
       LogManager.log(
-        LogLevel.warn,
+        LogLevel.info,
         'NudgeService',
-        'Delivery confirmation final timeout eventId=$eventId '
-            'timeoutAt=${timeoutAt.toIso8601String()} '
-            'elapsedSinceSentMs=${_deliveryElapsedMs()} '
-            'stillPending=[${_pendingRecipientIds().map((id) {
-              final p = _expectedRecipients[id];
-              return '${p?.displayName ?? '?'}:$id';
-            }).join(', ')}]',
+        'Delivery RTDB listen detach eventId=${_lastEventId ?? _awaitingEventId}',
         groupId: widget.group.groupId,
       );
-      _finalizeDeliverySummary(timedOut: true);
-    });
+    }
+    unawaited(_deliveryStatusSub?.cancel());
+    _deliveryStatusSub = null;
   }
 
   List<String> _pendingRecipientIds() {
@@ -568,24 +681,34 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
     return DateTime.now().difference(started).inMilliseconds;
   }
 
-  void _onDeliveryResult(NudgeDeliveryResult result) {
+  void _onDeliveryResult(
+    NudgeDeliveryResult result, {
+    String source = 'fcm',
+  }) {
     if (!mounted) return;
-    if (result.eventId != _awaitingEventId) {
+    final awaiting = _awaitingEventId;
+    final lastId = _lastEventId;
+    final isActiveWait = awaiting != null && result.eventId == awaiting;
+    final isLateForLast =
+        !isActiveWait && lastId != null && result.eventId == lastId;
+    if (!isActiveWait && !isLateForLast) {
       LogManager.log(
         LogLevel.warn,
         'NudgeService',
         'Delivery result ignored: eventId mismatch result=${result.eventId} '
-            'awaiting=$_awaitingEventId status=${result.status} '
-            'elapsedSinceSentMs=${_deliveryElapsedMs()}',
+            'awaiting=$awaiting last=$lastId status=${result.status} '
+            'source=$source elapsedSinceSentMs=${_deliveryElapsedMs()}',
         groupId: widget.group.groupId,
       );
       return;
     }
+
     final ackAt = DateTime.now();
     LogManager.log(
       LogLevel.info,
       'NudgeService',
       'Delivery result matched eventId=${result.eventId} status=${result.status} '
+          'source=$source late=$isLateForLast '
           'ackAt=${ackAt.toIso8601String()} '
           'elapsedSinceSentMs=${_deliveryElapsedMs()} '
           'reason=${result.reason ?? '-'} attention=${result.attention ?? '-'} '
@@ -594,9 +717,6 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       groupId: widget.group.groupId,
     );
     if (result.played && result.attention != null) {
-      // Silent case: the nudge genuinely played but the recipient likely did
-      // not hear it. Log explicitly so on-device logs explain the muted / low
-      // volume state when they are retrieved for debugging.
       LogManager.log(
         LogLevel.warn,
         'NudgeService',
@@ -621,6 +741,56 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       );
     }
 
+    final matchedId = _matchDeliveryRecipientId(result);
+    final existing = _resultsByUserId[matchedId];
+    // Never let a timeout/failed overwrite a real played ACK (stale timer /
+    // duplicate reconcile), and skip no-op re-applies from RTDB watches.
+    if (existing != null && existing.played && !result.played) {
+      return;
+    }
+    if (existing != null &&
+        existing.status == result.status &&
+        existing.attention == result.attention &&
+        existing.reason == result.reason) {
+      if (isLateForLast) return;
+      // Active wait: still check whether everyone is done (e.g. RTDB replay).
+    } else {
+      _resultsByUserId[matchedId] = result;
+    }
+
+    if (isLateForLast) {
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'Delivery late reconcile eventId=${result.eventId} source=$source '
+            'recipientUserId=$matchedId status=${result.status} '
+            'clearsPriorFailure=${existing != null && !existing.played && result.played} '
+            'elapsedSinceSentMs=${_deliveryElapsedMs()}',
+        groupId: widget.group.groupId,
+      );
+      _refreshFinalDeliveryUiFromResults();
+      return;
+    }
+
+    _refreshInProgressDeliveryUi();
+
+    final expectedCount = _expectedRecipients.isEmpty
+        ? 1
+        : _expectedRecipients.length;
+    final resolvedExpected = _expectedRecipients.isEmpty
+        ? _resultsByUserId.length
+        : _expectedRecipients.keys
+            .where((id) => _resultsByUserId.containsKey(id))
+            .length;
+    if (resolvedExpected >= expectedCount) {
+      _cancelDeliveryWaitTimers();
+      _finalizeDeliverySummary(timedOut: false);
+    } else {
+      setState(() {});
+    }
+  }
+
+  String _matchDeliveryRecipientId(NudgeDeliveryResult result) {
     String? matchedId = result.recipientUserId;
     if (matchedId == null || !_expectedRecipients.containsKey(matchedId)) {
       final name = result.recipientName?.trim().toLowerCase();
@@ -640,26 +810,75 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
           result.recipientName ??
           'unknown_${_resultsByUserId.length}';
     }
+    return matchedId;
+  }
 
-    _resultsByUserId[matchedId] = result;
-    _refreshInProgressDeliveryUi();
+  /// Rebuild badges/message after a late ACK clears a premature timeout skull.
+  void _refreshFinalDeliveryUiFromResults() {
+    final summaryMessage = _buildDeliveryMessage(partial: false);
+    final signifiers = _snapshotSignifiers();
+    final failed = _resultsByUserId.values.where((r) => !r.played).toList();
+    final volumeWarnings = _mergedVolumeWarnings();
+    LogManager.log(
+      LogLevel.info,
+      'NudgeService',
+      'Delivery UI refresh after late/RTDB update '
+          'eventId=$_lastEventId failed=${failed.length} '
+          'results=[${_resultsByUserId.entries.map((e) => '${e.key}:${e.value.status}').join(', ')}] '
+          'elapsedSinceSentMs=${_deliveryElapsedMs()}',
+      groupId: widget.group.groupId,
+    );
+    final anyDeclined = _repliesByUserId.values.any(
+      (r) => r == NudgeRecipientReply.declined,
+    );
+    final anySnoozed = _repliesByUserId.values.any(
+      (r) => r == NudgeRecipientReply.snoozed,
+    );
 
-    final expectedCount = _expectedRecipients.isEmpty
-        ? 1
-        : _expectedRecipients.length;
-    if (_resultsByUserId.length >= expectedCount) {
-      // All expected recipients resolved — cancel any pending status-check /
-      // grace failure timer immediately so a stale timeout cannot overwrite
-      // a successful late ack.
-      _cancelDeliveryWaitTimers();
-      _finalizeDeliverySummary(timedOut: false);
-    } else {
-      // Keep waiting independently for remaining recipients through the full
-      // confirmation window (status check + grace). Do not early-finalize:
-      // that used to synthesize failed/unknown for stragglers ~1.5s after the
-      // first played ack and show the skull incorrectly.
-      setState(() {});
+    if (failed.isEmpty) {
+      NudgeFailureMemory.instance.clearGroup(widget.group.groupId);
     }
+
+    if (failed.isNotEmpty) {
+      _recordLastStatus(
+        LastNudgeStatus.failed,
+        summaryMessage,
+        signifiers: signifiers,
+      );
+    } else if (anyDeclined) {
+      _recordLastStatus(
+        LastNudgeStatus.declined,
+        summaryMessage,
+        signifiers: signifiers,
+      );
+    } else if (anySnoozed) {
+      _recordLastStatus(
+        LastNudgeStatus.snoozed,
+        summaryMessage,
+        signifiers: signifiers,
+      );
+    } else if (volumeWarnings.isNotEmpty) {
+      final allMuted = volumeWarnings.every((l) => l.contains(' is muted'));
+      _recordLastStatus(
+        allMuted ? LastNudgeStatus.volumeMuted : LastNudgeStatus.volumeLow,
+        summaryMessage,
+        signifiers: signifiers,
+      );
+    } else {
+      _recordLastStatus(
+        LastNudgeStatus.played,
+        summaryMessage,
+        signifiers: signifiers,
+      );
+    }
+
+    setState(() {
+      _showDeliveryBadges = true;
+      _messagePending = false;
+      _message = summaryMessage;
+      _messageIsError = failed.isNotEmpty;
+      _messageIsWarning = failed.isEmpty && volumeWarnings.isNotEmpty;
+    });
   }
 
   void _refreshInProgressDeliveryUi() {

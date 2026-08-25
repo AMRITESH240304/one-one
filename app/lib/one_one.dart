@@ -151,6 +151,7 @@ export 'features/nudges/data/active_nudge_inbox.dart';
 export 'features/nudges/data/active_nudge_sync.dart';
 export 'features/nudges/data/android_voice_nudge_bridge.dart';
 export 'features/nudges/data/media_volume_store.dart';
+export 'features/nudges/data/nudge_delivery_status_store.dart';
 export 'features/nudges/data/nudge_repository.dart';
 export 'features/nudges/data/voice_nudge_audio.dart';
 export 'features/nudges/models/active_nudge.dart';

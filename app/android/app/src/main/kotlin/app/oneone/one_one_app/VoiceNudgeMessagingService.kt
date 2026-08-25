@@ -385,10 +385,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             // The playback service never got a chance to run (and therefore
             // never got to POST its own ack) — report the specific reason
             // directly so the sender doesn't just see a generic timeout.
-            VoiceNudgeDeliveryAck.postFailure(
-                data["ackUrl"],
-                data["deliveryToken"],
-                failureReason,
+            VoiceNudgeDeliveryAck.reportFromFcmData(
+                data,
+                status = "failed",
+                reason = failureReason,
             )
             val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
             val notificationId = VoiceNudgeNotifications.idFor(eventId)
@@ -649,10 +649,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 "importance=${channelImportance ?: "legacy"}",
         )
         if (!notificationsEnabled) {
-            VoiceNudgeDeliveryAck.postFailure(
-                data["ackUrl"],
-                data["deliveryToken"],
-                "permission_denied_notifications",
+            VoiceNudgeDeliveryAck.reportFromFcmData(
+                data,
+                status = "failed",
+                reason = "permission_denied_notifications",
             )
             return
         }
@@ -662,9 +662,9 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             fun ackPlayedOnce() {
                 if (acked) return
                 acked = true
-                VoiceNudgeDeliveryAck.postPlayed(
-                    data["ackUrl"],
-                    data["deliveryToken"],
+                VoiceNudgeDeliveryAck.reportFromFcmData(
+                    data,
+                    status = "played",
                 )
             }
             NotificationAvatarHelper.applyLargeIcon(
@@ -692,10 +692,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
                 } catch (error: SecurityException) {
                     VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
                     if (!acked) {
-                        VoiceNudgeDeliveryAck.postFailure(
-                            data["ackUrl"],
-                            data["deliveryToken"],
-                            "permission_denied_notifications",
+                        VoiceNudgeDeliveryAck.reportFromFcmData(
+                            data,
+                            status = "failed",
+                            reason = "permission_denied_notifications",
                         )
                     }
                 }
@@ -706,10 +706,10 @@ class VoiceNudgeMessagingService : FirebaseMessagingService() {
             )
         } catch (error: SecurityException) {
             VoiceNudgeDiagnostics.logFailure("[FCM-E10] Notification permission", error)
-            VoiceNudgeDeliveryAck.postFailure(
-                data["ackUrl"],
-                data["deliveryToken"],
-                "permission_denied_notifications",
+            VoiceNudgeDeliveryAck.reportFromFcmData(
+                data,
+                status = "failed",
+                reason = "permission_denied_notifications",
             )
         }
     }

@@ -1017,42 +1017,47 @@ class VoiceNudgePlaybackService : Service() {
         attention: String? = null,
         after: () -> Unit,
     ) {
-        val ackUrl = request.ackUrl
-        val deliveryToken = request.deliveryToken
         Log.d(
             VoiceNudgeDiagnostics.tag,
             "[FCM-D] acknowledge status=$status reason=${reason ?: "none"} " +
                 "eventSuffix=${request.eventId.takeLast(6)} " +
-                "hasAckUrl=${ackUrl != null} hasToken=${deliveryToken != null}",
+                "hasAckUrl=${request.ackUrl != null} hasToken=${request.deliveryToken != null}",
         )
+
+        // Authoritative sender status: RTDB only (no Render hop).
+        NudgeDeliveryStatusRtdb.write(
+            senderUserId = request.senderUserId,
+            eventId = request.eventId,
+            groupId = request.groupId,
+            kind = request.kind,
+            status = status,
+            reason = reason,
+            attention = attention,
+        )
+        DeviceLog.info(
+            "NudgeService",
+            "VOICE_NUDGE_PLAYBACK_CONFIRMATION_SENT nudgeId=${request.eventId} " +
+                "status=$status reason=${reason ?: "none"} " +
+                "attention=${attention ?: "-"} via=rtdb",
+            groupId = request.groupId,
+        )
+
+        val ackUrl = request.ackUrl
+        val deliveryToken = request.deliveryToken
+        // Optional legacy audit POST — does not drive sender UI.
         if (ackUrl == null || deliveryToken == null) {
             Log.d(
                 VoiceNudgeDiagnostics.tag,
-                "[FCM-D] acknowledge: missing ack URL/token, skipping network ack",
-            )
-            DeviceLog.warn(
-                "NudgeService",
-                "Delivery ack skipped: missing ackUrl/token status=$status " +
-                    "eventId=${request.eventId}",
-                groupId = request.groupId,
+                "[FCM-D] acknowledge: no ack URL/token — RTDB status written, skipping audit POST",
             )
             mainHandler.post(after)
             return
         }
-        // Guard: if the service is shutting down and the executor has already
-        // been terminated, log a warning and bail out rather than throwing a
-        // RejectedExecutionException.
         if (networkExecutor.isShutdown || networkExecutor.isTerminated) {
             Log.w(
                 VoiceNudgeDiagnostics.tag,
-                "[FCM-W9] Delivery ack skipped — executor is shut down " +
+                "[FCM-W9] Audit ack skipped — executor is shut down " +
                     "eventSuffix=${request.eventId.takeLast(6)}",
-            )
-            DeviceLog.warn(
-                "NudgeService",
-                "Delivery ack skipped: executor shut down status=$status " +
-                    "eventId=${request.eventId}",
-                groupId = request.groupId,
             )
             mainHandler.post(after)
             return
@@ -1062,7 +1067,7 @@ class VoiceNudgePlaybackService : Service() {
             try {
                 Log.d(
                     VoiceNudgeDiagnostics.tag,
-                    "[FCM-D] acknowledge: posting ack to ${ackUrl.substringAfterLast('/').take(24)}",
+                    "[FCM-D] acknowledge: audit POST to ${ackUrl.substringAfterLast('/').take(24)}",
                 )
                 val opened = URL(ackUrl).openConnection() as HttpURLConnection
                 connection = opened
@@ -1076,30 +1081,27 @@ class VoiceNudgePlaybackService : Service() {
                     put("status", status)
                     if (reason != null) put("reason", reason)
                     if (health != null) put("health", health.toJson())
-                    // Audibility concern for an otherwise-successful playback
-                    // (mute / very-low volume). Distinct from `reason`, which
-                    // only accompanies a genuine `failed`.
                     if (attention != null) put("attention", attention)
                 }
                 opened.outputStream.use { it.write(body.toString().toByteArray()) }
                 val responseCode = opened.responseCode
                 Log.i(
                     VoiceNudgeDiagnostics.tag,
-                    "[FCM-16] Delivery acknowledgement status=$status " +
+                    "[FCM-16] Delivery audit ack status=$status " +
                         "reason=${reason ?: "none"} HTTP=$responseCode",
                 )
                 DeviceLog.info(
                     "NudgeService",
-                    "VOICE_NUDGE_PLAYBACK_CONFIRMATION_SENT nudgeId=${request.eventId} " +
+                    "VOICE_NUDGE_PLAYBACK_AUDIT_ACK nudgeId=${request.eventId} " +
                         "status=$status reason=${reason ?: "none"} " +
                         "attention=${attention ?: "-"} HTTP=$responseCode",
                     groupId = request.groupId,
                 )
             } catch (error: Exception) {
-                VoiceNudgeDiagnostics.logFailure("[FCM-E7] Delivery acknowledgement", error)
+                VoiceNudgeDiagnostics.logFailure("[FCM-E7] Delivery audit acknowledgement", error)
                 DeviceLog.warn(
                     "NudgeService",
-                    "Delivery ack failed status=$status reason=${reason ?: "none"} " +
+                    "Delivery audit ack failed status=$status reason=${reason ?: "none"} " +
                         "eventId=${request.eventId} detail=${error.message ?: "-"}",
                     groupId = request.groupId,
                 )

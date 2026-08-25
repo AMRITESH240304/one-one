@@ -98,6 +98,55 @@ object VoiceNudgeDeliveryAck {
         post(ackUrl, deliveryToken, status = "failed", reason = reason)
     }
 
+    /**
+     * Conclusive sender status via RTDB (required). Optional HTTP ack is
+     * audit-only and must not be treated as the status path.
+     */
+    fun reportStatus(
+        status: String,
+        reason: String? = null,
+        attention: String? = null,
+        senderUserId: String?,
+        eventId: String?,
+        groupId: String?,
+        kind: String?,
+        ackUrl: String? = null,
+        deliveryToken: String? = null,
+    ) {
+        NudgeDeliveryStatusRtdb.write(
+            senderUserId = senderUserId,
+            eventId = eventId,
+            groupId = groupId,
+            kind = kind,
+            status = status,
+            reason = reason,
+            attention = attention,
+        )
+        // Legacy audit POST — fire-and-forget; sender UI does not depend on it.
+        if (!ackUrl.isNullOrBlank() && !deliveryToken.isNullOrBlank()) {
+            post(ackUrl, deliveryToken, status = status, reason = reason)
+        }
+    }
+
+    fun reportFromFcmData(
+        data: Map<String, String>,
+        status: String,
+        reason: String? = null,
+        attention: String? = null,
+    ) {
+        reportStatus(
+            status = status,
+            reason = reason,
+            attention = attention,
+            senderUserId = data["senderUserId"],
+            eventId = data["eventId"],
+            groupId = data["groupId"],
+            kind = data["kind"] ?: data["type"],
+            ackUrl = data["ackUrl"],
+            deliveryToken = data["deliveryToken"],
+        )
+    }
+
     private fun post(
         ackUrl: String?,
         deliveryToken: String?,
@@ -124,7 +173,7 @@ object VoiceNudgeDeliveryAck {
                 val responseCode = opened.responseCode
                 Log.i(
                     VoiceNudgeDiagnostics.tag,
-                    "[FCM-E3-ACK] Reported $status before/without playback " +
+                    "[FCM-E3-ACK] Audit $status before/without playback " +
                         "reason=${reason ?: "none"} HTTP=$responseCode",
                 )
             } catch (error: Exception) {
