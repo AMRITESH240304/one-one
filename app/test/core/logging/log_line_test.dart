@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/core/logging/log_level.dart';
-import 'package:one_one_app/core/logging/log_line.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('formats an ISO-8601 local timestamp with UTC offset', () {

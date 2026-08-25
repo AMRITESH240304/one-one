@@ -1,8 +1,6 @@
-import 'dart:io';
-
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/identity/data/avatar_assets.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

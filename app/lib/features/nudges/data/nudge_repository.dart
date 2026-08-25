@@ -1,26 +1,33 @@
-import 'package:flutter/foundation.dart';
-
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/firebase/firebase_analytics_service.dart';
-import '../../../core/logging/log_level.dart';
-import '../../../core/logging/log_manager.dart';
-import '../../../core/network/api_client.dart';
+import 'package:one_one_app/one_one.dart';
 
 class NudgeTarget {
   const NudgeTarget.allFriends()
     : targetScope = 'all_friends',
-      targetUserId = null;
+      targetUserId = null,
+      targetUserIds = const [];
 
   const NudgeTarget.singleFriend(this.targetUserId)
-    : targetScope = 'single_friend';
+    : targetScope = 'single_friend',
+      targetUserIds = const [];
+
+  NudgeTarget.selectedFriends(List<String> userIds)
+    : targetScope = userIds.length == 1 ? 'single_friend' : 'selected_friends',
+      targetUserId = userIds.length == 1 ? userIds.first : null,
+      targetUserIds = userIds.length == 1
+          ? const []
+          : List<String>.unmodifiable(userIds);
 
   final String targetScope;
   final String? targetUserId;
+  final List<String> targetUserIds;
 
   Map<String, Object?> get json {
     final result = <String, Object?>{'targetScope': targetScope};
     final userId = targetUserId;
     if (userId != null) result['targetUserId'] = userId;
+    if (targetUserIds.isNotEmpty) {
+      result['targetUserIds'] = targetUserIds;
+    }
     return result;
   }
 
@@ -28,6 +35,9 @@ class NudgeTarget {
     final result = <String, String>{'targetScope': targetScope};
     final userId = targetUserId;
     if (userId != null) result['targetUserId'] = userId;
+    if (targetUserIds.isNotEmpty) {
+      result['targetUserIds'] = targetUserIds.join(',');
+    }
     return result;
   }
 }
@@ -46,12 +56,16 @@ class NudgeRepository {
       '/v1/groups/$groupId/nudges',
       target.json,
     );
-    final result = _requireAcceptedDelivery(response);
+    final result = _requireAcceptedDelivery(
+      response,
+      groupId: groupId,
+      kind: 'nudge',
+    );
     LogManager.log(
       LogLevel.info,
       'NudgeService',
       'Nudge sent kind=push targetScope=${target.targetScope} '
-      'eventId=${result['notificationEventId'] ?? '-'}',
+          'eventId=${result['notificationEventId'] ?? '-'}',
       groupId: groupId,
     );
     await AnalyticsService.logNudgeSent(
@@ -67,20 +81,24 @@ class NudgeRepository {
     required NudgeTarget target,
     required int durationSeconds,
   }) async {
-    if (durationSeconds != 3 && durationSeconds != 5 && durationSeconds != 10) {
+    if (durationSeconds != 3 && durationSeconds != 6 && durationSeconds != 9) {
       throw ArgumentError.value(durationSeconds, 'durationSeconds');
     }
     final response = await _apiClient.postJson(
       '/v1/groups/$groupId/ring-nudges',
       {...target.json, 'durationSeconds': durationSeconds},
     );
-    final result = _requireAcceptedDelivery(response);
+    final result = _requireAcceptedDelivery(
+      response,
+      groupId: groupId,
+      kind: 'ring_nudge',
+    );
     LogManager.log(
       LogLevel.info,
       'NudgeService',
       'Nudge sent kind=ring durationSeconds=$durationSeconds '
-      'targetScope=${target.targetScope} '
-      'eventId=${result['notificationEventId'] ?? '-'}',
+          'targetScope=${target.targetScope} '
+          'eventId=${result['notificationEventId'] ?? '-'}',
       groupId: groupId,
     );
     await AnalyticsService.logNudgeSent(
@@ -92,24 +110,48 @@ class NudgeRepository {
     return result;
   }
 
+  /// Reserves a signed GCS write URL so the recorder flush can overlap the
+  /// first network hop. [sendVoice] will retry this if [initiatedUpload] is
+  /// omitted or unusable.
+  Future<Map<String, dynamic>> initiateVoiceUpload({
+    required String groupId,
+    required NudgeTarget target,
+    required int durationMs,
+  }) {
+    return _apiClient.postJson('/v1/groups/$groupId/voice-nudges/uploads', {
+      ...target.json,
+      'durationMs': durationMs,
+    });
+  }
+
   /// Direct-to-GCS upload via signed write URL, then backend finalize/FCM.
   Future<Map<String, dynamic>> sendVoice({
     required String groupId,
     required NudgeTarget target,
     required Uint8List audio,
     required int durationMs,
+    Map<String, dynamic>? initiatedUpload,
   }) async {
-    final stopwatch = Stopwatch()..start();
+    final flowWatch = Stopwatch()..start();
+    final expectedBytes = VoiceNudgeAudio.expectedPayloadBytes(durationMs);
     debugPrint(
       '[OneOneNudge][DART-01] Requesting voice nudge signed write URL '
-      'audioBytes=${audio.length} durationMs=$durationMs '
+      'audioBytes=${audio.length} expectedBytes=$expectedBytes '
+      'legacyBytes=${VoiceNudgeAudio.legacyPayloadBytes(durationMs)} '
+      'durationMs=$durationMs bitRate=${VoiceNudgeAudio.bitRate} '
+      'sampleRate=${VoiceNudgeAudio.sampleRate} '
       'targetScope=${target.targetScope}',
     );
     try {
-      final upload = await _apiClient.postJson(
-        '/v1/groups/$groupId/voice-nudges/uploads',
-        {...target.json, 'durationMs': durationMs},
-      );
+      final reservedUpload = _usableVoiceUpload(initiatedUpload);
+      final reserved = reservedUpload != null;
+      final upload =
+          reservedUpload ??
+          await initiateVoiceUpload(
+            groupId: groupId,
+            target: target,
+            durationMs: durationMs,
+          );
       final eventId = upload['notificationEventId']?.toString();
       final uploadUrl = upload['uploadUrl']?.toString();
       if (eventId == null ||
@@ -132,40 +174,79 @@ class NudgeRepository {
       }
       if (!requiredHeaders.containsKey('content-type')) {
         requiredHeaders['content-type'] =
-            upload['contentType']?.toString() ?? 'audio/mp4';
+            upload['contentType']?.toString() ?? VoiceNudgeAudio.contentType;
       }
 
       debugPrint(
         '[OneOneNudge][DART-01B] Uploading voice nudge directly to Cloud Storage '
         'eventId=$eventId audioBytes=${audio.length}',
       );
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'VOICE_NUDGE_UPLOAD_START nudgeId=$eventId bytes=${audio.length} '
+            'durationMs=$durationMs reservedUrl=$reserved',
+        groupId: groupId,
+      );
+      final uploadWatch = Stopwatch()..start();
       await _apiClient.putBytesToUrl(
         uploadUrl,
         audio,
         headers: requiredHeaders,
       );
+      final uploadMs = uploadWatch.elapsedMilliseconds;
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'VOICE_NUDGE_UPLOAD_END nudgeId=$eventId bytes=${audio.length} '
+            'uploadMs=$uploadMs',
+        groupId: groupId,
+      );
 
       debugPrint(
         '[OneOneNudge][DART-01C] Completing voice nudge after GCS upload '
-        'eventId=$eventId elapsedMs=${stopwatch.elapsedMilliseconds}',
+        'eventId=$eventId elapsedMs=${flowWatch.elapsedMilliseconds}',
       );
-      final response = await _apiClient.postJson(
-        '/v1/groups/$groupId/voice-nudges/$eventId/complete',
-        const {},
+      final uploadTicket = upload['uploadTicket']?.toString();
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'VOICE_NUDGE_SEND_START nudgeId=$eventId',
+        groupId: groupId,
       );
+      final fcmWatch = Stopwatch()..start();
+      final response = await _apiClient
+          .postJson('/v1/groups/$groupId/voice-nudges/$eventId/complete', {
+            if (uploadTicket != null && uploadTicket.isNotEmpty)
+              'uploadTicket': uploadTicket,
+          });
       debugPrint(
         '[OneOneNudge][DART-02] Voice nudge upload accepted '
-        'audioBytes=${audio.length} elapsedMs=${stopwatch.elapsedMilliseconds} '
+        'audioBytes=${audio.length} elapsedMs=${flowWatch.elapsedMilliseconds} '
         'eventId=${response['notificationEventId'] ?? eventId} '
         'targetDevices=${response['targetDevices']} '
         'uploadMode=signed_write_url',
       );
-      final result = _requireAcceptedDelivery(response);
+      final result = _requireAcceptedDelivery(
+        response,
+        groupId: groupId,
+        kind: 'voice_nudge',
+      );
+      LogManager.log(
+        LogLevel.info,
+        'NudgeService',
+        'VOICE_NUDGE_SEND_ACK nudgeId=${result['notificationEventId'] ?? eventId} '
+            'sendMs=${fcmWatch.elapsedMilliseconds} '
+            'sent=${result['sent'] ?? '-'} '
+            'targetDevices=${result['targetDevices'] ?? '-'}',
+        groupId: groupId,
+      );
       LogManager.log(
         LogLevel.info,
         'NudgeService',
         'Nudge sent kind=voice bytes=${audio.length} durationMs=$durationMs '
-        'eventId=${result['notificationEventId'] ?? eventId}',
+            'eventId=${result['notificationEventId'] ?? eventId} '
+            'uploadMs=$uploadMs flowMs=${flowWatch.elapsedMilliseconds}',
         groupId: groupId,
       );
       await AnalyticsService.logNudgeSent(
@@ -182,7 +263,7 @@ class NudgeRepository {
     } catch (error, stack) {
       debugPrint(
         '[OneOneNudge][DART-E1] Voice nudge upload failed '
-        'audioBytes=${audio.length} elapsedMs=${stopwatch.elapsedMilliseconds} '
+        'audioBytes=${audio.length} elapsedMs=${flowWatch.elapsedMilliseconds} '
         '${error.runtimeType}: $error',
       );
       LogManager.log(
@@ -191,13 +272,15 @@ class NudgeRepository {
         'Nudge not delivered: network error. Voice send failed: $error',
         groupId: groupId,
       );
-      await CrashlyticsService.recordNudgeFailure(
-        error: error,
-        stack: stack,
-        failureReason: NudgeFailureReason.unknown,
-        groupId: groupId,
-        extras: {'checkpoint': 'voice_nudge_upload'},
-      );
+      if (error is! NudgeDeliveryException) {
+        await CrashlyticsService.recordNudgeFailure(
+          error: error,
+          stack: stack,
+          failureReason: NudgeFailureReason.unknown,
+          groupId: groupId,
+          extras: {'checkpoint': 'voice_nudge_upload'},
+        );
+      }
       rethrow;
     }
   }
@@ -229,7 +312,11 @@ class NudgeRepository {
     return response;
   }
 
-  Map<String, dynamic> _requireAcceptedDelivery(Map<String, dynamic> response) {
+  Map<String, dynamic> _requireAcceptedDelivery(
+    Map<String, dynamic> response, {
+    String? groupId,
+    String? kind,
+  }) {
     final recipientUsers = _readCount(response['recipientUsers']);
     final targetDevices = _readCount(response['targetDevices']);
     final sent = _readCount(response['sent']);
@@ -244,8 +331,20 @@ class NudgeRepository {
       );
     }
     if (sent == 0) {
+      unawaited(
+        CrashlyticsService.recordFcmNotificationHandlingFailure(
+          error: StateError(
+            'FCM rejected every target device (FCM-BE-W1) '
+            'kind=${kind ?? '-'} groupId=${groupId ?? '-'}',
+          ),
+          worker: 'FCM-BE-W1',
+          groupId: groupId,
+          eventId: response['notificationEventId']?.toString(),
+          kind: kind,
+        ),
+      );
       throw const NudgeDeliveryException(
-        'FCM rejected every target device. Check the backend FCM-BE-W1 error code.',
+        UserFacingCopy.notificationDeliveryFailure,
       );
     }
     return response;
@@ -318,4 +417,17 @@ int _readCount(Object? value) {
   if (value is int) return value;
   if (value is num) return value.toInt();
   return int.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+Map<String, dynamic>? _usableVoiceUpload(Map<String, dynamic>? upload) {
+  if (upload == null) return null;
+  final eventId = upload['notificationEventId']?.toString();
+  final uploadUrl = upload['uploadUrl']?.toString();
+  if (eventId == null ||
+      eventId.isEmpty ||
+      uploadUrl == null ||
+      uploadUrl.isEmpty) {
+    return null;
+  }
+  return upload;
 }

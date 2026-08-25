@@ -1,23 +1,21 @@
-import 'dart:async';
+import 'package:one_one_app/one_one.dart';
 
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
+/// Global navigator key used by the in-app live-session PiP overlay to pop
+/// back to the home screen from any route without requiring a BuildContext.
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
-import 'accent_theme.dart';
-import 'firebase_setup_blocked_screen.dart';
-import 'google_auth_screen.dart';
-import 'startup_gate_screen.dart';
-import 'startup_performance.dart';
-import '../core/firebase/crashlytics_service.dart';
-import '../core/firebase/firebase_analytics_service.dart';
-import '../core/firebase/firebase_bootstrap.dart';
-import '../core/logging/log_level.dart';
-import '../core/logging/log_manager.dart';
-import '../features/service_status/service_status_gate.dart';
+/// Route observer shared by all screens that need to react to push/pop events
+/// (e.g. the home screen showing/hiding the in-app live-session PiP overlay).
+final RouteObserver<ModalRoute<void>> appRouteObserver =
+    RouteObserver<ModalRoute<void>>();
+
+const SystemUiOverlayStyle _systemOverlayStyle = SystemUiOverlayStyle(
+  statusBarColor: Colors.transparent,
+  systemNavigationBarColor: Colors.transparent,
+  systemNavigationBarContrastEnforced: false,
+  systemNavigationBarIconBrightness: Brightness.light,
+  statusBarIconBrightness: Brightness.light,
+);
 
 class OneOneApp extends StatelessWidget {
   const OneOneApp({super.key});
@@ -31,6 +29,7 @@ class OneOneApp extends StatelessWidget {
       brightness: Brightness.dark,
       scaffoldBackgroundColor: const Color(0xff101010),
       canvasColor: const Color(0xff101010),
+      appBarTheme: const AppBarTheme(systemOverlayStyle: _systemOverlayStyle),
       fontFamily: GoogleFonts.poppins().fontFamily,
       textTheme: GoogleFonts.poppinsTextTheme(
         ThemeData(brightness: Brightness.dark).textTheme,
@@ -48,34 +47,51 @@ class OneOneApp extends StatelessWidget {
     // on accent changes — recreating MaterialApp tears down the navigator
     // element tree while screens are still mid setState/pop after save and
     // trips '_dependents.isEmpty'. Accent is applied via Theme in `builder`.
-    return MaterialApp(
-      title: 'Duo',
-      debugShowCheckedModeBanner: false,
-      navigatorObservers: [AnalyticsService.observer],
-      routes: {
-        '/auth': (_) => const WithForegroundTask(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: _systemOverlayStyle,
+      child: MaterialApp(
+        title: 'Duo',
+        debugShowCheckedModeBanner: false,
+        navigatorKey: appNavigatorKey,
+        navigatorObservers: [AnalyticsService.observer, appRouteObserver],
+        routes: {
+          '/auth': (_) => const WithForegroundTask(
+            child: _AuthSessionLifecycle(child: _FirebaseGate()),
+          ),
+        },
+        theme: _themeFor(
+          accentColorForKey(AccentThemeController.accentKey.value),
+        ),
+        builder: (context, child) {
+          final media = withEnsuredBottomInset(MediaQuery.of(context));
+          return MediaQuery(
+            data: media,
+            child: ValueListenableBuilder<String>(
+              valueListenable: AccentThemeController.accentKey,
+              builder: (context, accentKey, _) {
+                return Theme(
+                  data: _themeFor(accentColorForKey(accentKey)),
+                  child: ScreenUtilInit(
+                    designSize: const Size(393, 873),
+                    minTextAdapt: true,
+                    splitScreenMode: true,
+                    // Stack the in-app live-session PiP overlay on top of
+                    // all routes so it persists during in-app navigation.
+                    child: Stack(
+                      children: [
+                        child!,
+                        LiveSessionFloatingPip(navigatorKey: appNavigatorKey),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          );
+        },
+        home: const WithForegroundTask(
           child: _AuthSessionLifecycle(child: _FirebaseGate()),
         ),
-      },
-      theme: _themeFor(accentColorForKey(AccentThemeController.accentKey.value)),
-      builder: (context, child) {
-        return ValueListenableBuilder<String>(
-          valueListenable: AccentThemeController.accentKey,
-          builder: (context, accentKey, _) {
-            return Theme(
-              data: _themeFor(accentColorForKey(accentKey)),
-              child: ScreenUtilInit(
-                designSize: const Size(393, 873),
-                minTextAdapt: true,
-                splitScreenMode: true,
-                child: child,
-              ),
-            );
-          },
-        );
-      },
-      home: const WithForegroundTask(
-        child: _AuthSessionLifecycle(child: _FirebaseGate()),
       ),
     );
   }
@@ -109,7 +125,14 @@ class _AuthSessionLifecycleState extends State<_AuthSessionLifecycle>
     switch (state) {
       case AppLifecycleState.resumed:
         LogManager.log(LogLevel.info, 'AppLifecycle', 'App foregrounded');
-        unawaited(AnalyticsService.logSessionStarted());
+        unawaited(
+          AnalyticsService.logSessionStarted().then(
+            (_) {},
+            onError: (Object error, StackTrace _) {
+              debugPrint('[AppLifecycle] session_started failed: $error');
+            },
+          ),
+        );
         unawaited(_refreshFirebaseToken());
       case AppLifecycleState.inactive:
         break;
@@ -167,8 +190,9 @@ class _FirebaseGateState extends State<_FirebaseGate> {
       future: _firebaseInit,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          // Brand splash only — GoogleAuthScreen constructs IdentityRepository,
-          // which touches FirebaseAuth and must not run before init finishes.
+          // Logo-less underlay matching the native splash. GoogleAuthScreen
+          // constructs IdentityRepository, which touches FirebaseAuth and
+          // must not run before init finishes.
           return const BrandSplashScreen();
         }
 

@@ -116,7 +116,14 @@ object NotificationAvatarHelper {
         val size = (64 * context.resources.displayMetrics.density).toInt().coerceAtLeast(96)
         val key = "mono:${senderName.trim().lowercase()}:$size"
         cache[key]?.let { return it }
-        val letter = senderName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+        val letter = senderName.trim()
+            .split(Regex("\\s+"))
+            .firstOrNull { it.isNotEmpty() }
+            ?.removePrefix("@")
+            ?.firstOrNull()
+            ?.uppercaseChar()
+            ?.toString()
+            ?: "?"
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -232,10 +239,16 @@ object NotificationAvatarHelper {
         if (index < 0) return url
         val insertAt = index + marker.length
         val after = url.substring(insertAt)
-        if (after.startsWith("w_") || after.startsWith("c_") || after.startsWith("h_")) {
+        if (
+            after.startsWith("w_") ||
+            after.startsWith("c_") ||
+            after.startsWith("h_") ||
+            after.startsWith("f_") ||
+            after.startsWith("q_")
+        ) {
             return url
         }
-        return url.substring(0, insertAt) + "w_128,h_128,c_fill,q_auto/" + after
+        return url.substring(0, insertAt) + "w_128,h_128,c_fill,f_auto,q_auto/" + after
     }
 
     private fun toCircular(source: Bitmap, context: Context): Bitmap {

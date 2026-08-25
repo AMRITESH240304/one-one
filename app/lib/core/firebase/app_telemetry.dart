@@ -1,6 +1,4 @@
-import 'crashlytics_service.dart';
-import 'firebase_analytics_service.dart';
-import 'firebase_performance_service.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Dual-writes important product breadcrumbs to Analytics + Crashlytics.
 class AppTelemetry {

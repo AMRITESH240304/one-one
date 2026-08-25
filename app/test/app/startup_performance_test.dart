@@ -1,6 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/app/startup_performance.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   testWidgets('loading UI appears only after the startup threshold', (

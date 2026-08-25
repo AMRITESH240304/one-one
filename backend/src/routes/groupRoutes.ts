@@ -10,6 +10,7 @@ import {
   leaveGroup,
   listGroupMembers,
   listGroupsForUser,
+  purgeUserAccount,
   removeGroupMember
 } from "../groups/groupService.js";
 import { config } from "../config.js";
@@ -135,6 +136,15 @@ export function createGroupRoutes() {
       });
 
       response.status(200).json(result);
+    })
+  );
+
+  router.delete(
+    "/v1/account",
+    requireFirebaseAuth,
+    asyncHandler(async (request, response) => {
+      const authRequest = request as AuthenticatedRequest;
+      response.status(200).json(await purgeUserAccount(authRequest.auth.uid));
     })
   );
 

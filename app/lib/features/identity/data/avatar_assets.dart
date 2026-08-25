@@ -1,9 +1,9 @@
-import 'package:flutter/services.dart' show AssetManifest, rootBundle;
+import 'package:one_one_app/one_one.dart';
 
 /// Which bundled preset-avatar pack an [AvatarAsset] belongs to.
 enum AvatarPack {
-  avatar1('assets/avatars/', 'Avatar 1'),
-  avatar2('assets/avatars2/', 'Avatar 2');
+  avatar1('assets/avatars/', 'Classic'),
+  avatar2('assets/avatars2/', 'Studio');
 
   const AvatarPack(this.assetPrefix, this.label);
 

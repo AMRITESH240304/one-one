@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/online/models/member_availability.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   group('MemberAvailability', () {

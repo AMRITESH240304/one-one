@@ -1,6 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { getRealtimeDatabase } from "../firebase/database.js";
-import { sendAndroidDataPushes } from "../firebase/messaging.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
 
@@ -22,7 +21,7 @@ const ackTicketSecret = (() => {
   return randomBytes(32);
 })();
 
-export type NudgeKind = "ring_nudge" | "voice_nudge";
+export type NudgeKind = "ring_nudge" | "voice_nudge" | "nudge";
 
 export type AckTicket = {
   eventId: string;
@@ -74,7 +73,7 @@ function isAckTicket(value: unknown): value is AckTicket {
   return (
     typeof v.eventId === "string" &&
     typeof v.groupId === "string" &&
-    (v.kind === "ring_nudge" || v.kind === "voice_nudge") &&
+    (v.kind === "ring_nudge" || v.kind === "voice_nudge" || v.kind === "nudge") &&
     typeof v.senderUserId === "string" &&
     typeof v.recipientUserId === "string" &&
     typeof v.recipientName === "string" &&
@@ -84,9 +83,9 @@ function isAckTicket(value: unknown): value is AckTicket {
 
 // ---------------------------------------------------------------------------
 // recordNudgeDelivery — called once the receiver's device has genuinely
-// started playing the nudge (or definitively failed to). Persists the
-// outcome for later debugging and pushes a real-time result back to the
-// sender so they see accurate delivery confirmation, not just "sent".
+// started playing a ring/voice nudge, posted a notify/push notification,
+// or definitively failed to. Persists the outcome and pushes a real-time
+// result back to the sender so they see "received", not just "sent".
 // ---------------------------------------------------------------------------
 
 export type NudgeDeliveryStatus = "played" | "failed";
@@ -104,7 +103,31 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
   const { ticket, status, reason, attention, health } = input;
   const now = nowSeconds();
 
-  // Best-effort audit trail — never blocks the ack or the sender push.
+  // Audit only. Sender-visible delivery status is written directly to RTDB by
+  // the receiving device (userNudgeDeliveries/...) — no Render hop for status.
+  void persistDeliveryAudit({ ticket, status, reason, attention, health, now });
+
+  return {
+    eventId: ticket.eventId,
+    status,
+    reason: reason ?? null,
+    attention: attention ?? null
+  };
+}
+
+/**
+ * Background audit persistence for a delivery outcome. Not used for sender UI.
+ */
+async function persistDeliveryAudit(input: {
+  ticket: AckTicket;
+  status: NudgeDeliveryStatus;
+  reason?: string;
+  attention?: string;
+  health?: Record<string, unknown>;
+  now: number;
+}) {
+  const { ticket, status, reason, attention, health, now } = input;
+
   await getRealtimeDatabase()
     .ref(`nudgeDeliveries/${ticket.eventId}/${ticket.recipientUserId}`)
     .update({
@@ -132,8 +155,6 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
       );
     });
 
-  // Core troubleshooting: maintain a per-recipient rollup so we can identify
-  // users who repeatedly fail to receive nudges without scanning every event.
   await upsertRecipientDeliveryRollup({
     ticket,
     status,
@@ -155,46 +176,8 @@ export async function recordNudgeDelivery(input: RecordNudgeDeliveryInput) {
       attention: attention ?? null,
       health: health ?? null
     },
-    "nudge delivery outcome recorded"
+    "nudge delivery audit recorded"
   );
-
-  const senderDevices = await collectAndroidDevices(ticket.senderUserId);
-  if (senderDevices.length === 0) {
-    return {
-      eventId: ticket.eventId,
-      status,
-      reason: reason ?? null,
-      attention: attention ?? null,
-      notifiedSenderDevices: 0
-    };
-  }
-
-  const pushResult = await sendAndroidDataPushes(
-    senderDevices.map((fcmToken) => ({
-      token: fcmToken,
-      data: {
-        type: "nudge_delivery_result",
-        eventId: ticket.eventId,
-        groupId: ticket.groupId,
-        kind: ticket.kind,
-        recipientUserId: ticket.recipientUserId,
-        recipientName: ticket.recipientName,
-        status,
-        reason: reason ?? "",
-        attention: attention ?? ""
-      }
-    })),
-    30 * 1000
-  );
-
-  return {
-    eventId: ticket.eventId,
-    status,
-    reason: reason ?? null,
-    attention: attention ?? null,
-    notifiedSenderDevices: senderDevices.length,
-    sent: pushResult.successCount
-  };
 }
 
 /**
@@ -257,20 +240,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function toNumber(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
-}
-
-async function collectAndroidDevices(userId: string): Promise<string[]> {
-  const snapshot = await getRealtimeDatabase().ref(`userDevices/${userId}`).get();
-  if (!snapshot.exists()) return [];
-  const devices: string[] = [];
-  for (const value of Object.values(snapshot.val() as Record<string, unknown>)) {
-    if (typeof value !== "object" || value === null) continue;
-    const v = value as Record<string, unknown>;
-    if (v.deviceState !== "active" || v.platform !== "android") continue;
-    const fcmToken = v.fcmToken?.toString().trim();
-    if (fcmToken) devices.push(fcmToken);
-  }
-  return devices;
 }
 
 function nowSeconds() {

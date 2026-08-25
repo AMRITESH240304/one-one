@@ -4,12 +4,14 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Person
 import android.app.RemoteInput
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Build
+import androidx.core.graphics.drawable.IconCompat
 
 object VoiceNudgeNotifications {
     fun ensureChannels(context: Context) {
@@ -64,14 +66,20 @@ object VoiceNudgeNotifications {
         cachedAudioAvailable: Boolean = false,
         isPlaying: Boolean = false,
         largeIcon: Bitmap? = null,
+        senderUserId: String? = null,
+        groupName: String? = null,
     ): Notification {
         ensureChannels(context)
-        val openIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val contentIntent = PendingIntent.getActivity(
+        val openIntent = openNudgeIntent(
             context,
-            7001,
+            eventId,
+            groupId,
+            senderUserId,
+            VoiceNudgeNotifications.idFor(eventId),
+        )
+        val contentIntent = BrandedSplashIntents.mainActivity(
+            context,
+            requestCode(eventId, "open"),
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -83,8 +91,13 @@ object VoiceNudgeNotifications {
         }
         val configured = builder
             .setSmallIcon(nudgeSmallIcon)
-            .setContentTitle("🎙️ $senderName nudged you")
-            .setContentText(status)
+            .setContentTitle(
+                "🎙️ $senderName nudged you" +
+                    if (groupName.isNullOrBlank()) "" else " in $groupName",
+            )
+            .setContentText(
+                sanitizeNotificationCopy(status, FCM_USER_DELIVERY_FAILURE),
+            )
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -96,6 +109,13 @@ object VoiceNudgeNotifications {
         if (largeIcon != null) {
             configured.setLargeIcon(largeIcon)
         }
+        configured.addNudgeActions(
+            context = context,
+            eventId = eventId,
+            groupId = groupId,
+            responseUrl = responseUrl,
+            senderName = senderName,
+        )
         if (cachedAudioAvailable) {
             configured
                 .addAction(
@@ -112,21 +132,14 @@ object VoiceNudgeNotifications {
                             groupId,
                             responseUrl,
                             senderName,
+                            groupName,
                             isPlaying,
                         ),
                     ).build(),
                 )
                 .setDeleteIntent(cacheDeleteIntent(context, eventId))
         }
-        return configured
-            .addNudgeActions(
-                context = context,
-                eventId = eventId,
-                groupId = groupId,
-                responseUrl = responseUrl,
-                senderName = senderName,
-            )
-            .build()
+        return configured.build()
     }
 
     fun buildActionable(
@@ -138,13 +151,18 @@ object VoiceNudgeNotifications {
         title: String,
         body: String,
         largeIcon: Bitmap? = null,
+        senderUserId: String? = null,
     ): Notification {
         ensureChannels(context)
         val notificationId = idFor(eventId)
-        val openIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val contentIntent = PendingIntent.getActivity(
+        val openIntent = openNudgeIntent(
+            context,
+            eventId,
+            groupId,
+            senderUserId,
+            notificationId,
+        )
+        val contentIntent = BrandedSplashIntents.mainActivity(
             context,
             requestCode(eventId, "open"),
             openIntent,
@@ -158,8 +176,10 @@ object VoiceNudgeNotifications {
         }
         val configured = builder
             .setSmallIcon(nudgeSmallIcon)
-            .setContentTitle(title)
-            .setContentText(body)
+            .setContentTitle(sanitizeNotificationCopy(title, "Duo"))
+            .setContentText(
+                sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
+            )
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -188,13 +208,21 @@ object VoiceNudgeNotifications {
         responderName: String,
         responseAction: String,
         snoozeMinutes: Int? = null,
+        senderProcessKilled: Boolean = false,
     ): Notification {
         ensureChannels(context)
         val accepted = responseAction == "accept"
-        val body = when (responseAction) {
-            "accept" -> "Tap to join together 🤝"
-            "snooze" -> "They asked you to wait ${snoozeMinutes ?: 5} minutes ⏳"
+        val body = when {
+            accepted && senderProcessKilled -> "Tap to go online 🟢"
+            responseAction == "accept" -> "Tap to join together 🤝"
+            responseAction == "snooze" ->
+                "They asked you to wait ${snoozeMinutes ?: 5} minutes ⏳"
             else -> "They can’t join right now 💤"
+        }
+        val title = if (accepted && senderProcessKilled) {
+            "💬 $responderName accepted your nudge"
+        } else {
+            "💬 $responderName answered your nudge"
         }
         val openIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -205,7 +233,7 @@ object VoiceNudgeNotifications {
                 putExtra(VoiceNudgeContract.extraNotificationId, idFor(eventId))
             }
         }
-        val contentIntent = PendingIntent.getActivity(
+        val contentIntent = BrandedSplashIntents.mainActivity(
             context,
             requestCode(eventId, "response"),
             openIntent,
@@ -220,7 +248,7 @@ object VoiceNudgeNotifications {
         return builder
             .setSmallIcon(appSmallIcon)
             .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
-            .setContentTitle("💬 $responderName answered your nudge")
+            .setContentTitle(title)
             .setContentText(body)
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_SOCIAL)
@@ -242,7 +270,7 @@ object VoiceNudgeNotifications {
         val openIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        val contentIntent = PendingIntent.getActivity(
+        val contentIntent = BrandedSplashIntents.mainActivity(
             context,
             7002,
             openIntent,
@@ -258,8 +286,10 @@ object VoiceNudgeNotifications {
         return builder
             .setSmallIcon(appSmallIcon)
             .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
-            .setContentTitle(title)
-            .setContentText(body)
+            .setContentTitle(sanitizeNotificationCopy(title, "Duo"))
+            .setContentText(
+                sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
+            )
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_SOCIAL)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -270,21 +300,22 @@ object VoiceNudgeNotifications {
     }
 
     /**
-     * WhatsApp-style pile: one notification per group that updates in place
-     * ("7 new messages") instead of a new alert per bubble.
+     * WhatsApp-style conversation: one shade notification per group that lists
+     * each message separately (MessagingStyle) and supports inline reply.
      */
-    fun buildChatPile(
+    fun buildChatConversation(
         context: Context,
-        groupId: String,
-        title: String,
-        body: String,
-        unreadCount: Int,
+        conversation: ChatConversation,
+        largeIconOverride: Bitmap? = null,
     ): Notification {
         ensureChannels(context)
+        val groupId = conversation.groupId
         val openIntent = Intent(context, MainActivity::class.java).apply {
+            action = VoiceNudgeContract.actionOpenChatPile
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(VoiceNudgeContract.extraGroupId, groupId)
         }
-        val contentIntent = PendingIntent.getActivity(
+        val contentIntent = BrandedSplashIntents.mainActivity(
             context,
             requestCode("chat_$groupId", "open"),
             openIntent,
@@ -296,14 +327,29 @@ object VoiceNudgeNotifications {
             @Suppress("DEPRECATION")
             Notification.Builder(context)
         }
-        return builder
+        val latest = conversation.messages.lastOrNull()
+        val preview = if (latest == null) {
+            conversation.groupName
+        } else {
+            "${latest.senderName}: ${latest.text}"
+        }
+        val latestIncoming = conversation.messages.lastOrNull { !it.fromSelf }
+        val iconLine = latestIncoming ?: conversation.messages.lastOrNull()
+        val largeIcon = largeIconOverride ?: if (iconLine != null) {
+            NotificationAvatarHelper.largeIcon(
+                context,
+                iconLine.senderPhotoUrl,
+                iconLine.senderName,
+                iconLine.senderAvatarAsset,
+            )
+        } else {
+            NotificationAvatarHelper.appLogoBitmap(context)
+        }
+        val configured = builder
             .setSmallIcon(appSmallIcon)
-            .setLargeIcon(NotificationAvatarHelper.appLogoBitmap(context))
-            .setContentTitle(title)
-            .setContentText(body)
-            .setStyle(Notification.BigTextStyle().bigText(body))
-            .setNumber(unreadCount.coerceAtLeast(1))
-            .setOnlyAlertOnce(unreadCount > 1)
+            .setLargeIcon(largeIcon)
+            .setContentTitle(sanitizeNotificationCopy(conversation.groupName, "Duo"))
+            .setContentText(sanitizeNotificationCopy(preview, FCM_USER_DELIVERY_FAILURE))
             .setColor(Color.rgb(248, 190, 3))
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -311,7 +357,119 @@ object VoiceNudgeNotifications {
             .setContentIntent(contentIntent)
             .setGroup(groupKey(groupId))
             .setAutoCancel(true)
+            .setOnlyAlertOnce(false)
+        applyChatMessagingStyle(configured, context, conversation)
+        addChatReplyAction(configured, context, conversation)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            configured.setTimeoutAfter(ChatPileStore.ttlMs)
+        }
+        return configured.build()
+    }
+
+    private fun applyChatMessagingStyle(
+        builder: Notification.Builder,
+        context: Context,
+        conversation: ChatConversation,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            val body = conversation.messages.joinToString("\n") { line ->
+                val name = if (line.fromSelf) "You" else line.senderName
+                "$name: ${line.text}"
+            }
+            builder.setStyle(
+                Notification.BigTextStyle().bigText(
+                    sanitizeNotificationCopy(body, FCM_USER_DELIVERY_FAILURE),
+                ),
+            )
+            return
+        }
+        val localLine = conversation.messages.lastOrNull { it.fromSelf }
+        val style = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val userBitmap = if (localLine != null) {
+                NotificationAvatarHelper.largeIcon(
+                    context,
+                    localLine.senderPhotoUrl,
+                    localLine.senderName,
+                    localLine.senderAvatarAsset,
+                )
+            } else {
+                NotificationAvatarHelper.appLogoBitmap(context)
+            }
+            val user = Person.Builder()
+                .setName("You")
+                .setIcon(IconCompat.createWithBitmap(userBitmap).toIcon())
+                .build()
+            Notification.MessagingStyle(user)
+                .setConversationTitle(conversation.groupName)
+                .setGroupConversation(true)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.MessagingStyle("You")
+                .setConversationTitle(conversation.groupName)
+                .setGroupConversation(true)
+        }
+        for (line in conversation.messages) {
+            val text = sanitizeNotificationCopy(line.text, FCM_USER_DELIVERY_FAILURE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val senderBitmap = NotificationAvatarHelper.largeIcon(
+                    context,
+                    line.senderPhotoUrl,
+                    line.senderName,
+                    line.senderAvatarAsset,
+                )
+                val sender = Person.Builder()
+                    .setName(if (line.fromSelf) "You" else line.senderName)
+                    .setKey(line.senderUserId.ifBlank { line.senderName })
+                    .setIcon(IconCompat.createWithBitmap(senderBitmap).toIcon())
+                    .build()
+                style.addMessage(
+                    Notification.MessagingStyle.Message(text, line.timestampMs, sender),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                style.addMessage(
+                    text,
+                    line.timestampMs,
+                    if (line.fromSelf) "You" else line.senderName,
+                )
+            }
+        }
+        builder.setStyle(style)
+    }
+
+    private fun addChatReplyAction(
+        builder: Notification.Builder,
+        context: Context,
+        conversation: ChatConversation,
+    ) {
+        val replyFlags = PendingIntent.FLAG_UPDATE_CURRENT or if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        ) {
+            PendingIntent.FLAG_MUTABLE
+        } else {
+            0
+        }
+        val replyIntent = Intent(context, ChatReplyReceiver::class.java).apply {
+            action = VoiceNudgeContract.actionReplyChat
+            putExtra(VoiceNudgeContract.extraGroupId, conversation.groupId)
+            putExtra(VoiceNudgeContract.extraGroupName, conversation.groupName)
+            putExtra(VoiceNudgeContract.extraNotifyUrl, conversation.notifyUrl)
+        }
+        val replyPendingIntent = PendingIntent.getBroadcast(
+            context,
+            requestCode(conversation.groupId, "chat_reply"),
+            replyIntent,
+            replyFlags,
+        )
+        val remoteInput = RemoteInput.Builder(VoiceNudgeContract.extraChatReply)
+            .setLabel("Reply")
+            .setAllowFreeFormInput(true)
             .build()
+        builder.addAction(
+            Notification.Action.Builder(0, "Reply", replyPendingIntent)
+                .addRemoteInput(remoteInput)
+                .build(),
+        )
     }
 
     fun chatPileId(groupId: String): Int = idFor("chat_pile_$groupId")
@@ -320,6 +478,35 @@ object VoiceNudgeNotifications {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.cancel(chatPileId(groupId))
         ChatPileStore.reset(context, groupId)
+    }
+
+    fun refreshChatConversation(context: Context, groupId: String) {
+        val conversation = ChatPileStore.conversation(context, groupId) ?: return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val latestIncoming = conversation.messages.lastOrNull { !it.fromSelf }
+        val iconLine = latestIncoming ?: conversation.messages.lastOrNull()
+        if (iconLine == null) {
+            manager.notify(chatPileId(groupId), buildChatConversation(context, conversation))
+            return
+        }
+        NotificationAvatarHelper.applyLargeIcon(
+            context,
+            iconLine.senderPhotoUrl,
+            iconLine.senderName,
+            iconLine.senderAvatarAsset,
+        ) { bitmap ->
+            manager.notify(
+                chatPileId(groupId),
+                buildChatConversation(context, conversation, largeIconOverride = bitmap),
+            )
+        }
+    }
+
+    /** Drops shade piles whose bubbles have already vanished. */
+    fun cancelStaleChatPiles(context: Context) {
+        for (groupId in ChatPileStore.staleGroupIds(context)) {
+            cancelChatPile(context, groupId)
+        }
     }
 
     fun idFor(eventId: String): Int = eventId.hashCode() and 0x7fffffff
@@ -335,7 +522,7 @@ object VoiceNudgeNotifications {
     ): Notification.Builder {
         if (responseUrl.isNullOrBlank()) return this
         val notificationId = idFor(eventId)
-        val acceptPendingIntent = PendingIntent.getActivity(
+        val acceptPendingIntent = BrandedSplashIntents.mainActivity(
             context,
             requestCode(eventId, "accept"),
             acceptIntent(context, eventId, groupId, notificationId),
@@ -354,38 +541,7 @@ object VoiceNudgeNotifications {
             ),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val snoozePendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT or if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-        ) {
-            PendingIntent.FLAG_MUTABLE
-        } else {
-            0
-        }
-        val snoozePendingIntent = PendingIntent.getBroadcast(
-            context,
-            requestCode(eventId, "snooze"),
-            responseIntent(
-                context,
-                VoiceNudgeContract.actionSnooze,
-                eventId,
-                responseUrl,
-                senderName,
-                notificationId,
-            ),
-            snoozePendingIntentFlags,
-        )
-        val snoozeDuration = RemoteInput.Builder(VoiceNudgeContract.extraSnoozeMinutes)
-            .setLabel("Snooze for")
-            .setChoices(arrayOf("5 minutes", "15 minutes"))
-            .setAllowFreeFormInput(false)
-            .build()
-        val snoozeAction = Notification.Action.Builder(
-            0,
-            "Snooze",
-            snoozePendingIntent,
-        ).addRemoteInput(snoozeDuration).build()
         return addAction(Notification.Action.Builder(0, "Accept", acceptPendingIntent).build())
-            .addAction(snoozeAction)
             .addAction(Notification.Action.Builder(0, "Decline", declinePendingIntent).build())
     }
 
@@ -400,6 +556,23 @@ object VoiceNudgeNotifications {
         putExtra(VoiceNudgeContract.extraEventId, eventId)
         putExtra(VoiceNudgeContract.extraGroupId, groupId)
         putExtra(VoiceNudgeContract.extraNotificationId, notificationId)
+    }
+
+    private fun openNudgeIntent(
+        context: Context,
+        eventId: String,
+        groupId: String,
+        senderUserId: String?,
+        notificationId: Int,
+    ) = Intent(context, MainActivity::class.java).apply {
+        action = VoiceNudgeContract.actionOpenNudge
+        flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        putExtra(VoiceNudgeContract.extraEventId, eventId)
+        putExtra(VoiceNudgeContract.extraGroupId, groupId)
+        putExtra(VoiceNudgeContract.extraNotificationId, notificationId)
+        if (!senderUserId.isNullOrBlank()) {
+            putExtra(VoiceNudgeContract.extraSenderUserId, senderUserId)
+        }
     }
 
     private fun responseIntent(
@@ -423,6 +596,7 @@ object VoiceNudgeNotifications {
         groupId: String,
         responseUrl: String?,
         senderName: String,
+        groupName: String?,
         isPlaying: Boolean,
     ): PendingIntent {
         val action = if (isPlaying) {
@@ -437,6 +611,7 @@ object VoiceNudgeNotifications {
             putExtra(VoiceNudgeContract.extraGroupId, groupId)
             putExtra(VoiceNudgeContract.extraResponseUrl, responseUrl)
             putExtra(VoiceNudgeContract.extraSenderName, senderName)
+            putExtra(VoiceNudgeContract.extraGroupName, groupName)
         }
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         return if (
@@ -476,27 +651,182 @@ object VoiceNudgeNotifications {
         "$eventId:$action".hashCode() and 0x7fffffff
 }
 
+data class ChatLine(
+    val messageId: String,
+    val senderUserId: String,
+    val senderName: String,
+    val text: String,
+    val timestampMs: Long,
+    val fromSelf: Boolean = false,
+    val senderPhotoUrl: String? = null,
+    val senderAvatarAsset: String? = null,
+)
+
+data class ChatConversation(
+    val groupId: String,
+    val groupName: String,
+    val notifyUrl: String?,
+    val messages: List<ChatLine>,
+)
+
 object ChatPileStore {
     private const val prefsName = "one_one_chat_pile"
+    private const val openedPrefsName = "one_one_chat_pile_opened"
+    private const val openedGroupIdKey = "group_id"
+    private const val messagesSuffix = "_msgs"
+    private const val nameSuffix = "_name"
+    private const val notifySuffix = "_notify"
+    private const val atSuffix = "_at"
 
-    fun resolveCount(context: Context, groupId: String, serverCount: Int?): Int {
-        if (serverCount != null && serverCount > 0) {
-            context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-                .edit()
-                .putInt(groupId, serverCount)
-                .apply()
-            return serverCount
-        }
+    /** Matches Flutter `ChatMessageRepository.visibleLimit`. */
+    const val maxCount = 5
+
+    /** Matches Flutter lifetime + fade (10 + 2 minutes). */
+    const val ttlMs = 12 * 60 * 1000L
+
+    fun append(
+        context: Context,
+        groupId: String,
+        groupName: String,
+        messageId: String,
+        senderUserId: String,
+        senderName: String,
+        text: String,
+        notifyUrl: String?,
+        fromSelf: Boolean = false,
+        senderPhotoUrl: String? = null,
+        senderAvatarAsset: String? = null,
+        timestampMs: Long = System.currentTimeMillis(),
+    ) {
         val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        val next = prefs.getInt(groupId, 0) + 1
-        prefs.edit().putInt(groupId, next).apply()
-        return next
+        val existing = conversation(context, groupId)?.messages.orEmpty()
+        if (existing.any { it.messageId == messageId }) return
+        val next = (existing + ChatLine(
+            messageId = messageId,
+            senderUserId = senderUserId,
+            senderName = senderName,
+            text = text,
+            timestampMs = timestampMs,
+            fromSelf = fromSelf,
+            senderPhotoUrl = senderPhotoUrl?.trim()?.takeIf { it.isNotEmpty() },
+            senderAvatarAsset = senderAvatarAsset?.trim()?.takeIf { it.isNotEmpty() },
+        )).takeLast(maxCount)
+        prefs.edit()
+            .putString(groupId + messagesSuffix, encodeMessages(next))
+            .putString(groupId + nameSuffix, groupName)
+            .putString(groupId + notifySuffix, notifyUrl)
+            .putLong(groupId + atSuffix, timestampMs)
+            .apply()
+    }
+
+    fun conversation(context: Context, groupId: String): ChatConversation? {
+        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val lastAt = prefs.getLong(groupId + atSuffix, 0L)
+        if (lastAt <= 0L || System.currentTimeMillis() - lastAt >= ttlMs) {
+            return null
+        }
+        val messages = decodeMessages(prefs.getString(groupId + messagesSuffix, null))
+        if (messages.isEmpty()) return null
+        return ChatConversation(
+            groupId = groupId,
+            groupName = prefs.getString(groupId + nameSuffix, null)?.ifBlank { null } ?: "Duo",
+            notifyUrl = prefs.getString(groupId + notifySuffix, null),
+            messages = messages,
+        )
     }
 
     fun reset(context: Context, groupId: String) {
         context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             .edit()
             .remove(groupId)
+            .remove(groupId + atSuffix)
+            .remove(groupId + messagesSuffix)
+            .remove(groupId + nameSuffix)
+            .remove(groupId + notifySuffix)
             .apply()
+    }
+
+    fun staleGroupIds(context: Context): List<String> {
+        val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val groupIds = prefs.all.keys.mapNotNull { key ->
+            when {
+                key.endsWith(atSuffix) -> key.removeSuffix(atSuffix)
+                key.endsWith(messagesSuffix) -> key.removeSuffix(messagesSuffix)
+                key.endsWith(nameSuffix) -> key.removeSuffix(nameSuffix)
+                key.endsWith(notifySuffix) -> key.removeSuffix(notifySuffix)
+                else -> key
+            }
+        }.filter { it.isNotBlank() }.toSet()
+        return groupIds.filter { groupId ->
+            val lastAt = prefs.getLong(groupId + atSuffix, 0L)
+            lastAt <= 0L || now - lastAt >= ttlMs
+        }
+    }
+
+    fun markOpened(context: Context, groupId: String) {
+        context.getSharedPreferences(openedPrefsName, Context.MODE_PRIVATE)
+            .edit()
+            .putString(openedGroupIdKey, groupId)
+            .apply()
+    }
+
+    fun takeOpened(context: Context): String? {
+        val prefs = context.getSharedPreferences(openedPrefsName, Context.MODE_PRIVATE)
+        val groupId = prefs.getString(openedGroupIdKey, null)?.takeIf { it.isNotBlank() }
+        if (groupId != null) prefs.edit().remove(openedGroupIdKey).apply()
+        return groupId
+    }
+
+    private fun encodeMessages(messages: List<ChatLine>): String {
+        val array = org.json.JSONArray()
+        for (line in messages) {
+            array.put(
+                org.json.JSONObject().apply {
+                    put("messageId", line.messageId)
+                    put("senderUserId", line.senderUserId)
+                    put("senderName", line.senderName)
+                    put("text", line.text)
+                    put("timestampMs", line.timestampMs)
+                    put("fromSelf", line.fromSelf)
+                    line.senderPhotoUrl?.let { put("senderPhotoUrl", it) }
+                    line.senderAvatarAsset?.let { put("senderAvatarAsset", it) }
+                },
+            )
+        }
+        return array.toString()
+    }
+
+    private fun decodeMessages(raw: String?): List<ChatLine> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return try {
+            val array = org.json.JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val obj = array.optJSONObject(index) ?: continue
+                    val text = obj.optString("text").trim()
+                    val messageId = obj.optString("messageId").trim()
+                    if (text.isEmpty() || messageId.isEmpty()) continue
+                    add(
+                        ChatLine(
+                            messageId = messageId,
+                            senderUserId = obj.optString("senderUserId"),
+                            senderName = obj.optString("senderName").ifBlank { "Someone" },
+                            text = text,
+                            timestampMs = obj.optLong("timestampMs", System.currentTimeMillis()),
+                            fromSelf = obj.optBoolean("fromSelf", false),
+                            senderPhotoUrl = obj.optString("senderPhotoUrl")
+                                .trim()
+                                .takeIf { it.isNotEmpty() },
+                            senderAvatarAsset = obj.optString("senderAvatarAsset")
+                                .trim()
+                                .takeIf { it.isNotEmpty() },
+                        ),
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 }

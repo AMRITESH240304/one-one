@@ -1,9 +1,4 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:share_plus/share_plus.dart';
-
-import 'log_level.dart';
-import 'log_manager.dart';
+import 'package:one_one_app/one_one.dart';
 
 Future<void> showDebugLogsSheet(BuildContext context) {
   return showModalBottomSheet<void>(
@@ -67,7 +62,7 @@ class _DebugLogsSheetState extends State<_DebugLogsSheet> {
   @override
   Widget build(BuildContext context) {
     final info = _info;
-    return SafeArea(
+    return BottomSystemSafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
         child: Column(

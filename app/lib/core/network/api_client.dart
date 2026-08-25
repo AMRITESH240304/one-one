@@ -1,11 +1,6 @@
-import 'dart:convert';
-
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_performance/firebase_performance.dart';
 import 'package:http/http.dart' as http;
 
-import '../../app/app_config.dart';
-import '../firebase/firebase_performance_service.dart';
+import 'package:one_one_app/one_one.dart';
 
 class ApiClient {
   ApiClient({FirebaseAuth? auth, http.Client? httpClient, String? baseUrl})
@@ -114,10 +109,11 @@ class ApiClient {
     }
 
     final uri = Uri.parse('$_baseUrl$path');
+    // Copy caller headers — default is `const {}` and http may write in place.
     final requestHeaders = {
       'authorization': 'Bearer $token',
       'content-type': contentType,
-      ...headers,
+      ...Map<String, String>.of(headers),
     };
     final response = await _tracedRequest(
       url: uri.toString(),
@@ -148,8 +144,10 @@ class ApiClient {
     String absoluteUrl,
     List<int> bytes, {
     required Map<String, String> headers,
+    Duration? timeout,
   }) async {
     final uri = Uri.parse(absoluteUrl);
+    final requestTimeout = timeout ?? _requestTimeout;
     final response = await _tracedRequest(
       url: uri.toString(),
       method: HttpMethod.Put,
@@ -160,7 +158,7 @@ class ApiClient {
                 body: bytes,
               ) ??
               http.put(uri, headers: headers, body: bytes))
-          .timeout(_requestTimeout),
+          .timeout(requestTimeout),
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ApiException(

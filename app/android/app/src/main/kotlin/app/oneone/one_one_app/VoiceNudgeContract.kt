@@ -31,6 +31,11 @@ object VoiceNudgeContract {
     const val extraAction = "nudgeAction"
     const val extraNotificationId = "notificationId"
     const val extraSnoozeMinutes = "snoozeMinutes"
+    const val extraMessageId = "messageId"
+    const val extraMessageText = "messageText"
+    const val extraGroupName = "groupName"
+    const val extraNotifyUrl = "notifyUrl"
+    const val extraChatReply = "chatReply"
 
     const val kindVoice = "voice_nudge"
     const val kindRing = "ring_nudge"
@@ -43,6 +48,9 @@ object VoiceNudgeContract {
 
     const val actionAccept = "app.oneone.action.ACCEPT_NUDGE"
     const val actionConnect = "app.oneone.action.CONNECT_NUDGE"
+    const val actionOpenNudge = "app.oneone.action.OPEN_NUDGE"
+    const val actionOpenChatPile = "app.oneone.action.OPEN_CHAT_PILE"
+    const val actionReplyChat = "app.oneone.action.REPLY_CHAT"
     const val actionDecline = "app.oneone.action.DECLINE_NUDGE"
     const val actionSnooze = "app.oneone.action.SNOOZE_NUDGE"
     const val actionPlayCachedAudio = "app.oneone.action.PLAY_CACHED_NUDGE"
@@ -82,7 +90,69 @@ object VoiceNudgeTokenStore {
 object VoiceNudgeDeliveryAck {
     private val executor = Executors.newSingleThreadExecutor()
 
+    fun postPlayed(ackUrl: String?, deliveryToken: String?) {
+        post(ackUrl, deliveryToken, status = "played", reason = null)
+    }
+
     fun postFailure(ackUrl: String?, deliveryToken: String?, reason: String) {
+        post(ackUrl, deliveryToken, status = "failed", reason = reason)
+    }
+
+    /**
+     * Conclusive sender status via RTDB (required). Optional HTTP ack is
+     * audit-only and must not be treated as the status path.
+     */
+    fun reportStatus(
+        status: String,
+        reason: String? = null,
+        attention: String? = null,
+        senderUserId: String?,
+        eventId: String?,
+        groupId: String?,
+        kind: String?,
+        ackUrl: String? = null,
+        deliveryToken: String? = null,
+    ) {
+        NudgeDeliveryStatusRtdb.write(
+            senderUserId = senderUserId,
+            eventId = eventId,
+            groupId = groupId,
+            kind = kind,
+            status = status,
+            reason = reason,
+            attention = attention,
+        )
+        // Legacy audit POST — fire-and-forget; sender UI does not depend on it.
+        if (!ackUrl.isNullOrBlank() && !deliveryToken.isNullOrBlank()) {
+            post(ackUrl, deliveryToken, status = status, reason = reason)
+        }
+    }
+
+    fun reportFromFcmData(
+        data: Map<String, String>,
+        status: String,
+        reason: String? = null,
+        attention: String? = null,
+    ) {
+        reportStatus(
+            status = status,
+            reason = reason,
+            attention = attention,
+            senderUserId = data["senderUserId"],
+            eventId = data["eventId"],
+            groupId = data["groupId"],
+            kind = data["kind"] ?: data["type"],
+            ackUrl = data["ackUrl"],
+            deliveryToken = data["deliveryToken"],
+        )
+    }
+
+    private fun post(
+        ackUrl: String?,
+        deliveryToken: String?,
+        status: String,
+        reason: String?,
+    ) {
         if (ackUrl.isNullOrBlank() || deliveryToken.isNullOrBlank()) return
         executor.execute {
             var connection: HttpURLConnection? = null
@@ -96,19 +166,19 @@ object VoiceNudgeDeliveryAck {
                 opened.setRequestProperty("content-type", "application/json")
                 opened.setRequestProperty("x-one-one-delivery-token", deliveryToken)
                 val body = JSONObject().apply {
-                    put("status", "failed")
-                    put("reason", reason)
+                    put("status", status)
+                    if (!reason.isNullOrBlank()) put("reason", reason)
                 }
                 opened.outputStream.use { it.write(body.toString().toByteArray()) }
                 val responseCode = opened.responseCode
                 Log.i(
                     VoiceNudgeDiagnostics.tag,
-                    "[FCM-E3-ACK] Reported failure before playback started " +
-                        "reason=$reason HTTP=$responseCode",
+                    "[FCM-E3-ACK] Audit $status before/without playback " +
+                        "reason=${reason ?: "none"} HTTP=$responseCode",
                 )
             } catch (error: Exception) {
                 VoiceNudgeDiagnostics.logFailure(
-                    "[FCM-E3-ACK] Reporting failure before playback started",
+                    "[FCM-E3-ACK] Reporting $status",
                     error,
                 )
             } finally {
@@ -157,11 +227,14 @@ object VoiceNudgeDiagnostics {
         "download_failed", "download_error" -> "download_failed"
         "playback_failed", "playback_error", "playback_service_start_error", "timeout" ->
             "playback_failed"
-        "volume_too_low", "volume_low", "volume_muted" -> "volume_too_low"
+        "volume_too_low", "volume_low", "volume_very_low", "volume_muted" -> "volume_too_low"
         "dnd_active" -> "dnd_active"
         "livekit_session_failed" -> "livekit_session_failed"
         "background_fg_service_blocked", "permission_denied_foreground_service" ->
             "background_fg_service_blocked"
+        "permission_denied_notifications" -> "permission_denied_notifications"
+        "battery_optimization_active" -> "battery_optimization_active"
+        "app_force_stopped" -> "app_force_stopped"
         else -> "unknown"
     }
 
@@ -232,6 +305,57 @@ object VoiceNudgeDiagnostics {
             "[NUDGE-FAIL] reason=$canonical kind=$kind " +
                 "groupId=${groupId?.takeLast(6) ?: "none"} " +
                 "receiver=${receiverUserId?.takeLast(6) ?: "none"} ${extras}",
+        )
+    }
+
+    /**
+     * Non-fatal FCM notification-handling failure.
+     *
+     * Filterable in Crashlytics by custom key
+     * `reason=fcm_notification_handling_failure`. Worker / channel identifiers
+     * stay in this report and logcat — never in user-facing UI.
+     */
+    fun recordFcmHandlingFailure(
+        worker: String,
+        error: Throwable? = null,
+        kind: String? = null,
+        eventId: String? = null,
+        groupId: String? = null,
+        extras: Map<String, String> = emptyMap(),
+    ) {
+        val crashlytics = FirebaseCrashlytics.getInstance()
+        val inBackground = DeviceLog.wasAppInBackground()
+        val information = fcmHandlingInformation(
+            worker = worker,
+            groupId = groupId,
+            eventId = eventId,
+            kind = kind,
+            inBackground = inBackground,
+        )
+        crashlytics.setCustomKey("reason", FCM_HANDLING_FAILURE_REASON)
+        crashlytics.setCustomKey("fcm_worker", worker)
+        crashlytics.setCustomKey("fcm_kind", kind.orEmpty())
+        crashlytics.setCustomKey("group_id", groupId.orEmpty())
+        crashlytics.setCustomKey("nudge_event_id", eventId.orEmpty())
+        crashlytics.setCustomKey("was_app_in_background", inBackground)
+        for (line in information) {
+            crashlytics.log(line)
+        }
+        for ((key, value) in extras) {
+            crashlytics.setCustomKey(key, value)
+        }
+        val throwable = RuntimeException(
+            "$FCM_HANDLING_FAILURE_REASON worker=$worker kind=${kind ?: "-"} " +
+                "eventId=${eventId ?: "-"} groupId=${groupId ?: "-"}",
+            error,
+        )
+        crashlytics.recordException(throwable)
+        Log.w(
+            tag,
+            "[$worker] $FCM_HANDLING_FAILURE_REASON kind=${kind ?: "-"} " +
+                "groupId=${groupId?.takeLast(6) ?: "none"} " +
+                "eventId=${eventId?.takeLast(6) ?: "none"} " +
+                "appState=${if (inBackground) "background" else "foreground"}",
         )
     }
 }

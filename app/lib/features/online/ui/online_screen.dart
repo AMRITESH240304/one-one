@@ -1,23 +1,4 @@
-import 'dart:async';
-import 'dart:math' as math;
-
-import 'package:flutter/material.dart';
-import 'package:livekit_client/livekit_client.dart';
-
-import '../../../core/firebase/app_database.dart';
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/logging/livekit_lifecycle_logger.dart';
-import '../../../core/logging/log_level.dart';
-import '../../../core/logging/log_manager.dart';
-import '../../groups/models/group_summary.dart';
-import '../../identity/models/identity_session.dart';
-import '../../talk/data/talk_repository.dart';
-import '../../talk/models/talk_session.dart';
-import '../data/online_repository.dart';
-import '../livekit_connection_warmer.dart';
-import '../livekit_status.dart';
-import '../models/online_session.dart';
-import '../presence_config.dart';
+import 'package:one_one_app/one_one.dart';
 
 class OnlineScreen extends StatefulWidget {
   const OnlineScreen({
@@ -114,7 +95,7 @@ class _OnlineScreenState extends State<OnlineScreen> {
     }
 
     OnlineSession? createdSession;
-    final speakerOn = widget.identity.settings.audioOutputPreference != 'earpiece';
+    final speakerOn = true;
     final preparedToken = LiveKitConnectionWarmer.instance.takeToken(
       widget.group.groupId,
     );
@@ -410,7 +391,7 @@ class _OnlineScreenState extends State<OnlineScreen> {
     }
 
     _reconnectTimer?.cancel();
-    final delay = _reconnectBaseDelay * math.pow(2, _reconnectAttempts);
+    final delay = _reconnectBaseDelay * pow(2, _reconnectAttempts);
     _reconnectTimer = Timer(delay, () {
       if (!mounted || _session == null || _state == 'away') return;
       _attemptReconnect();

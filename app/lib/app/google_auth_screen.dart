@@ -1,16 +1,11 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../core/firebase/crashlytics_service.dart';
-import '../features/identity/data/identity_repository.dart';
-import 'native_splash_bridge.dart';
+import 'package:one_one_app/one_one.dart';
 
 class GoogleAuthScreen extends StatefulWidget {
   const GoogleAuthScreen({super.key, this.initializing = false});
 
-  /// When true, shows the brand splash (logo + pulse dots) only — never the
-  /// signed-out welcome CTA. Used while Firebase is still initializing so a
-  /// returning signed-in session never flashes "Welcome to Duo".
+  /// When true, shows the splash-colored underlay only — never the signed-out
+  /// welcome CTA. Used while Firebase is still initializing so a returning
+  /// signed-in session never flashes "Welcome to Duo".
   final bool initializing;
 
   @override
@@ -22,8 +17,7 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
   bool _isSigningIn = false;
   String? _errorMessage;
 
-  IdentityRepository get _repo =>
-      _identityRepository ??= IdentityRepository();
+  IdentityRepository get _repo => _identityRepository ??= IdentityRepository();
 
   @override
   void dispose() {
@@ -33,10 +27,10 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
 
   Future<void> _continueWithGoogle() async {
     if (_isSigningIn) return;
-    // IMMEDIATELY replace the welcome UI with the splash screen so the user
-    // sees an instant transition rather than waiting on a button spinner.
-    // The Firebase auth stream will swap this screen out for StartupGateScreen
-    // once sign-in completes.
+    // IMMEDIATELY replace the welcome UI with the splash-colored underlay
+    // so the user sees an instant transition rather than waiting on a
+    // button spinner. The Firebase auth stream will swap this screen out
+    // for StartupGateScreen once sign-in completes.
     setState(() {
       _isSigningIn = true;
       _errorMessage = null;
@@ -45,7 +39,7 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
     try {
       await _repo.signInWithGoogle();
       // On success the root Firebase auth stream advances to onboarding.
-      // Don't touch _isSigningIn – leave this screen in its splash state
+      // Don't touch _isSigningIn – leave this screen in its underlay state
       // until the StreamBuilder replaces it.
     } catch (error, stack) {
       final message = error.toString();
@@ -76,7 +70,7 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Firebase still booting, or Google sign-in just started: brand splash only.
+    // Firebase still booting, or Google sign-in just started: underlay only.
     // Matches StartupGateScreen so cold starts never flash the welcome CTA at
     // already-signed-in users.
     if (widget.initializing || _isSigningIn) {
@@ -84,13 +78,17 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
     }
 
     // The real welcome/sign-in CTA is about to be shown — the native splash
-    // (identical brand background) can come down now.
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => NativeSplashBridge.markReady(),
-    );
+    // (identical brand background) can come down now. Skip if this widget
+    // was already replaced (e.g. auth restored to a signed-in session
+    // between this build and the next frame); otherwise we'd drop the
+    // splash onto StartupGateScreen's loading underlay.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      NativeSplashBridge.markReady();
+    });
 
     return Scaffold(
-      backgroundColor: const Color(0xffF8BE03),
+      backgroundColor: BrandSplashScreen.backgroundColor,
       body: SafeArea(
         child: Padding(
           padding: EdgeInsets.fromLTRB(28.w, 28.h, 28.w, 24.h),
@@ -99,11 +97,7 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
               const Spacer(flex: 2),
               // Logo — static, no animation. Rendered in its final position
               // from the very first frame.
-              Image.asset(
-                'assets/logo.png',
-                width: 172.w,
-                fit: BoxFit.contain,
-              ),
+              Image.asset('assets/logo.png', width: 172.w, fit: BoxFit.contain),
               SizedBox(height: 36.h),
               Text(
                 'Welcome to Duo',
@@ -152,36 +146,6 @@ class _GoogleAuthScreenState extends State<GoogleAuthScreen> {
                 ),
               ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Brand splash with no Firebase access. Used while Firebase boots and
-/// immediately after tapping Continue with Google.
-class BrandSplashScreen extends StatelessWidget {
-  const BrandSplashScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xffF8BE03),
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: EdgeInsets.symmetric(horizontal: 28.w),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Image.asset(
-                  'assets/logo.png',
-                  width: 190.w,
-                  fit: BoxFit.contain,
-                ),
-              ],
-            ),
           ),
         ),
       ),

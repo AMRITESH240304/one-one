@@ -1,21 +1,4 @@
-import 'dart:async';
-
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import '../../../app/accent_theme.dart';
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/logging/debug_logs_sheet.dart';
-import '../../groups/models/group_summary.dart';
-import '../../subscriptions/eleven_pro_paywall_screen.dart';
-import '../../subscriptions/subscription_management_sheet.dart';
-import '../data/avatar_assets.dart';
-import '../data/identity_repository.dart';
-import '../models/identity_session.dart';
-import 'avatar_picker_grid.dart';
-import 'legal_document_screen.dart';
-import 'profile_avatar.dart';
-import 'profile_photo_editor.dart';
+import 'package:one_one_app/one_one.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
@@ -93,16 +76,14 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   late IdentitySession _session = widget.session;
   late String _accentColorKey = _session.settings.accentColorKey;
-  late bool _hapticsEnabled = _session.settings.hapticsEnabled;
-  late String _audioOutputPreference = _session.settings.audioOutputPreference;
+  late HapticsIntensity _hapticsIntensity = _session.settings.hapticsIntensity;
   late String _persistedAccentColorKey = _session.settings.accentColorKey;
-  late bool _persistedHapticsEnabled = _session.settings.hapticsEnabled;
-  late String _persistedAudioOutputPreference =
-      _session.settings.audioOutputPreference;
   bool _saving = false;
-  bool _photoSaving = false;
   bool _accountActionInProgress = false;
   bool _hasUnsavedAccentPreview = false;
+  int _titleTapCount = 0;
+  DateTime? _lastTitleTapAt;
+
   /// While true, never rebuild this route from session listenable updates —
   /// parent rebuilds during the edit-profile sheet's deactivate race
   /// `_dependents.isEmpty` assertions.
@@ -115,16 +96,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     _avatarsFuture = AvatarAssets.loadAll();
+    unawaited(HomeVisualVariantController.ensureLoaded());
     final currentSession = widget.identityRepository.currentSession;
     if (currentSession != null && currentSession.userId == _session.userId) {
       _session = currentSession;
       _accentColorKey = currentSession.settings.accentColorKey;
-      _hapticsEnabled = currentSession.settings.hapticsEnabled;
-      _audioOutputPreference = currentSession.settings.audioOutputPreference;
+      _hapticsIntensity = currentSession.settings.hapticsIntensity;
       _persistedAccentColorKey = currentSession.settings.accentColorKey;
-      _persistedHapticsEnabled = currentSession.settings.hapticsEnabled;
-      _persistedAudioOutputPreference =
-          currentSession.settings.audioOutputPreference;
     }
     try {
       widget.identityRepository.sessionListenable.addListener(
@@ -174,94 +152,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   bool get _hasUnsavedSettings =>
-      _accentColorKey != _persistedAccentColorKey ||
-      _hapticsEnabled != _persistedHapticsEnabled ||
-      _audioOutputPreference != _persistedAudioOutputPreference;
+      _accentColorKey != _persistedAccentColorKey;
 
   void _acceptSession(IdentitySession session) {
     _session = session;
-  }
-
-  Future<void> _changeProfilePhoto() async {
-    if (_saving || _photoSaving || _profileEditorOpen) return;
-    unawaited(CrashlyticsService.log('settings_photo_save_start'));
-    try {
-      final currentUrl = _session.user.profilePhotoUrl?.trim();
-      var recropCurrent = false;
-      if (currentUrl != null && currentUrl.isNotEmpty) {
-        final choice = await showModalBottomSheet<String>(
-          context: context,
-          backgroundColor: const Color(0xff1b1b1b),
-          showDragHandle: true,
-          builder: (context) => SafeArea(
-            child: Wrap(
-              children: [
-                ListTile(
-                  leading: const Icon(Icons.photo_library_outlined),
-                  title: const Text('Choose a new photo'),
-                  onTap: () => Navigator.pop(context, 'new'),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.crop_outlined),
-                  title: const Text('Re-crop current photo'),
-                  onTap: () => Navigator.pop(context, 'recrop'),
-                ),
-              ],
-            ),
-          ),
-        );
-        if (choice == null || !mounted) return;
-        recropCurrent = choice == 'recrop';
-      }
-      final bytes = await _openProfilePhotoEditor(
-        recropCurrent: recropCurrent,
-        currentUrl: currentUrl,
-      );
-      if (bytes == null || !mounted) return;
-      setState(() {
-        _photoSaving = true;
-        _message = null;
-      });
-      final session = await widget.identityRepository.updateProfilePhoto(bytes);
-      unawaited(CrashlyticsService.log('settings_photo_save_network_ok'));
-      if (!mounted) return;
-      // Defer setState so it doesn't run in the same microtask as any sheet
-      // route disposal from the photo editor.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        unawaited(CrashlyticsService.log('settings_photo_save_setState'));
-        setState(() {
-          _acceptSession(session);
-          _message = 'Profile picture updated';
-          _photoSaving = false;
-        });
-      });
-    } catch (error, stack) {
-      unawaited(
-        CrashlyticsService.recordError(
-          error,
-          stack,
-          reason: 'settings_photo_save_failed',
-          feature: 'settings',
-          screenName: 'settings',
-        ),
-      );
-      if (!mounted) return;
-      setState(() {
-        _message = error.toString();
-        _photoSaving = false;
-      });
-    }
-  }
-
-  Future<Uint8List?> _openProfilePhotoEditor({
-    required bool recropCurrent,
-    required String? currentUrl,
-  }) {
-    if (recropCurrent) {
-      return ProfilePhotoEditor.recropNetworkPhoto(context, currentUrl!);
-    }
-    return ProfilePhotoEditor.pickAndCrop(context);
   }
 
   /// Edit Profile: display name + full avatar/photo section. Saves via a
@@ -323,21 +217,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  void _setHapticsEnabled(bool value) {
-    setState(() {
-      _hapticsEnabled = value;
-      _message = null;
-    });
+  void _handleSettingsTitleTap() {
+    final now = DateTime.now();
+    final last = _lastTitleTapAt;
+    if (last == null || now.difference(last) > const Duration(seconds: 2)) {
+      _titleTapCount = 1;
+    } else {
+      _titleTapCount += 1;
+    }
+    _lastTitleTapAt = now;
+    if (_titleTapCount >= 7) {
+      _titleTapCount = 0;
+      unawaited(HomeVisualVariantController.unlockTesting());
+      if (mounted) {
+        setState(() => _message = 'Testing section unlocked');
+      }
+    }
   }
 
-  void _setAudioOutputPreference(String value) {
+  Future<void> _setHapticsIntensity(HapticsIntensity value) async {
+    if (_hapticsIntensity == value || _saving) return;
+    final previous = _hapticsIntensity;
     setState(() {
-      _audioOutputPreference = value;
+      _hapticsIntensity = value;
       _message = null;
     });
+    unawaited(_previewHaptics(value));
+    try {
+      final session = await widget.identityRepository.updateSettings(
+        hapticsIntensity: value,
+      );
+      if (!mounted) return;
+      setState(() => _acceptSession(session));
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'settings_haptics_save_failed',
+          feature: 'settings',
+          screenName: 'settings',
+        ),
+      );
+      if (!mounted) return;
+      setState(() {
+        _hapticsIntensity = previous;
+        _message = error.toString();
+      });
+    }
   }
 
-  Future<void> _saveSettings() async {
+  Future<void> _previewHaptics(HapticsIntensity value) async {
+    await NudgeHaptics.playStart(value);
+    if (value == HapticsIntensity.wild) {
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      NudgeHaptics.stopWild();
+    }
+  }
+
+  Future<void> _saveAccentColor() async {
     unawaited(
       CrashlyticsService.log(
         'settings_prefs_save_start accent=$_accentColorKey',
@@ -351,13 +289,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final session = await widget.identityRepository.updateSettings(
         accentColorKey: _accentColorKey,
-        hapticsEnabled: _hapticsEnabled,
-        audioOutputPreference: _audioOutputPreference,
       );
       unawaited(CrashlyticsService.log('settings_prefs_save_network_ok'));
       _persistedAccentColorKey = session.settings.accentColorKey;
-      _persistedHapticsEnabled = session.settings.hapticsEnabled;
-      _persistedAudioOutputPreference = session.settings.audioOutputPreference;
       _hasUnsavedAccentPreview = false;
       // Apply accent after local flags are consistent; no-op if already set.
       AccentThemeController.setAccentKey(session.settings.accentColorKey);
@@ -506,7 +440,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (sheetContext) {
-        return SafeArea(
+        return BottomSystemSafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(8, 12, 8, 16),
             child: Column(
@@ -604,6 +538,103 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return SubscriptionManagementSheet.show(context);
   }
 
+  bool _permissionRequestInFlight = false;
+
+  /// Re-triggers the mic permission prompt, then refreshes the device record
+  /// so the settings checklist reflects the grant.
+  Future<void> _requestMicPermission() async {
+    if (_permissionRequestInFlight) return;
+    _permissionRequestInFlight = true;
+    try {
+      final status = await Permission.microphone.request();
+      if (!mounted) return;
+      setState(
+        () => _message = status.isGranted
+            ? 'Microphone permission granted.'
+            : 'Microphone permission was denied.',
+      );
+      await _refreshPermissions();
+    } finally {
+      _permissionRequestInFlight = false;
+    }
+  }
+
+  /// Re-triggers the notification permission prompt, then refreshes the
+  /// device record so the settings checklist reflects the grant.
+  Future<void> _requestNotificationPermission() async {
+    if (_permissionRequestInFlight) return;
+    _permissionRequestInFlight = true;
+    try {
+      final status = await Permission.notification.request();
+      if (!mounted) return;
+      setState(
+        () => _message = status.isGranted
+            ? 'Notification permission granted.'
+            : 'Notification permission was denied.',
+      );
+      await _refreshPermissions();
+    } finally {
+      _permissionRequestInFlight = false;
+    }
+  }
+
+  /// Re-triggers the battery optimization request, then refreshes the device
+  /// record so the settings checklist reflects the grant.
+  Future<void> _requestBatteryOptimization() async {
+    if (_permissionRequestInFlight) return;
+    _permissionRequestInFlight = true;
+    try {
+      try {
+        await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+      } catch (_) {
+        // Best effort — the user can enable it from Android Settings.
+      }
+      if (!mounted) return;
+      setState(
+        () => _message =
+            'Battery optimization request sent. Check your device settings.',
+      );
+      await _refreshPermissions();
+    } finally {
+      _permissionRequestInFlight = false;
+    }
+  }
+
+  /// Re-triggers the missing permissions required for closed-app receive
+  /// (notifications + battery optimization), then refreshes the checklist.
+  Future<void> _requestClosedAppPermissions() async {
+    if (_permissionRequestInFlight) return;
+    _permissionRequestInFlight = true;
+    try {
+      final session = _session.device;
+      if (!session.notificationPermissionGranted) {
+        await Permission.notification.request();
+      }
+      if (!session.batteryOptimizationIgnored) {
+        try {
+          await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+        } catch (_) {
+          // Best effort.
+        }
+      }
+      if (!mounted) return;
+      await _refreshPermissions();
+      setState(() => _message = 'Closed-app receive setup checked.');
+    } finally {
+      _permissionRequestInFlight = false;
+    }
+  }
+
+  /// Re-reads the live permission state and publishes the updated session so
+  /// the checklist checkboxes reflect what was just granted.
+  Future<void> _refreshPermissions() async {
+    try {
+      await widget.identityRepository.ensureIdentity();
+    } catch (_) {
+      // Best-effort — the checklist still shows the session we already have.
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final accent = accentColorForKey(_accentColorKey);
@@ -620,7 +651,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         scrolledUnderElevation: 0,
-        title: const Text('Settings'),
+        title: GestureDetector(
+          onTap: _handleSettingsTitleTap,
+          behavior: HitTestBehavior.opaque,
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Text('Settings'),
+          ),
+        ),
         centerTitle: true,
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
@@ -643,7 +681,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: SizedBox(
                   width: MediaQuery.sizeOf(context).width - 40,
                   child: FilledButton.icon(
-                    onPressed: _saving ? null : _saveSettings,
+                    onPressed: _saving ? null : _saveAccentColor,
                     style: FilledButton.styleFrom(
                       minimumSize: const Size.fromHeight(54),
                       backgroundColor: accent,
@@ -658,7 +696,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                           )
                         : const Icon(Icons.check_rounded),
-                    label: const Text('Save settings'),
+                    label: const Text('Save color'),
                   ),
                 ),
               )
@@ -676,12 +714,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _ProfileHeader(
                 session: _session,
                 accent: accent,
-                photoSaving: _photoSaving,
-                enabled: !_saving && !_photoSaving && !_profileEditorOpen,
-                onChangePhoto: _changeProfilePhoto,
+                enabled: !_saving && !_profileEditorOpen,
                 onEditProfile: _openProfileEditor,
               ),
-              const SizedBox(height: 28),
+              const SizedBox(height: 22),
               if (widget.manageableGroups.isNotEmpty &&
                   widget.onManageGroup != null) ...[
                 const _SectionTitle('Group'),
@@ -745,64 +781,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     },
                   ),
                   const _SurfaceDivider(),
-                  SwitchListTile.adaptive(
-                    contentPadding: EdgeInsets.zero,
-                    secondary: const Icon(
-                      Icons.vibration_outlined,
-                      color: Colors.white70,
-                    ),
-                    title: const Text(
-                      'Haptics',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    subtitle: const Text(
-                      'A short vibration when talking starts or stops.',
-                      style: TextStyle(color: Colors.white54),
-                    ),
-                    value: _hapticsEnabled,
-                    activeTrackColor: accent,
-                    onChanged: _saving ? null : _setHapticsEnabled,
-                  ),
-                  const _SurfaceDivider(),
-                  const _PreferenceHeading(
-                    icon: Icons.spatial_audio_off_outlined,
-                    title: 'Audio output',
-                    subtitle: 'Where incoming voice should play.',
+                  _PreferenceHeading(
+                    icon: Icons.vibration_outlined,
+                    title: 'Haptics',
+                    subtitle:
+                        'Incoming voice nudges — ${_hapticsIntensity.subtitle}',
                   ),
                   const SizedBox(height: 14),
-                  SizedBox(
-                    width: double.infinity,
-                    child: SegmentedButton<String>(
-                      style: ButtonStyle(
-                        foregroundColor: WidgetStateProperty.resolveWith(
-                          (states) => states.contains(WidgetState.selected)
-                              ? Colors.black
-                              : Colors.white70,
-                        ),
-                        backgroundColor: WidgetStateProperty.resolveWith(
-                          (states) => states.contains(WidgetState.selected)
-                              ? accent
-                              : Colors.transparent,
-                        ),
-                      ),
-                      segments: const [
-                        ButtonSegment(
-                          value: 'speaker',
-                          icon: Icon(Icons.volume_up_outlined),
-                          label: Text('Speaker'),
-                        ),
-                        ButtonSegment(
-                          value: 'earpiece',
-                          icon: Icon(Icons.phone_in_talk_outlined),
-                          label: Text('Phone'),
-                        ),
-                      ],
-                      selected: {_audioOutputPreference},
-                      onSelectionChanged: _saving
-                          ? null
-                          : (selection) =>
-                                _setAudioOutputPreference(selection.first),
-                    ),
+                  _HapticsTierRow(
+                    selected: _hapticsIntensity,
+                    accent: accent,
+                    enabled: !_saving,
+                    onSelected: _setHapticsIntensity,
                   ),
                 ],
               ),
@@ -817,6 +807,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     detail: _session.device.micPermissionGranted
                         ? 'Ready'
                         : 'Required before you can talk.',
+                    onTap: _requestMicPermission,
                   ),
                   _ChecklistItem(
                     ok: _session.device.notificationPermissionGranted,
@@ -824,6 +815,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     detail: _session.device.notificationPermissionGranted
                         ? 'Ready for background activity'
                         : 'Required for reliable background activity.',
+                    onTap: _requestNotificationPermission,
                   ),
                   _ChecklistItem(
                     ok: _session.device.batteryOptimizationIgnored,
@@ -831,6 +823,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     detail: _session.device.batteryOptimizationIgnored
                         ? 'Unrestricted'
                         : 'Your device may interrupt long sessions.',
+                    onTap: _requestBatteryOptimization,
                   ),
                   _ChecklistItem(
                     ok: closedAppReceiveReady,
@@ -839,6 +832,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ? 'Ready for nudges when the app is not open.'
                         : 'Allow notifications and unrestricted background activity.',
                     showDivider: false,
+                    onTap: _requestClosedAppPermissions,
                   ),
                 ],
               ),
@@ -883,11 +877,67 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 padding: EdgeInsets.zero,
                 children: [
                   _NavigationRow(
+                    icon: Icons.feedback_outlined,
+                    label: 'Send Feedback',
+                    onTap: () => showSendFeedbackSheet(
+                      context,
+                      userId: _session.userId,
+                    ),
+                  ),
+                  const _SurfaceDivider(indent: 52),
+                  _NavigationRow(
                     icon: Icons.bug_report_outlined,
                     label: 'Debug Logs',
                     onTap: () => showDebugLogsSheet(context),
                   ),
                 ],
+              ),
+              ValueListenableBuilder<bool>(
+                valueListenable: HomeVisualVariantController.unlocked,
+                builder: (context, testingUnlocked, _) {
+                  if (!testingUnlocked) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 28),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const _SectionTitle('Testing'),
+                        const SizedBox(height: 12),
+                        ValueListenableBuilder<HomeVisualVariant>(
+                          valueListenable: HomeVisualVariantController.current,
+                          builder: (context, variant, _) {
+                            return _SettingsSurface(
+                              children: [
+                                const _PreferenceHeading(
+                                  icon: Icons.science_outlined,
+                                  title: 'Home screen',
+                                  subtitle:
+                                      'Temporary looks for evaluating backdrop, blur, and overlay.',
+                                ),
+                                const SizedBox(height: 14),
+                                for (final option
+                                    in HomeVisualVariant.values) ...[
+                                  _TestingVariantRow(
+                                    variant: option,
+                                    selected: variant == option,
+                                    accent: accent,
+                                    onTap: () => unawaited(
+                                      HomeVisualVariantController.setVariant(
+                                        option,
+                                      ),
+                                    ),
+                                  ),
+                                  if (option != HomeVisualVariant.values.last)
+                                    const _SurfaceDivider(),
+                                ],
+                              ],
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
               const SizedBox(height: 28),
               const _SectionTitle('Account'),
@@ -964,17 +1014,13 @@ class _ProfileHeader extends StatelessWidget {
   const _ProfileHeader({
     required this.session,
     required this.accent,
-    required this.photoSaving,
     required this.enabled,
-    required this.onChangePhoto,
     required this.onEditProfile,
   });
 
   final IdentitySession session;
   final Color accent;
-  final bool photoSaving;
   final bool enabled;
-  final VoidCallback onChangePhoto;
   final VoidCallback onEditProfile;
 
   @override
@@ -984,22 +1030,25 @@ class _ProfileHeader extends StatelessWidget {
         Stack(
           alignment: Alignment.bottomRight,
           children: [
-            Container(
-              padding: const EdgeInsets.all(3),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(color: accent, width: 2),
-              ),
-              child: ProfileAvatar(
-                profilePhotoUrl: session.user.profilePhotoUrl,
-                profilePhotoBase64: session.user.profilePhotoBase64,
-                avatarAsset: session.user.avatarAsset,
-                radius: 48,
-                backgroundColor: const Color(0xff2b2b2b),
-                fallback: const Icon(
-                  Icons.person_outline,
-                  color: Colors.white54,
-                  size: 42,
+            GestureDetector(
+              onTap: enabled ? onEditProfile : null,
+              child: Container(
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: accent, width: 2),
+                ),
+                child: ProfileAvatar(
+                  profilePhotoUrl: session.user.profilePhotoUrl,
+                  profilePhotoBase64: session.user.profilePhotoBase64,
+                  avatarAsset: session.user.avatarAsset,
+                  radius: 48,
+                  backgroundColor: const Color(0xff2b2b2b),
+                  fallback: const Icon(
+                    Icons.person_outline,
+                    color: Colors.white54,
+                    size: 42,
+                  ),
                 ),
               ),
             ),
@@ -1007,17 +1056,9 @@ class _ProfileHeader extends StatelessWidget {
               color: accent,
               shape: const CircleBorder(),
               child: IconButton(
-                tooltip: 'Change profile picture',
-                onPressed: enabled ? onChangePhoto : null,
-                icon: photoSaving
-                    ? const SizedBox.square(
-                        dimension: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.black,
-                        ),
-                      )
-                    : const Icon(Icons.camera_alt_outlined),
+                tooltip: 'Edit profile',
+                onPressed: enabled ? onEditProfile : null,
+                icon: const Icon(Icons.edit_outlined),
                 color: Colors.black,
               ),
             ),
@@ -1033,13 +1074,6 @@ class _ProfileHeader extends StatelessWidget {
             color: Colors.white,
             fontWeight: FontWeight.w700,
           ),
-        ),
-        const SizedBox(height: 8),
-        TextButton.icon(
-          onPressed: enabled ? onEditProfile : null,
-          icon: const Icon(Icons.edit_outlined, size: 18),
-          label: const Text('Edit profile'),
-          style: TextButton.styleFrom(foregroundColor: accent),
         ),
       ],
     );
@@ -1126,8 +1160,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
         currentUrl: _session.user.profilePhotoUrl,
       );
       if (bytes == null || !mounted) return;
-      final session =
-          await widget.identityRepository.updateProfilePhoto(bytes);
+      final session = await widget.identityRepository.updateProfilePhoto(bytes);
       unawaited(
         CrashlyticsService.log('settings_edit_profile_photo_network_ok'),
       );
@@ -1148,9 +1181,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
         ),
       );
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     } finally {
       if (mounted) setState(() => _changingPhoto = false);
     }
@@ -1166,9 +1199,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
         _pendingAvatarAsset != _session.user.avatarAsset;
 
     if (!nameChanged && !avatarChanged) {
-      unawaited(
-        CrashlyticsService.log('settings_edit_profile_pop_no_change'),
-      );
+      unawaited(CrashlyticsService.log('settings_edit_profile_pop_no_change'));
       if (!mounted) return;
       await _popSheet(_EditProfileSheetResult(session: _session));
       return;
@@ -1205,10 +1236,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       // deactivation. Local state is enough for this frame; the parent applies
       // the returned session after the route is fully gone.
       await _popSheet(
-        _EditProfileSheetResult(
-          session: session,
-          message: 'Profile updated',
-        ),
+        _EditProfileSheetResult(session: session, message: 'Profile updated'),
       );
     } catch (error, stack) {
       unawaited(
@@ -1222,9 +1250,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       );
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -1243,7 +1271,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
     final busy = _saving || _changingPhoto;
 
     return Padding(
-      padding: EdgeInsets.only(bottom: keyboardInset),
+      padding: EdgeInsets.only(
+        bottom: keyboardInset + bottomSystemInsetOf(context),
+      ),
       child: ConstrainedBox(
         constraints: BoxConstraints(
           maxHeight: MediaQuery.sizeOf(context).height * 0.9,
@@ -1251,26 +1281,56 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 0, 8, 0),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'Edit profile',
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Edit profile',
+                            style: Theme.of(context).textTheme.headlineSmall
+                                ?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                          ),
+                          const SizedBox(height: 6),
+                          const Text(
+                            'This is how friends see you in your groups.',
+                            style: TextStyle(color: Colors.white60),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'This is how friends see you in your groups.',
-                    style: TextStyle(color: Colors.white60),
+                  IconButton(
+                    tooltip: 'Close',
+                    onPressed: busy
+                        ? null
+                        : () => unawaited(
+                            _popSheet(
+                              _EditProfileSheetResult(session: _session),
+                            ),
+                          ),
+                    icon: const Icon(Icons.close_rounded),
+                    color: Colors.white70,
                   ),
-                  const SizedBox(height: 22),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
+                children: [
                   TextField(
                     controller: _nameController,
-                    autofocus: true,
+                    autofocus: false,
                     textCapitalization: TextCapitalization.words,
                     textInputAction: TextInputAction.done,
                     onChanged: (_) => setState(() {}),
@@ -1318,9 +1378,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
               decoration: BoxDecoration(
                 color: const Color(0xff1b1b1b),
                 border: Border(
-                  top: BorderSide(
-                    color: Colors.white.withValues(alpha: 0.08),
-                  ),
+                  top: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
                 ),
                 boxShadow: [
                   BoxShadow(
@@ -1332,6 +1390,7 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
               ),
               child: SafeArea(
                 top: false,
+                bottom: false,
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(24, 12, 24, 12),
                   child: FilledButton.icon(
@@ -1506,9 +1565,7 @@ class _AvatarTabContent extends StatelessWidget {
         if (!snapshot.hasData) {
           return const Padding(
             padding: EdgeInsets.symmetric(vertical: 40),
-            child: Center(
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
           );
         }
         return Stack(
@@ -1597,10 +1654,7 @@ class _PhotoTabContent extends StatelessWidget {
               profilePhotoUrl: profilePhotoUrl,
               profilePhotoBase64: profilePhotoBase64,
               backgroundColor: const Color(0xff2b2b2b),
-              fallback: const Icon(
-                Icons.person_outline,
-                color: Colors.white54,
-              ),
+              fallback: const Icon(Icons.person_outline, color: Colors.white54),
             ),
           ),
         ),
@@ -1659,10 +1713,7 @@ class _SectionTitle extends StatelessWidget {
             letterSpacing: 0,
           ),
         ),
-        if (showBeta) ...[
-          const SizedBox(width: 8),
-          const _SettingsBetaBadge(),
-        ],
+        if (showBeta) ...[const SizedBox(width: 8), const _SettingsBetaBadge()],
       ],
     );
   }
@@ -1699,10 +1750,7 @@ class _ElevenProSettingsCard extends StatelessWidget {
                   SizedBox(height: 2),
                   Text(
                     'View plans',
-                    style: TextStyle(
-                      color: Colors.white54,
-                      fontSize: 13,
-                    ),
+                    style: TextStyle(color: Colors.white54, fontSize: 13),
                   ),
                 ],
               ),
@@ -1736,6 +1784,157 @@ class _SettingsBetaBadge extends StatelessWidget {
           fontSize: 10,
           fontWeight: FontWeight.w800,
           letterSpacing: 0.6,
+        ),
+      ),
+    );
+  }
+}
+
+class _HapticsTierRow extends StatelessWidget {
+  const _HapticsTierRow({
+    required this.selected,
+    required this.accent,
+    required this.enabled,
+    required this.onSelected,
+  });
+
+  final HapticsIntensity selected;
+  final Color accent;
+  final bool enabled;
+  final ValueChanged<HapticsIntensity> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        for (final option in HapticsIntensity.values) ...[
+          if (option != HapticsIntensity.values.first) const SizedBox(width: 8),
+          Expanded(
+            child: _HapticsTierChip(
+              option: option,
+              selected: selected == option,
+              accent: accent,
+              enabled: enabled,
+              onTap: () => onSelected(option),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _HapticsTierChip extends StatelessWidget {
+  const _HapticsTierChip({
+    required this.option,
+    required this.selected,
+    required this.accent,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final HapticsIntensity option;
+  final bool selected;
+  final Color accent;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final labelColor = selected ? accent : Colors.white54;
+    return Opacity(
+      opacity: enabled ? 1 : 0.45,
+      child: InkWell(
+        onTap: enabled ? onTap : null,
+        borderRadius: BorderRadius.circular(12),
+        splashColor: accent.withValues(alpha: 0.12),
+        highlightColor: accent.withValues(alpha: 0.06),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            children: [
+              Text(
+                option.emoji,
+                style: const TextStyle(fontSize: 28, height: 1.1),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                option.label,
+                style: TextStyle(
+                  color: labelColor,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 6),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOut,
+                height: 2,
+                width: selected ? 28 : 0,
+                decoration: BoxDecoration(
+                  color: accent,
+                  borderRadius: BorderRadius.circular(1),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TestingVariantRow extends StatelessWidget {
+  const _TestingVariantRow({
+    required this.variant,
+    required this.selected,
+    required this.accent,
+    required this.onTap,
+  });
+
+  final HomeVisualVariant variant;
+  final bool selected;
+  final Color accent;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            Icon(
+              selected
+                  ? Icons.radio_button_checked
+                  : Icons.radio_button_off_outlined,
+              color: selected ? accent : Colors.white38,
+              size: 22,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    variant.label,
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    variant.subtitle,
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1901,6 +2100,7 @@ class _ChecklistItem extends StatelessWidget {
     required this.label,
     required this.detail,
     this.showDivider = true,
+    this.onTap,
   });
 
   final bool ok;
@@ -1908,34 +2108,49 @@ class _ChecklistItem extends StatelessWidget {
   final String detail;
   final bool showDivider;
 
+  /// Re-triggers the permission prompt when [ok] is false. When null the row
+  /// is informational and not tappable.
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
     final statusColor = ok ? const Color(0xff7CFF6B) : const Color(0xffffb020);
+    final tappable = !ok && onTap != null;
     return Column(
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(
-              ok ? Icons.check_circle_outline : Icons.info_outline,
-              color: statusColor,
-              size: 22,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(label, style: const TextStyle(color: Colors.white)),
-                  const SizedBox(height: 3),
-                  Text(
-                    detail,
-                    style: const TextStyle(color: Colors.white54, fontSize: 13),
+        InkWell(
+          onTap: tappable ? onTap : null,
+          borderRadius: BorderRadius.circular(6),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  ok ? Icons.check_box_rounded : Icons.check_box_outline_blank,
+                  color: statusColor,
+                  size: 22,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(label, style: const TextStyle(color: Colors.white)),
+                      const SizedBox(height: 3),
+                      Text(
+                        detail,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
         if (showDivider) const _SurfaceDivider(),
       ],

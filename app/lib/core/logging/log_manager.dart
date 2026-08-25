@@ -1,15 +1,4 @@
-import 'dart:async';
-import 'dart:collection';
-import 'dart:io';
-
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:package_info_plus/package_info_plus.dart';
-import 'package:path_provider/path_provider.dart';
-
-import 'log_level.dart';
-import 'log_line.dart';
+import 'package:one_one_app/one_one.dart';
 
 class LogFileInfo {
   const LogFileInfo({
@@ -132,25 +121,33 @@ class LogManager {
     String? userId,
     String? groupId,
   }) async {
-    final network = await _captureNetwork();
-    final line = LogLine.format(
-      time: DateTime.now(),
-      level: level,
-      tag: tag,
-      message: message,
-      metadata: LogMetadata(
-        userId: userId?.trim().isNotEmpty == true ? userId!.trim() : _userId,
-        groupId: groupId?.trim().isNotEmpty == true ? groupId!.trim() : _groupId,
-        networkType: network.$1,
-        networkStrength: network.$2,
-        deviceModel: _deviceModel,
-        androidVersion: _androidVersion,
-        appVersion: _appVersion,
-      ),
-    );
-    _remember(line);
-    debugPrint(line);
-    _enqueueWrite(line);
+    try {
+      final network = await _captureNetwork();
+      final line = LogLine.format(
+        time: DateTime.now(),
+        level: level,
+        tag: tag,
+        message: message,
+        metadata: LogMetadata(
+          userId: userId?.trim().isNotEmpty == true ? userId!.trim() : _userId,
+          groupId: groupId?.trim().isNotEmpty == true
+              ? groupId!.trim()
+              : _groupId,
+          networkType: network.$1,
+          networkStrength: network.$2,
+          deviceModel: _deviceModel,
+          androidVersion: _androidVersion,
+          appVersion: _appVersion,
+        ),
+      );
+      _remember(line);
+      debugPrint(line);
+      _enqueueWrite(line);
+    } catch (error) {
+      // Logging must never fatal the root zone (AppLifecycle logs on every
+      // foreground/background). Native meta maps can be unmodifiable.
+      debugPrint('[LogManager] log failed tag=$tag error=$error');
+    }
   }
 
   static void _remember(String line) {
@@ -232,6 +229,48 @@ class LogManager {
     final directory = _directory;
     if (directory == null) return null;
     return File('${directory.path}/${LogLine.dailyFileName(DateTime.now())}');
+  }
+
+  static Future<void> flush() async {
+    await initialize();
+    await _writeChain;
+  }
+
+  static Future<List<File>> retainedLogFiles() async {
+    await flush();
+    final directory = _directory;
+    if (directory == null || !directory.existsSync()) return const [];
+    final files = <File>[];
+    await for (final entity in directory.list()) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      if (!name.startsWith('oneone_logs_') || !name.endsWith('.txt')) continue;
+      files.add(entity);
+    }
+    files.sort((a, b) => a.path.compareTo(b.path));
+    return files;
+  }
+
+  static String get userId => _userId;
+  static String get groupId => _groupId;
+  static String get deviceModel => _deviceModel;
+  static String get androidVersion => _androidVersion;
+  static String get appVersion => _appVersion;
+
+  static Map<String, String> reportTags({
+    String? userId,
+    String? groupId,
+  }) {
+    return {
+      'userId': (userId != null && userId.trim().isNotEmpty) ? userId.trim() : _userId,
+      'groupId': (groupId != null && groupId.trim().isNotEmpty)
+          ? groupId.trim()
+          : _groupId,
+      'appVersion': _appVersion,
+      'deviceModel': _deviceModel,
+      'androidVersion': _androidVersion,
+      'timestamp': DateTime.now().toUtc().toIso8601String(),
+    };
   }
 
   static Future<String> readTodayText() async {

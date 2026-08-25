@@ -1,10 +1,6 @@
-import 'dart:async';
+import 'package:livekit_client/livekit_client.dart' as livekit;
 
-import 'package:livekit_client/livekit_client.dart';
-
-import '../../core/logging/log_level.dart';
-import '../../core/logging/log_manager.dart';
-import 'presence_config.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Snapshot of the LiveKit room state captured when the solo-participant
 /// timeout fires. Callers use this to log *why* the invalid state occurred and
@@ -138,7 +134,7 @@ class SoloParticipantGuard {
     final room = _room;
     if (room == null) return;
 
-    final connected = room.connectionState == ConnectionState.connected;
+    final connected = room.connectionState == livekit.ConnectionState.connected;
     final remoteCount = room.remoteParticipants.length;
 
     if (!connected || remoteCount > 0) {
@@ -197,7 +193,7 @@ class SoloParticipantGuard {
 
     // Re-check at fire time: a participant may have joined after the last
     // event, or the room may no longer be connected.
-    if (room.connectionState != ConnectionState.connected) {
+    if (room.connectionState != livekit.ConnectionState.connected) {
       _reset();
       return;
     }

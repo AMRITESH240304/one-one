@@ -1,11 +1,4 @@
-import 'dart:async';
-
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_database/firebase_database.dart';
-
-import '../../../core/firebase/app_database.dart';
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/network/api_client.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Reads/writes ephemeral group chat bubbles (Prompt 5).
 ///
@@ -107,7 +100,7 @@ class ChatMessageRepository {
       );
     }
 
-    unawaited(_notifyGroup(groupId));
+    unawaited(_notifyGroup(groupId, messageId: messageId, text: sanitized));
   }
 
   /// Clears the collapsing chat notification pile when the group is opened.
@@ -116,7 +109,10 @@ class ChatMessageRepository {
     required String userId,
   }) async {
     try {
-      await _database.ref('chatUnread/$groupId/$userId/count').set(0);
+      await _database.ref('chatUnread/$groupId/$userId').update({
+        'count': 0,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      });
     } catch (_) {
       // Best-effort — the local notification cancel still runs.
     }
@@ -124,11 +120,15 @@ class ChatMessageRepository {
 
   /// Best-effort push fan-out — the bubble is already live in-app via RTDB,
   /// so a failed/slow notification call must never block or fail sendMessage.
-  Future<void> _notifyGroup(String groupId) async {
+  Future<void> _notifyGroup(
+    String groupId, {
+    required String messageId,
+    required String text,
+  }) async {
     try {
       await _apiClient.postJson(
         '/v1/groups/$groupId/chat-messages/notify',
-        const {},
+        {'messageId': messageId, 'text': text},
       );
     } catch (_) {
       // Non-fatal — see doc comment above.

@@ -2,6 +2,8 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { HttpError } from "../http/httpError.js";
 
 export const maxVoiceNudgeBytes = 96 * 1024;
+/** Protocol ceiling. The app auto-stops capture at 5s; this 6s bound only
+ *  absorbs encoder flush / timer jitter so a full-cap clip is not 400'd. */
 export const maxVoiceNudgeDurationMs = 6_000;
 export const minVoiceNudgeDurationMs = 250;
 
@@ -75,7 +77,7 @@ export type UploadTicket = {
   eventId: string;
   groupId: string;
   senderUserId: string;
-  targetScope: "single_friend" | "all_friends";
+  targetScope: "single_friend" | "all_friends" | "selected_friends";
   targetUserId?: string;
   recipientDevices: Array<{ userId: string; deviceId: string; fcmToken: string }>;
   recipientUserIds: string[];
@@ -130,7 +132,9 @@ function isUploadTicket(value: unknown): value is UploadTicket {
     typeof value.eventId === "string" &&
     typeof value.groupId === "string" &&
     typeof value.senderUserId === "string" &&
-    (value.targetScope === "single_friend" || value.targetScope === "all_friends") &&
+    (value.targetScope === "single_friend" ||
+      value.targetScope === "all_friends" ||
+      value.targetScope === "selected_friends") &&
     Array.isArray(value.recipientDevices) &&
     value.recipientDevices.every(
       (d: unknown) =>

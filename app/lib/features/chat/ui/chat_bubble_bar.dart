@@ -1,10 +1,4 @@
-import 'dart:async';
-
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../data/chat_message_repository.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Bottom messages bar whose content depends on group online state:
 /// - All offline: predefined text chips + pinned keyboard.
@@ -215,11 +209,7 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
       // See _sendPreset.
     } finally {
       if (mounted) {
-        setState(() {
-          _sending = false;
-          _composing = false;
-        });
-        _focusNode.unfocus();
+        setState(() => _sending = false);
       }
     }
   }
@@ -243,7 +233,7 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
         final maxSheetHeight =
             MediaQuery.sizeOf(sheetContext).height * 0.7 -
             MediaQuery.viewInsetsOf(sheetContext).bottom;
-        return SafeArea(
+        return BottomSystemSafeArea(
           child: ConstrainedBox(
             constraints: BoxConstraints(
               maxHeight: maxSheetHeight.clamp(200.h, double.infinity),
@@ -288,7 +278,12 @@ class _ChatBubbleBarState extends State<ChatBubbleBar> {
                               color: const Color.fromRGBO(255, 255, 255, 0.08),
                               borderRadius: BorderRadius.circular(14.r),
                               border: Border.all(
-                                color: const Color.fromRGBO(255, 255, 255, 0.12),
+                                color: const Color.fromRGBO(
+                                  255,
+                                  255,
+                                  255,
+                                  0.12,
+                                ),
                               ),
                             ),
                             child: Text(

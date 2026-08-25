@@ -1,6 +1,6 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/identity/ui/legal_document_screen.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   testWidgets('privacy policy identifies collected information and providers', (

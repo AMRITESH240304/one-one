@@ -1,6 +1,7 @@
 import express, { Router } from "express";
 import { z } from "zod";
 import { getRealtimeDatabase } from "../firebase/database.js";
+import { filterActiveAccountUserIds, listInVoiceSessionUserIds } from "../groups/groupService.js";
 import { requireFirebaseAuth, type AuthenticatedRequest } from "../firebase/auth.js";
 import { asyncHandler } from "../http/asyncHandler.js";
 import {
@@ -33,19 +34,26 @@ const goneOfflineSchema = z.object({
   reason: z.enum(["peer_left", "inactivity", "daily_usage_cap", "network_loss"])
 });
 
-const nudgeSchema = z.discriminatedUnion("targetScope", [
+const nudgeTargetSchema = z.discriminatedUnion("targetScope", [
   z.object({
     targetScope: z.literal("single_friend"),
     targetUserId: z.string().min(1)
   }),
   z.object({
     targetScope: z.literal("all_friends")
+  }),
+  z.object({
+    targetScope: z.literal("selected_friends"),
+    targetUserIds: z.array(z.string().min(1)).min(1)
   })
 ]);
 
+const nudgeSchema = nudgeTargetSchema;
+
 const voiceNudgeQuerySchema = z.object({
-  targetScope: z.enum(["single_friend", "all_friends"]),
-  targetUserId: z.string().min(1).optional()
+  targetScope: z.enum(["single_friend", "all_friends", "selected_friends"]),
+  targetUserId: z.string().min(1).optional(),
+  targetUserIds: z.union([z.string().min(1), z.array(z.string().min(1))]).optional()
 });
 
 const recipientDeviceSchema = z.object({
@@ -55,36 +63,30 @@ const recipientDeviceSchema = z.object({
   displayName: z.string().min(1).optional()
 });
 
-const voiceNudgeUploadSchema = z.discriminatedUnion("targetScope", [
+const voiceNudgeUploadSchema = z.intersection(
+  nudgeTargetSchema,
   z.object({
-    targetScope: z.literal("single_friend"),
-    targetUserId: z.string().min(1),
     durationMs: z.number().int().positive(),
     // New fields — client provides these when reading RTDB directly.
     // Optional during migration; backend falls back to RTDB reads if missing.
     recipientDevices: z.array(recipientDeviceSchema).min(1).optional(),
     senderName: z.string().min(1).optional()
-  }),
-  z.object({
-    targetScope: z.literal("all_friends"),
-    durationMs: z.number().int().positive(),
-    recipientDevices: z.array(recipientDeviceSchema).min(1).optional(),
-    senderName: z.string().min(1).optional()
   })
-]);
+);
 
 const voiceNudgeCompleteSchema = z.object({
   uploadTicket: z.string().min(1).optional()
 });
 
-const ringNudgeSchema = z.object({
-  targetScope: z.enum(["single_friend", "all_friends"]),
-  targetUserId: z.string().min(1).optional(),
-  durationSeconds: z.union([z.literal(3), z.literal(5), z.literal(10)]),
-  // Optional during migration; backend falls back to RTDB reads if missing.
-  recipientDevices: z.array(recipientDeviceSchema).min(1).optional(),
-  senderName: z.string().min(1).optional()
-});
+const ringNudgeSchema = z.intersection(
+  nudgeTargetSchema,
+  z.object({
+    durationSeconds: z.union([z.literal(3), z.literal(6), z.literal(9)]),
+    // Optional during migration; backend falls back to RTDB reads if missing.
+    recipientDevices: z.array(recipientDeviceSchema).min(1).optional(),
+    senderName: z.string().min(1).optional()
+  })
+);
 
 const voiceNudgeAckSchema = z.object({
   status: z.enum(["played", "failed"])
@@ -102,6 +104,7 @@ const nudgeAckSchema = z.object({
 const nudgeResponseSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("accept") }),
   z.object({ action: z.literal("decline") }),
+  z.object({ action: z.literal("silence") }),
   z.object({
     action: z.literal("snooze"),
     // Preserve compatibility with installed builds that sent a bare snooze.
@@ -160,7 +163,8 @@ export function createNotificationRoutes() {
         groupId,
         senderUserId: authRequest.auth.uid,
         targetScope: body.targetScope,
-        targetUserId: "targetUserId" in body ? body.targetUserId : undefined
+        targetUserId: "targetUserId" in body ? body.targetUserId : undefined,
+        targetUserIds: "targetUserIds" in body ? body.targetUserIds : undefined
       });
 
       response.status(200).json(result);
@@ -173,9 +177,17 @@ export function createNotificationRoutes() {
     asyncHandler(async (request, response) => {
       const authRequest = request as AuthenticatedRequest;
       const groupId = z.string().min(1).parse(request.params.groupId);
+      const body = z
+        .object({
+          messageId: z.string().min(1).max(64).optional(),
+          text: z.string().min(1).max(240).optional()
+        })
+        .parse(request.body ?? {});
       const result = await sendChatMessageNotification({
         groupId,
-        senderUserId: authRequest.auth.uid
+        senderUserId: authRequest.auth.uid,
+        messageId: body.messageId,
+        text: body.text
       });
 
       response.status(200).json(result);
@@ -217,58 +229,28 @@ export function createNotificationRoutes() {
       if (!recipientDevices || !senderName) {
         const db = getRealtimeDatabase();
 
-        const targetUserId = body.targetUserId;
-        let recipientUserIds: string[];
-        if (body.targetScope === "single_friend" && targetUserId) {
-          recipientUserIds = targetUserId !== authRequest.auth.uid
-            ? [targetUserId] : [];
-        } else {
-          const snap = await db.ref(`groupMembers/${groupId}`).get();
-          recipientUserIds = [];
-          if (snap.exists()) {
-            const members = snap.val() as Record<string, unknown>;
-            for (const [uid, val] of Object.entries(members)) {
-              if (
-                uid !== authRequest.auth.uid &&
-                typeof val === "object" && val !== null &&
-                (val as Record<string, unknown>).memberState === "active"
-              ) {
-                recipientUserIds.push(uid);
-              }
-            }
-          }
-        }
+        const targetUserId = "targetUserId" in body ? body.targetUserId : undefined;
+        const targetUserIds = "targetUserIds" in body ? body.targetUserIds : undefined;
+        const recipientUserIds = await resolveFallbackRecipientUserIds({
+          db,
+          groupId,
+          senderUserId: authRequest.auth.uid,
+          targetScope: body.targetScope,
+          targetUserId,
+          targetUserIds
+        });
 
-        const devices: Array<{ userId: string; deviceId: string; fcmToken: string; displayName?: string }> = [];
-        for (const uid of recipientUserIds) {
-          const devSnap = await db.ref(`userDevices/${uid}`).get();
-          if (!devSnap.exists()) continue;
-          const recipientDisplayName = await readDisplayNameForAck(db, uid);
-          const devs = devSnap.val() as Record<string, unknown>;
-          for (const [devId, dv] of Object.entries(devs)) {
-            if (
-              typeof dv === "object" && dv !== null &&
-              (dv as Record<string, unknown>).deviceState === "active" &&
-              (dv as Record<string, unknown>).platform === "android"
-            ) {
-              const tok = (dv as Record<string, unknown>).fcmToken;
-              if (typeof tok === "string" && tok) {
-                devices.push({ userId: uid, deviceId: devId, fcmToken: tok, displayName: recipientDisplayName });
-              }
-            }
-          }
-        }
-        recipientDevices = devices;
-
-        const nameSnap = await db.ref(`users/${authRequest.auth.uid}/displayName`).get();
-        senderName = nameSnap.val()?.toString() || "Someone";
+        [recipientDevices, senderName] = await Promise.all([
+          collectFallbackRecipientDevices(db, recipientUserIds),
+          readFallbackSenderName(db, authRequest.auth.uid)
+        ]);
       }
 
       const result = await sendRingNudge({
         groupId,
         senderUserId: authRequest.auth.uid,
         targetScope: body.targetScope,
-        targetUserId: body.targetUserId,
+        targetUserId: "targetUserId" in body ? body.targetUserId : undefined,
         durationSeconds: body.durationSeconds,
         recipientDevices: recipientDevices!,
         senderName: senderName!
@@ -297,53 +279,21 @@ export function createNotificationRoutes() {
         // Resolve recipients
         const targetUserId =
           "targetUserId" in body ? body.targetUserId : undefined;
-        let recipientUserIds: string[];
-        if (targetUserId) {
-          recipientUserIds = targetUserId !== authRequest.auth.uid
-            ? [targetUserId]
-            : [];
-        } else {
-          const memberSnap = await db.ref(`groupMembers/${groupId}`).get();
-          recipientUserIds = [];
-          if (memberSnap.exists()) {
-            const members = memberSnap.val() as Record<string, unknown>;
-            for (const [uid, val] of Object.entries(members)) {
-              if (
-                uid !== authRequest.auth.uid &&
-                typeof val === "object" && val !== null &&
-                (val as Record<string, unknown>).memberState === "active"
-              ) {
-                recipientUserIds.push(uid);
-              }
-            }
-          }
-        }
+        const targetUserIds =
+          "targetUserIds" in body ? body.targetUserIds : undefined;
+        const recipientUserIds = await resolveFallbackRecipientUserIds({
+          db,
+          groupId,
+          senderUserId: authRequest.auth.uid,
+          targetScope: body.targetScope,
+          targetUserId,
+          targetUserIds
+        });
 
-        // Read recipient devices (FCM tokens) from RTDB
-        const devices: Array<{ userId: string; deviceId: string; fcmToken: string; displayName?: string }> = [];
-        for (const uid of recipientUserIds) {
-          const devSnap = await db.ref(`userDevices/${uid}`).get();
-          if (!devSnap.exists()) continue;
-          const recipientDisplayName = await readDisplayNameForAck(db, uid);
-          const devs = devSnap.val() as Record<string, unknown>;
-          for (const [devId, dv] of Object.entries(devs)) {
-            if (
-              typeof dv === "object" && dv !== null &&
-              (dv as Record<string, unknown>).deviceState === "active" &&
-              (dv as Record<string, unknown>).platform === "android"
-            ) {
-              const tok = (dv as Record<string, unknown>).fcmToken;
-              if (typeof tok === "string" && tok) {
-                devices.push({ userId: uid, deviceId: devId, fcmToken: tok, displayName: recipientDisplayName });
-              }
-            }
-          }
-        }
-        recipientDevices = devices;
-
-        // Read display name from RTDB
-        const nameSnap = await db.ref(`users/${authRequest.auth.uid}/displayName`).get();
-        senderName = nameSnap.val()?.toString() || "Someone";
+        [recipientDevices, senderName] = await Promise.all([
+          collectFallbackRecipientDevices(db, recipientUserIds),
+          readFallbackSenderName(db, authRequest.auth.uid)
+        ]);
       }
 
       const result = await initiateVoiceNudgeUpload({
@@ -549,6 +499,46 @@ export function createNotificationRoutes() {
   return router;
 }
 
+async function resolveFallbackRecipientUserIds(input: {
+  db: ReturnType<typeof getRealtimeDatabase>;
+  groupId: string;
+  senderUserId: string;
+  targetScope: "single_friend" | "all_friends" | "selected_friends";
+  targetUserId?: string;
+  targetUserIds?: string[];
+}): Promise<string[]> {
+  let recipientUserIds: string[] = [];
+  if (input.targetScope === "single_friend" && input.targetUserId) {
+    recipientUserIds =
+      input.targetUserId !== input.senderUserId ? [input.targetUserId] : [];
+  } else if (input.targetScope === "selected_friends") {
+    recipientUserIds = [...new Set(input.targetUserIds ?? [])].filter(
+      (userId) => userId !== input.senderUserId
+    );
+  } else {
+    const snap = await input.db.ref(`groupMembers/${input.groupId}`).get();
+    if (snap.exists()) {
+      const members = snap.val() as Record<string, unknown>;
+      for (const [uid, val] of Object.entries(members)) {
+        if (
+          uid !== input.senderUserId &&
+          typeof val === "object" &&
+          val !== null &&
+          (val as Record<string, unknown>).memberState === "active"
+        ) {
+          recipientUserIds.push(uid);
+        }
+      }
+    }
+  }
+  // Account deletion removes users/{uid}; app uninstall does not.
+  const activeUserIds = await filterActiveAccountUserIds(recipientUserIds);
+  const liveUserIds = new Set(
+    await listInVoiceSessionUserIds(input.groupId)
+  );
+  return activeUserIds.filter((userId) => !liveUserIds.has(userId));
+}
+
 async function readDisplayNameForAck(
   db: ReturnType<typeof getRealtimeDatabase>,
   userId: string
@@ -556,4 +546,55 @@ async function readDisplayNameForAck(
   const snapshot = await db.ref(`users/${userId}/displayName`).get();
   const name = snapshot.val()?.toString().trim();
   return name || undefined;
+}
+
+type FallbackRecipientDevice = {
+  userId: string;
+  deviceId: string;
+  fcmToken: string;
+  displayName?: string;
+};
+
+async function collectFallbackRecipientDevices(
+  db: ReturnType<typeof getRealtimeDatabase>,
+  recipientUserIds: string[]
+): Promise<FallbackRecipientDevice[]> {
+  const perUser = await Promise.all(
+    recipientUserIds.map(async (uid) => {
+      const [devSnap, recipientDisplayName] = await Promise.all([
+        db.ref(`userDevices/${uid}`).get(),
+        readDisplayNameForAck(db, uid)
+      ]);
+      if (!devSnap.exists()) return [];
+      const devs = devSnap.val() as Record<string, unknown>;
+      const devices: FallbackRecipientDevice[] = [];
+      for (const [devId, dv] of Object.entries(devs)) {
+        if (
+          typeof dv === "object" && dv !== null &&
+          (dv as Record<string, unknown>).deviceState === "active" &&
+          (dv as Record<string, unknown>).platform === "android"
+        ) {
+          const tok = (dv as Record<string, unknown>).fcmToken;
+          if (typeof tok === "string" && tok) {
+            devices.push({
+              userId: uid,
+              deviceId: devId,
+              fcmToken: tok,
+              displayName: recipientDisplayName
+            });
+          }
+        }
+      }
+      return devices;
+    })
+  );
+  return perUser.flat();
+}
+
+async function readFallbackSenderName(
+  db: ReturnType<typeof getRealtimeDatabase>,
+  senderUserId: string
+): Promise<string> {
+  const name = await readDisplayNameForAck(db, senderUserId);
+  return name ?? "Someone";
 }

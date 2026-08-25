@@ -1,9 +1,4 @@
-import 'package:firebase_database/firebase_database.dart';
-import 'package:uuid/uuid.dart';
-
-import '../../../core/firebase/app_database.dart';
-import '../../online/models/online_session.dart';
-import '../models/talk_session.dart';
+import 'package:one_one_app/one_one.dart';
 
 class TalkRepository {
   TalkRepository({FirebaseDatabase? database})

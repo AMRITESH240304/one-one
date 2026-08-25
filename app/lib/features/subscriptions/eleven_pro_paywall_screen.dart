@@ -1,11 +1,4 @@
-import 'dart:async';
-
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:purchases_flutter/purchases_flutter.dart';
-
-import '../../app/app_config.dart';
-import 'revenue_cat_service.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Brand yellow used on auth/onboarding — not the user accent color.
 const Color _kBrandYellow = Color(0xffF8BE03);

@@ -1,10 +1,4 @@
-import 'dart:async';
-import 'dart:io';
-
-import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:one_one_app/one_one.dart';
 
 enum _SetupStep { mic, notification, background }
 
@@ -13,30 +7,80 @@ class _StepVisual {
     required this.iconColor,
     required this.icon,
     required this.backgroundAsset,
+    required this.imageWidth,
+    required this.imageHeight,
+    this.boxTopColor,
+    this.boxBottomColor,
+    this.containScale = 1,
+    this.shiftX = 0,
   });
 
   final Color iconColor;
   final IconData icon;
   final String backgroundAsset;
+
+  /// Intrinsic pixel size of the artwork. Used to compute how much of the
+  /// screen the contained image occupies so letterbox bands sit at the
+  /// image's actual edges.
+  final double imageWidth;
+  final double imageHeight;
+
+  /// Backdrop color at the artwork's top edge. When both top and bottom are
+  /// set, the image is fitted with `BoxFit.contain` inside a box painted
+  /// with those colors so the letterbox matches the illustration.
+  final Color? boxTopColor;
+
+  /// Backdrop color at the artwork's bottom edge.
+  final Color? boxBottomColor;
+
+  /// Multiplier on the max contain size. Values below 1 inset the artwork
+  /// so more of the matching backdrop shows around it.
+  final double containScale;
+
+  /// Horizontal offset (logical px) applied to the image. Used to nudge a
+  /// step's artwork right by a fixed amount.
+  final double shiftX;
 }
 
 /// Icon colors are picked to match the dominant tone of each onboarding
 /// background image so the CTA card feels native to the artwork behind it.
+///
+/// Screen 1 (green) and screen 3 (mustard) wrap their artwork in a box
+/// painted with the illustration's own backdrop so the contained image
+/// blends into the letterbox. Screen 2 (purple) stays contained at full
+/// size with a matching purple letterbox.
 const Map<_SetupStep, _StepVisual> _stepVisuals = {
   _SetupStep.mic: _StepVisual(
     iconColor: Color(0xff8fa83e),
     icon: Icons.mic_rounded,
     backgroundAsset: 'assets/Onboarding1.png',
+    imageWidth: 848,
+    imageHeight: 1264,
+    // Screen 1 — uniform lime green (rgb 139,161,80).
+    boxTopColor: Color(0xff8BA150),
+    boxBottomColor: Color(0xff8BA150),
   ),
   _SetupStep.notification: _StepVisual(
     iconColor: Color(0xff7a4fc9),
     icon: Icons.notifications_rounded,
     backgroundAsset: 'assets/Onboarding3.png',
+    imageWidth: 712,
+    imageHeight: 1264,
+    // Screen 2 — uniform purple (rgb 95,40,121). Full contain, no extra inset.
+    boxTopColor: Color(0xff5F2879),
+    boxBottomColor: Color(0xff5F2879),
   ),
   _SetupStep.background: _StepVisual(
     iconColor: Color(0xffdb8a1e),
     icon: Icons.battery_saver_rounded,
     backgroundAsset: 'assets/Onboarding2.png',
+    imageWidth: 816,
+    imageHeight: 1287,
+    // Screen 3 — mustard yellow (rgb 209,139,9). Scale below 1 so the
+    // illustration sits with a matching yellow border around it.
+    boxTopColor: Color(0xffD18B09),
+    boxBottomColor: Color(0xffD18B09),
+    containScale: 0.78,
   ),
 };
 
@@ -191,30 +235,130 @@ class _SetupPermissionScreenState extends State<SetupPermissionScreen>
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Backdrop used to fill the screen around a contained illustration.
+  /// Falls back to black for full-bleed `cover` steps.
+  Color _backdropColor(_StepVisual visual) =>
+      visual.boxTopColor ?? const Color(0xff000000);
+
+  /// Renders the step's artwork.
+  ///
+  /// Screens with a [boxTopColor]/[boxBottomColor] pair wrap their artwork in
+  /// a box painted with the illustration's own backdrop color, fitted with
+  /// `BoxFit.contain` (and optional [containScale] inset).
+  /// When top and bottom colors differ, a vertical gradient is aligned to
+  /// the contained image's edges. Screens without a box keep the full-bleed
+  /// `BoxFit.cover` and only apply a horizontal [shiftX] offset.
+  Widget _buildStepBackground(_StepVisual visual) {
+    final hasBox =
+        visual.boxTopColor != null && visual.boxBottomColor != null;
+    if (!hasBox) {
+      Widget image = Image.asset(
+        visual.backgroundAsset,
+        key: ValueKey(visual.backgroundAsset),
+        fit: BoxFit.cover,
+        width: double.infinity,
+        height: double.infinity,
+        alignment: Alignment.center,
+      );
+      if (visual.shiftX != 0) {
+        image = Transform.translate(
+          offset: Offset(visual.shiftX, 0),
+          child: image,
+        );
+      }
+      return KeyedSubtree(
+        key: ValueKey(visual.backgroundAsset),
+        child: image,
+      );
+    }
+
+    return KeyedSubtree(
+      key: ValueKey(visual.backgroundAsset),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final maxWidth = constraints.maxWidth.isFinite
+              ? constraints.maxWidth
+              : MediaQuery.sizeOf(context).width;
+          final maxHeight = constraints.maxHeight.isFinite
+              ? constraints.maxHeight
+              : MediaQuery.sizeOf(context).height;
+          final scale = min(
+                maxWidth / visual.imageWidth,
+                maxHeight / visual.imageHeight,
+              ) *
+              visual.containScale;
+          final displayedWidth = visual.imageWidth * scale;
+          final displayedHeight = visual.imageHeight * scale;
+          final topBand = (maxHeight - displayedHeight) / 2;
+          final usesGradient = visual.boxTopColor != visual.boxBottomColor;
+          return ColoredBox(
+            color: visual.boxTopColor!,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: usesGradient
+                    ? LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          visual.boxTopColor!,
+                          visual.boxBottomColor!,
+                        ],
+                        stops: [
+                          topBand / maxHeight,
+                          (topBand + displayedHeight) / maxHeight,
+                        ],
+                      )
+                    : null,
+              ),
+              child: Center(
+                child: SizedBox(
+                  width: displayedWidth,
+                  height: displayedHeight,
+                  child: Image.asset(
+                    visual.backgroundAsset,
+                    fit: BoxFit.fill,
+                    width: displayedWidth,
+                    height: displayedHeight,
+                    gaplessPlayback: true,
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final visual = _stepVisuals[_step]!;
+    final backdrop = _backdropColor(visual);
 
     return Scaffold(
-      backgroundColor: const Color(0xff000000),
+      backgroundColor: backdrop,
       body: Stack(
         fit: StackFit.expand,
         children: [
+          Positioned.fill(child: ColoredBox(color: backdrop)),
           AnimatedSwitcher(
             duration: _stageTransitionDuration,
             switchInCurve: Curves.easeOutCubic,
             switchOutCurve: Curves.easeInCubic,
+            layoutBuilder: (currentChild, previousChildren) {
+              return Stack(
+                fit: StackFit.expand,
+                alignment: Alignment.center,
+                children: [
+                  ...previousChildren,
+                  if (currentChild != null) currentChild,
+                ],
+              );
+            },
             transitionBuilder: (child, animation) {
               return FadeTransition(opacity: animation, child: child);
             },
-            child: Image.asset(
-              visual.backgroundAsset,
-              key: ValueKey(visual.backgroundAsset),
-              fit: BoxFit.cover,
-              width: double.infinity,
-              height: double.infinity,
-              alignment: Alignment.center,
-            ),
+            child: _buildStepBackground(visual),
           ),
           // Bottom scrim so the CTA card and footnote stay legible over
           // whatever part of the artwork ends up behind them.

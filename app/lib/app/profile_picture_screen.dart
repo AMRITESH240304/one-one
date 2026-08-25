@@ -1,10 +1,4 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../features/identity/data/avatar_assets.dart';
-import '../features/identity/data/identity_repository.dart';
-import '../features/identity/models/identity_session.dart';
-import '../features/identity/ui/avatar_picker_grid.dart';
+import 'package:one_one_app/one_one.dart';
 
 class ProfilePictureScreen extends StatefulWidget {
   const ProfilePictureScreen({

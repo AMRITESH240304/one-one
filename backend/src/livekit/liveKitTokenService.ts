@@ -26,18 +26,7 @@ export async function issueGroupLiveKitToken(input: IssueGroupLiveKitTokenInput)
   await requireActiveGroupMember(input.groupId, input.userId);
   await requireActiveUserDevice(input.userId, input.deviceId);
 
-  const livekitRoomSnapshot = await db.ref(`livekitRooms/${input.groupId}`).get();
-
-  if (!livekitRoomSnapshot.exists()) {
-    throw new HttpError(404, "livekit_room_not_found", "LiveKit room mapping does not exist.");
-  }
-
-  if ((livekitRoomSnapshot.child("roomState").val() ?? "active") !== "active") {
-    throw new HttpError(409, "livekit_room_not_active", "LiveKit room mapping is not active.");
-  }
-
-  const roomName =
-    livekitRoomSnapshot.child("roomName").val()?.toString() || group.livekitRoomName;
+  const roomName = await requireActiveLiveKitRoomName(input.groupId, group.livekitRoomName);
   const participantIdentity = `${input.groupId}:${input.userId}:${input.deviceId}`;
   const participantName =
     (await db.ref(`users/${input.userId}/displayName`).get()).val()?.toString() ||
@@ -83,6 +72,22 @@ export async function issueGroupLiveKitToken(input: IssueGroupLiveKitTokenInput)
     token: tokenResponse.token,
     expiresAt
   };
+}
+
+async function requireActiveLiveKitRoomName(groupId: string, fallback: string) {
+  const snapshot = await getRealtimeDatabase().ref(`livekitRooms/${groupId}`).get();
+  if (!snapshot.exists()) {
+    throw new HttpError(404, "livekit_room_not_found", "LiveKit room mapping does not exist.");
+  }
+  if ((snapshot.child("roomState").val() ?? "active") !== "active") {
+    throw new HttpError(409, "livekit_room_not_active", "LiveKit room mapping is not active.");
+  }
+  return snapshot.child("roomName").val()?.toString() || fallback;
+}
+
+export function userIdFromGroupParticipantIdentity(groupId: string, identity: string) {
+  const [identityGroupId, participantUserId, deviceId] = identity.split(":");
+  return identityGroupId === groupId && participantUserId && deviceId ? participantUserId : null;
 }
 
 function nowSeconds() {

@@ -6,7 +6,9 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.database.ContentObserver
 import android.media.AudioAttributes as PlatformAudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -20,12 +22,14 @@ import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import com.google.firebase.auth.FirebaseAuth
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -53,6 +57,21 @@ class VoiceNudgePlaybackService : Service() {
     private var ackedEventId: String? = null
     private var lastPosted: PostedNotification? = null
     private var activeTimeout: Runnable? = null
+    private var hapticCloseRunnable: Runnable? = null
+    private var hapticStopRunnable: Runnable? = null
+    private var silencedEventId: String? = null
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF ||
+                intent?.action == "android.media.VOLUME_CHANGED_ACTION"
+            ) {
+                silenceActiveRing()
+            }
+        }
+    }
+    private val volumeObserver = object : ContentObserver(mainHandler) {
+        override fun onChange(selfChange: Boolean) = silenceActiveRing()
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -62,6 +81,21 @@ class VoiceNudgePlaybackService : Service() {
         DeviceLog.info("NudgeService", "VoiceNudgePlaybackService created")
         Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] Playback service created")
         VoiceNudgeAudioCache.deleteOrphans(this)
+        val silenceFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction("android.media.VOLUME_CHANGED_ACTION")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(
+                screenOffReceiver,
+                silenceFilter,
+                RECEIVER_NOT_EXPORTED,
+            )
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(screenOffReceiver, silenceFilter)
+        }
+        contentResolver.registerContentObserver(Settings.System.CONTENT_URI, true, volumeObserver)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -218,14 +252,52 @@ class VoiceNudgePlaybackService : Service() {
                 "active=${active?.eventId?.takeLast(6) ?: "none"}",
         )
         mainHandler.removeCallbacksAndMessages(null)
-        releasePlayback()
+        stopPlayback()
+        releasePlayer()
         releaseWakeLock()
         // Use shutdown() (not shutdownNow()) so in-flight download and ack
         // tasks can complete gracefully instead of being interrupted mid-IO.
         // The executor guard in acknowledge() prevents new submissions from
         // racing with teardown.
         networkExecutor.shutdown()
+        runCatching { unregisterReceiver(screenOffReceiver) }
+        contentResolver.unregisterContentObserver(volumeObserver)
         super.onDestroy()
+    }
+
+    private fun silenceActiveRing() {
+        val request = active ?: return
+        if (request.kind != VoiceNudgeContract.kindRing || silencedEventId == request.eventId) return
+        silencedEventId = request.eventId
+        postRingSilenced(request)
+        finishActive(success = true)
+    }
+
+    private fun postRingSilenced(request: NudgeRequest) {
+        val responseUrl = request.responseUrl ?: return
+        FirebaseAuth.getInstance().currentUser?.getIdToken(false)
+            ?.addOnSuccessListener { result ->
+                val token = result.token ?: return@addOnSuccessListener
+                silenceExecutor.execute {
+                    val connection = URL(responseUrl).openConnection() as HttpURLConnection
+                    try {
+                        connection.connectTimeout = 8_000
+                        connection.readTimeout = 8_000
+                        connection.requestMethod = "POST"
+                        connection.doOutput = true
+                        connection.setRequestProperty("authorization", "Bearer $token")
+                        connection.setRequestProperty("content-type", "application/json")
+                        connection.outputStream.use {
+                            it.write("{\"action\":\"silence\"}".toByteArray())
+                        }
+                        connection.responseCode
+                    } catch (error: Exception) {
+                        Log.w(VoiceNudgeDiagnostics.tag, "Ring silence report failed", error)
+                    } finally {
+                        connection.disconnect()
+                    }
+                }
+            }
     }
 
     /**
@@ -301,7 +373,7 @@ class VoiceNudgePlaybackService : Service() {
                 "[FCM-D] stopGroupNudges: active nudge matches group, tearing down " +
                     "eventSuffix=${current.eventId.takeLast(6)}",
             )
-            releasePlayback()
+            stopPlayback()
             releaseWakeLock()
             active = null
             clearActiveTimeout()
@@ -352,6 +424,9 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-11] Processing queued nudge kind=${request.kind}",
         )
         logNudgeHealthGates(request)
+        if (!enforceHealthGates(request)) {
+            return
+        }
         holdWakeLock()
         scheduleActiveTimeout(request)
         val initialStatus = when {
@@ -389,6 +464,11 @@ class VoiceNudgePlaybackService : Service() {
             }
         } else {
             Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] processNext -> downloadAndPlay")
+            // Warm the (reused) ExoPlayer while the audio downloads, so the
+            // player's expensive init/decode pipeline overlaps network I/O and
+            // playback starts the moment the file is local. Queued to run after
+            // this command returns, so it never blocks the download kickoff.
+            mainHandler.post { ensurePlayer() }
             downloadAndPlay(request)
         }
     }
@@ -522,28 +602,27 @@ class VoiceNudgePlaybackService : Service() {
     private fun downloadAndPlay(request: NudgeRequest) {
         DeviceLog.info(
             "NudgeService",
-            "Download started kind=${request.kind} eventId=${request.eventId} urlHost=${request.audioUrl?.substringAfter("://")?.substringBefore("/") ?: "-"}",
+            "VOICE_NUDGE_DOWNLOAD_START nudgeId=${request.eventId} kind=${request.kind} " +
+                "urlHost=${request.audioUrl?.substringAfter("://")?.substringBefore("/") ?: "-"}",
             groupId = request.groupId,
         )
         Log.d(
             VoiceNudgeDiagnostics.tag,
             "[FCM-D] downloadAndPlay scheduling download eventSuffix=${request.eventId.takeLast(6)}",
         )
+        val downloadStartedAt = System.currentTimeMillis()
         networkExecutor.execute {
             try {
                 val file = downloadAudio(request)
+                val downloadMs = System.currentTimeMillis() - downloadStartedAt
                 Log.i(
                     VoiceNudgeDiagnostics.tag,
                     "[FCM-13] Voice audio downloaded bytes=${file.length()}",
                 )
                 DeviceLog.info(
                     "NudgeService",
-                    "Download complete bytes=${file.length()} eventId=${request.eventId}",
-                    groupId = request.groupId,
-                )
-                DeviceLog.info(
-                    "NudgeService",
-                    "Download complete bytes=${file.length()} eventId=${request.eventId}",
+                    "VOICE_NUDGE_DOWNLOAD_END nudgeId=${request.eventId} bytes=${file.length()} " +
+                        "downloadMs=$downloadMs",
                     groupId = request.groupId,
                 )
                 Log.d(
@@ -702,7 +781,45 @@ class VoiceNudgePlaybackService : Service() {
             isPlaying = true,
         )
         Log.i(VoiceNudgeDiagnostics.tag, "[FCM-14] Preparing voice audio player")
-        player = ExoPlayer.Builder(this).build().apply {
+        DeviceLog.info(
+            "NudgeService",
+            "VOICE_NUDGE_DECOMPRESSION_START nudgeId=${request.eventId} bytes=${file.length()}",
+            groupId = request.groupId,
+        )
+        // AAC-LC in M4A is already the compressed payload. ExoPlayer's hardware
+        // decoder is the decompress/decode step; wrapping a second codec would
+        // delay playback without shrinking the download.
+        val player = ensurePlayer()
+        player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
+        player.prepare()
+        if (request.cachedReplay) {
+            player.seekTo(
+                VoiceNudgeAudioCache.position(
+                    this@VoiceNudgePlaybackService,
+                    request.eventId,
+                ),
+            )
+        }
+        player.play()
+    }
+
+    /**
+     * Returns the shared, reused ExoPlayer instance, building it on first use.
+     *
+     * Constructing an ExoPlayer (audio sink + codec pipeline) is the dominant
+     * receiver-side cost for a short voice nudge — ~2.5s on a MediaTek device.
+     * Keeping one instance across nudges (instead of a fresh player per nudge)
+     * removes that cost for every nudge after the first, and the player is
+     * warmed during the download so even the first nudge overlaps init with
+     * network I/O.
+     */
+    private fun ensurePlayer(): ExoPlayer {
+        player?.let { return it }
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] ensurePlayer: building ExoPlayer (first use)",
+        )
+        val built = ExoPlayer.Builder(this).build().apply {
             // handleAudioFocus = false: play through regardless of audio-focus
             // state, matching how ring nudges play via AudioTrack. On some
             // Android 15 devices (e.g. Moto g64 5G / MediaTek), ExoPlayer's
@@ -718,115 +835,117 @@ class VoiceNudgePlaybackService : Service() {
                 false,
             )
             setWakeMode(C.WAKE_MODE_LOCAL)
-            addListener(object : Player.Listener {
-                override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    Log.d(
-                        VoiceNudgeDiagnostics.tag,
-                        "[FCM-D] ExoPlayer onIsPlayingChanged isPlaying=$isPlaying",
-                    )
-                    // "Genuinely played" means audio has actually started
-                    // outputting — not merely delivered/downloaded — so the ack
-                    // fires here, the moment ExoPlayer's isPlaying flips true,
-                    // rather than waiting for playback to finish.
-                    if (isPlaying && !request.cachedReplay) {
-                        sendPlayedAckOnce(request)
-                    }
-                    if (isPlaying) {
-                        DeviceLog.info(
-                            "NudgeService",
-                            "Playback started kind=${request.kind} eventId=${request.eventId}",
-                            groupId = request.groupId,
-                        )
-                        // Playback has genuinely started, so the clip must end
-                        // within its duration plus a short grace. Re-arming the
-                        // watchdog here recovers quickly from an audio-focus /
-                        // codec stall that otherwise never fires STATE_ENDED.
-                        schedulePlaybackEndTimeout(request)
-                    }
-                }
+            addListener(playerListener)
+        }
+        player = built
+        return built
+    }
 
-                override fun onPlaybackStateChanged(playbackState: Int) {
-                    Log.d(
-                        VoiceNudgeDiagnostics.tag,
-                        "[FCM-D] ExoPlayer onPlaybackStateChanged state=${playbackStateName(playbackState)}",
-                    )
-                    when (playbackState) {
-                        Player.STATE_READY -> {
-                            // Prepared and about to play. Arm the tight end-timeout
-                            // here as well so a decoder stall that never flips
-                            // isPlaying (or never reaches STATE_ENDED) still
-                            // recovers quickly rather than waiting out the 60s
-                            // download window.
-                            schedulePlaybackEndTimeout(request)
-                        }
-                        Player.STATE_ENDED -> {
-                            Log.i(VoiceNudgeDiagnostics.tag, "[FCM-15] Voice playback completed")
-                            DeviceLog.info(
-                                "NudgeService",
-                                "Playback complete eventId=${request.eventId}",
-                                groupId = request.groupId,
-                            )
-                            VoiceNudgeAudioCache.clearPosition(
-                                this@VoiceNudgePlaybackService,
-                                request.eventId,
-                            )
-                            finishActive(success = true)
-                        }
-                    }
-                }
-
-                override fun onPlayerError(error: PlaybackException) {
-                    Log.d(
-                        VoiceNudgeDiagnostics.tag,
-                        "[FCM-D] ExoPlayer onPlayerError errorCode=${error.errorCodeName} " +
-                            "message=${error.message}",
-                    )
-                    VoiceNudgeDiagnostics.logFailure("[FCM-E6] Voice playback", error)
-                    DeviceLog.log(
-                        "ERROR",
-                        "NudgeService",
-                        "Playback failed: ${error.errorCodeName} ${error.message}. " +
-                            "Nudge not delivered: unknown. eventId=${request.eventId}",
-                        groupId = request.groupId,
-                        throwable = error,
-                    )
-                    VoiceNudgeDiagnostics.recordNudgeFailure(
-                        reason = "playback_error",
-                        eventId = request.eventId,
-                        kind = request.kind,
-                        extras = mapOf(
-                            "error" to (error.errorCodeName),
-                            "cached_replay" to request.cachedReplay.toString(),
-                        ),
-                        groupId = request.groupId,
-                        senderUserId = request.senderUserId,
-                        senderName = request.senderName,
-                        health = activeHealth?.toCrashlyticsMap().orEmpty(),
-                    )
-                    VoiceNudgeAudioCache.delete(
-                        this@VoiceNudgePlaybackService,
-                        request.eventId,
-                    )
-                    if (request.cachedReplay || ackedEventId == request.eventId) {
-                        finishActive(success = false)
-                    } else {
-                        acknowledge(request, "failed", "playback_error", activeHealth) {
-                            finishActive(success = false)
-                        }
-                    }
-                }
-            })
-            setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
-            prepare()
-            if (request.cachedReplay) {
-                seekTo(
-                    VoiceNudgeAudioCache.position(
-                        this@VoiceNudgePlaybackService,
-                        request.eventId,
-                    ),
-                )
+    /**
+     * Shared player listener. Callbacks resolve the current [active] nudge at
+     * call time so the listener can be attached once to the reused player
+     * instead of being rebuilt (and capturing a single nudge) per playback.
+     */
+    private val playerListener = object : Player.Listener {
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            val request = active ?: return
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] ExoPlayer onIsPlayingChanged isPlaying=$isPlaying " +
+                    "eventSuffix=${request.eventId.takeLast(6)}",
+            )
+            // "Genuinely played" means audio has actually started outputting —
+            // not merely delivered/downloaded — so the ack fires here, the
+            // moment ExoPlayer's isPlaying flips true, rather than waiting for
+            // playback to finish.
+            if (isPlaying && !request.cachedReplay) {
+                sendPlayedAckOnce(request)
             }
-            play()
+            if (isPlaying) {
+                DeviceLog.info(
+                    "NudgeService",
+                    "VOICE_NUDGE_DECOMPRESSION_END nudgeId=${request.eventId} " +
+                        "VOICE_NUDGE_PLAYBACK_START nudgeId=${request.eventId} kind=${request.kind}",
+                    groupId = request.groupId,
+                )
+                // Playback has genuinely started, so the clip must end within
+                // its duration plus a short grace. Re-arming the watchdog here
+                // recovers quickly from an audio-focus / codec stall that
+                // otherwise never fires STATE_ENDED.
+                schedulePlaybackEndTimeout(request)
+            }
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] ExoPlayer onPlaybackStateChanged state=${playbackStateName(playbackState)}",
+            )
+            when (playbackState) {
+                Player.STATE_READY -> {
+                    // Prepared and about to play. Arm the tight end-timeout here
+                    // as well so a decoder stall that never flips isPlaying (or
+                    // never reaches STATE_ENDED) still recovers quickly rather
+                    // than waiting out the 60s download window.
+                    active?.let { schedulePlaybackEndTimeout(it) }
+                }
+                Player.STATE_ENDED -> {
+                    val request = active ?: return
+                    Log.i(VoiceNudgeDiagnostics.tag, "[FCM-15] Voice playback completed")
+                    DeviceLog.info(
+                        "NudgeService",
+                        "VOICE_NUDGE_PLAYBACK_END nudgeId=${request.eventId}",
+                        groupId = request.groupId,
+                    )
+                    VoiceNudgeAudioCache.clearPosition(
+                        this@VoiceNudgePlaybackService,
+                        request.eventId,
+                    )
+                    finishActive(success = true)
+                }
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            val request = active ?: return
+            Log.d(
+                VoiceNudgeDiagnostics.tag,
+                "[FCM-D] ExoPlayer onPlayerError errorCode=${error.errorCodeName} " +
+                    "message=${error.message}",
+            )
+            VoiceNudgeDiagnostics.logFailure("[FCM-E6] Voice playback", error)
+            DeviceLog.log(
+                "ERROR",
+                "NudgeService",
+                "Playback failed: ${error.errorCodeName} ${error.message}. " +
+                    "Nudge not delivered: unknown. eventId=${request.eventId}",
+                groupId = request.groupId,
+                throwable = error,
+            )
+            VoiceNudgeDiagnostics.recordNudgeFailure(
+                reason = "playback_error",
+                eventId = request.eventId,
+                kind = request.kind,
+                extras = mapOf(
+                    "error" to (error.errorCodeName),
+                    "cached_replay" to request.cachedReplay.toString(),
+                ),
+                groupId = request.groupId,
+                senderUserId = request.senderUserId,
+                senderName = request.senderName,
+                health = activeHealth?.toCrashlyticsMap().orEmpty(),
+            )
+            VoiceNudgeAudioCache.delete(
+                this@VoiceNudgePlaybackService,
+                request.eventId,
+            )
+            if (request.cachedReplay || ackedEventId == request.eventId) {
+                finishActive(success = false)
+            } else {
+                acknowledge(request, "failed", "playback_error", activeHealth) {
+                    finishActive(success = false)
+                }
+            }
         }
     }
 
@@ -845,7 +964,7 @@ class VoiceNudgePlaybackService : Service() {
                 "[FCM-D] pauseCachedAudio: saving position ${position}ms and releasing playback",
             )
             VoiceNudgeAudioCache.savePosition(this, request.eventId, position)
-            releasePlayback()
+            stopPlayback()
             active = null
             clearActiveTimeout()
             releaseWakeLock()
@@ -898,29 +1017,46 @@ class VoiceNudgePlaybackService : Service() {
         attention: String? = null,
         after: () -> Unit,
     ) {
-        val ackUrl = request.ackUrl
-        val deliveryToken = request.deliveryToken
         Log.d(
             VoiceNudgeDiagnostics.tag,
             "[FCM-D] acknowledge status=$status reason=${reason ?: "none"} " +
                 "eventSuffix=${request.eventId.takeLast(6)} " +
-                "hasAckUrl=${ackUrl != null} hasToken=${deliveryToken != null}",
+                "hasAckUrl=${request.ackUrl != null} hasToken=${request.deliveryToken != null}",
         )
+
+        // Authoritative sender status: RTDB only (no Render hop).
+        NudgeDeliveryStatusRtdb.write(
+            senderUserId = request.senderUserId,
+            eventId = request.eventId,
+            groupId = request.groupId,
+            kind = request.kind,
+            status = status,
+            reason = reason,
+            attention = attention,
+        )
+        DeviceLog.info(
+            "NudgeService",
+            "VOICE_NUDGE_PLAYBACK_CONFIRMATION_SENT nudgeId=${request.eventId} " +
+                "status=$status reason=${reason ?: "none"} " +
+                "attention=${attention ?: "-"} via=rtdb",
+            groupId = request.groupId,
+        )
+
+        val ackUrl = request.ackUrl
+        val deliveryToken = request.deliveryToken
+        // Optional legacy audit POST — does not drive sender UI.
         if (ackUrl == null || deliveryToken == null) {
             Log.d(
                 VoiceNudgeDiagnostics.tag,
-                "[FCM-D] acknowledge: missing ack URL/token, skipping network ack",
+                "[FCM-D] acknowledge: no ack URL/token — RTDB status written, skipping audit POST",
             )
             mainHandler.post(after)
             return
         }
-        // Guard: if the service is shutting down and the executor has already
-        // been terminated, log a warning and bail out rather than throwing a
-        // RejectedExecutionException.
         if (networkExecutor.isShutdown || networkExecutor.isTerminated) {
             Log.w(
                 VoiceNudgeDiagnostics.tag,
-                "[FCM-W9] Delivery ack skipped — executor is shut down " +
+                "[FCM-W9] Audit ack skipped — executor is shut down " +
                     "eventSuffix=${request.eventId.takeLast(6)}",
             )
             mainHandler.post(after)
@@ -931,7 +1067,7 @@ class VoiceNudgePlaybackService : Service() {
             try {
                 Log.d(
                     VoiceNudgeDiagnostics.tag,
-                    "[FCM-D] acknowledge: posting ack to ${ackUrl.substringAfterLast('/').take(24)}",
+                    "[FCM-D] acknowledge: audit POST to ${ackUrl.substringAfterLast('/').take(24)}",
                 )
                 val opened = URL(ackUrl).openConnection() as HttpURLConnection
                 connection = opened
@@ -945,20 +1081,30 @@ class VoiceNudgePlaybackService : Service() {
                     put("status", status)
                     if (reason != null) put("reason", reason)
                     if (health != null) put("health", health.toJson())
-                    // Audibility concern for an otherwise-successful playback
-                    // (mute / very-low volume). Distinct from `reason`, which
-                    // only accompanies a genuine `failed`.
                     if (attention != null) put("attention", attention)
                 }
                 opened.outputStream.use { it.write(body.toString().toByteArray()) }
                 val responseCode = opened.responseCode
                 Log.i(
                     VoiceNudgeDiagnostics.tag,
-                    "[FCM-16] Delivery acknowledgement status=$status " +
+                    "[FCM-16] Delivery audit ack status=$status " +
                         "reason=${reason ?: "none"} HTTP=$responseCode",
                 )
+                DeviceLog.info(
+                    "NudgeService",
+                    "VOICE_NUDGE_PLAYBACK_AUDIT_ACK nudgeId=${request.eventId} " +
+                        "status=$status reason=${reason ?: "none"} " +
+                        "attention=${attention ?: "-"} HTTP=$responseCode",
+                    groupId = request.groupId,
+                )
             } catch (error: Exception) {
-                VoiceNudgeDiagnostics.logFailure("[FCM-E7] Delivery acknowledgement", error)
+                VoiceNudgeDiagnostics.logFailure("[FCM-E7] Delivery audit acknowledgement", error)
+                DeviceLog.warn(
+                    "NudgeService",
+                    "Delivery audit ack failed status=$status reason=${reason ?: "none"} " +
+                        "eventId=${request.eventId} detail=${error.message ?: "-"}",
+                    groupId = request.groupId,
+                )
             } finally {
                 connection?.disconnect()
                 mainHandler.post(after)
@@ -994,12 +1140,19 @@ class VoiceNudgePlaybackService : Service() {
 
         val health = activeHealth
         val attention = health?.attentionReason()
-        if (attention == "volume_muted" || attention == "volume_low") {
+        if (attention != null) {
+            // Silent case: playback genuinely started but the recipient likely
+            // did not hear it (muted / very low / low volume). Log the full
+            // device state so retrieved on-device logs can explain why.
             DeviceLog.warn(
                 "NudgeService",
-                "Nudge not delivered: volume too low " +
-                    "(attention=$attention volume=${health.streamVolume}/${health.streamMaxVolume}) " +
-                    "eventId=${request.eventId}",
+                "NUDGE_SILENT_PLAYBACK nudgeId=${request.eventId} " +
+                    "attention=$attention " +
+                    "volumePercent=${health.volumePercent} " +
+                    "volume=${health.streamVolume}/${health.streamMaxVolume} " +
+                    "muted=${health.streamMuted} dnd=${health.dndActive} " +
+                    "ringerMode=${health.ringerMode} " +
+                    "notificationsEnabled=${health.notificationsEnabled}",
                 groupId = request.groupId,
             )
             VoiceNudgeDiagnostics.recordNudgeFailure(
@@ -1033,7 +1186,7 @@ class VoiceNudgePlaybackService : Service() {
             )
         }
         acknowledge(request, "played", null, health, attention) {}
-        triggerReceiptHaptics(durationMsForHaptics(request))
+        triggerReceiptHaptics(durationMsForHaptics(request), request.kind)
     }
 
     private fun durationMsForHaptics(request: NudgeRequest): Long {
@@ -1049,17 +1202,13 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     /**
-     * Haptic feedback: one long vibration when the nudge starts playing,
-     * and one long vibration when it finishes.  No vibration in between
-     * so the buzz does not interfere with listening to the voice message.
+     * Haptic feedback for incoming nudge playback.
      *
-     * Timing:
-     *   - opening burst: ~600 ms (two taps: 150 ms on / 100 ms off / 150 ms on,
-     *     repeated twice for a longer-feeling single pulse)
-     *   - closing burst: same pattern, scheduled after the audio duration
+     * Settings intensity (Light / Pulse / Wild) applies to voice nudges only.
+     * Ring and other kinds always use the Light default.
      */
-    private fun triggerReceiptHaptics(durationMs: Long) {
-        Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] triggerReceiptHaptics durationMs=$durationMs")
+    private fun triggerReceiptHaptics(durationMs: Long, kind: String) {
+        Log.d(VoiceNudgeDiagnostics.tag, "[FCM-D] triggerReceiptHaptics durationMs=$durationMs kind=$kind")
         val vibrator = (
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 getSystemService(VibratorManager::class.java)?.defaultVibrator
@@ -1070,38 +1219,50 @@ class VoiceNudgePlaybackService : Service() {
             ) ?: return
         if (!vibrator.hasVibrator()) return
 
-        // A longer-feeling opening burst: two quick taps repeated so the
-        // user unmistakably feels "something started playing".  Total ~600 ms.
-        val openBurst = longArrayOf(0, 150, 100, 150, 100, 150) // wait, buzz, pause, buzz, pause, buzz
+        cancelHaptics()
 
-        // Closing burst: identical pattern so the user feels "playback is done".
-        val closeBurst = longArrayOf(0, 150, 100, 150, 100, 150)
-
-        // With no sustained middle phase, the closing burst delay is simply
-        // the audio duration (minus the tiny opening overhead so timing feels
-        // exact).  Floor of 500 ms so very short nudges still get a distinct
-        // closing pulse.
-        val openDurationMs = openBurst.fold(0L) { acc, v -> acc + v }
+        val intensity = if (kind == VoiceNudgeContract.kindVoice) {
+            HapticsPreferenceStore.read(this)
+        } else {
+            HapticsPreferenceStore.light
+        }
+        val openBurst = when (intensity) {
+            HapticsPreferenceStore.medium -> NudgeHapticsWaveforms.mediumBurst
+            else -> NudgeHapticsWaveforms.lightBurst
+        }
+        val closeBurst = openBurst
+        val openDurationMs = NudgeHapticsWaveforms.totalMs(openBurst)
         val closeDelayMs = (durationMs - openDurationMs).coerceAtLeast(500L)
 
         try {
-            // Phase 1 — Opening long burst
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator.vibrate(
-                    VibrationEffect.createWaveform(openBurst, -1),
+            if (intensity == HapticsPreferenceStore.wild) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                        VibrationEffect.createWaveform(NudgeHapticsWaveforms.wildLoop, 0),
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(NudgeHapticsWaveforms.wildLoop, 0)
+                }
+                hapticStopRunnable = Runnable { vibrator.cancel() }
+                mainHandler.postDelayed(
+                    hapticStopRunnable!!,
+                    durationMs.coerceAtMost(30_000L).coerceAtLeast(400L),
                 )
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createWaveform(openBurst, -1))
             } else {
                 @Suppress("DEPRECATION")
                 vibrator.vibrate(openBurst, -1)
             }
 
-            // Phase 2 — Closing long burst (fires after audio finishes)
-            mainHandler.postDelayed({
+            hapticCloseRunnable = Runnable {
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        vibrator.vibrate(
-                            VibrationEffect.createWaveform(closeBurst, -1),
-                        )
+                        vibrator.vibrate(VibrationEffect.createWaveform(closeBurst, -1))
                     } else {
                         @Suppress("DEPRECATION")
                         vibrator.vibrate(closeBurst, -1)
@@ -1112,12 +1273,14 @@ class VoiceNudgePlaybackService : Service() {
                         error,
                     )
                 }
-            }, closeDelayMs)
+            }
+            mainHandler.postDelayed(hapticCloseRunnable!!, closeDelayMs)
 
-            // Cancel any leftover haptics after the full envelope.
-            val totalEnvelopeMs = openDurationMs + closeDelayMs + closeBurst.fold(0L) { acc, v -> acc + v }
+            hapticStopRunnable = Runnable { vibrator.cancel() }
+            val totalEnvelopeMs =
+                openDurationMs + closeDelayMs + NudgeHapticsWaveforms.totalMs(closeBurst)
             mainHandler.postDelayed(
-                { vibrator.cancel() },
+                hapticStopRunnable!!,
                 totalEnvelopeMs.coerceAtMost(30_000L),
             )
         } catch (error: RuntimeException) {
@@ -1126,6 +1289,10 @@ class VoiceNudgePlaybackService : Service() {
     }
 
     private fun cancelHaptics() {
+        hapticCloseRunnable?.let(mainHandler::removeCallbacks)
+        hapticStopRunnable?.let(mainHandler::removeCallbacks)
+        hapticCloseRunnable = null
+        hapticStopRunnable = null
         try {
             val vibrator = (
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1158,36 +1325,31 @@ class VoiceNudgePlaybackService : Service() {
         val streamMuted: Boolean,
         val ringerMode: Int,
         val notificationsEnabled: Boolean,
+        val batteryOptimizationIgnored: Boolean,
         val dndActive: Boolean,
     ) {
         /**
          * Coarse audibility band, kept deliberately separate from whether
-         * playback genuinely started. A muted/very-low receiver still
-         * "received" the nudge — the audio pipeline ran — so these must never
-         * be reported as a delivery failure. They are surfaced as an
-         * attention flag the sender can act on instead.
+         * playback genuinely started. A muted/low receiver still "received"
+         * the nudge — the audio pipeline ran — so these must never be
+         * reported as a delivery failure. They are surfaced as an attention
+         * flag the sender can act on instead.
+         *
+         * Bands match the sender-facing spec: muted (0), very low (<25%),
+         * low (<50%), ok (≥50%).
          */
+        val volumePercent: Int
+            get() = mediaVolumePercent(streamMuted, streamVolume, streamMaxVolume)
+
         val volumeLevel: String
-            get() = when {
-                streamMuted || streamVolume <= 0 -> "muted"
-                streamVolume <= lowVolumeStep() -> "very_low"
-                else -> "ok"
-            }
+            get() = mediaVolumeBand(volumePercent)
 
         /**
          * Primary listening concern for an otherwise-successful playback.
-         * Reported separately from a delivery failure so a muted/very-low
+         * Reported separately from a delivery failure so a muted/low
          * device is never mislabeled as "did not receive".
          */
-        fun attentionReason(): String? = when {
-            streamMuted || streamVolume <= 0 -> "volume_muted"
-            streamVolume <= lowVolumeStep() -> "volume_low"
-            else -> null
-        }
-
-        /** Bottom ~20% of the volume range counts as "very low", minimum one step. */
-        private fun lowVolumeStep(): Int =
-            (streamMaxVolume * 0.20).toInt().coerceAtLeast(1)
+        fun attentionReason(): String? = mediaVolumeAttention(volumePercent)
 
         fun toJson(): JSONObject = JSONObject().apply {
             put("streamVolume", streamVolume)
@@ -1195,7 +1357,9 @@ class VoiceNudgePlaybackService : Service() {
             put("streamMuted", streamMuted)
             put("ringerMode", ringerMode)
             put("notificationsEnabled", notificationsEnabled)
+            put("batteryOptimizationIgnored", batteryOptimizationIgnored)
             put("volumeLevel", volumeLevel)
+            put("volumePercent", volumePercent)
             put("dndActive", dndActive)
         }
 
@@ -1206,7 +1370,9 @@ class VoiceNudgePlaybackService : Service() {
             "streamMuted" to streamMuted.toString(),
             "ringerMode" to ringerMode.toString(),
             "notificationsEnabled" to notificationsEnabled.toString(),
+            "batteryOptimizationIgnored" to batteryOptimizationIgnored.toString(),
             "volumeLevel" to volumeLevel,
+            "volumePercent" to volumePercent.toString(),
             "dndActive" to dndActive.toString(),
         )
     }
@@ -1224,6 +1390,13 @@ class VoiceNudgePlaybackService : Service() {
         } else {
             true
         }
+        val powerManager = getSystemService(PowerManager::class.java)
+        val batteryOptimizationIgnored =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                powerManager.isIgnoringBatteryOptimizations(packageName)
+            } else {
+                true
+            }
         val dndActive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val filter = notificationManager.currentInterruptionFilter
             filter == NotificationManager.INTERRUPTION_FILTER_NONE ||
@@ -1238,6 +1411,7 @@ class VoiceNudgePlaybackService : Service() {
             streamMuted = muted,
             ringerMode = audioManager.ringerMode,
             notificationsEnabled = notificationsEnabled,
+            batteryOptimizationIgnored = batteryOptimizationIgnored,
             dndActive = dndActive,
         )
         Log.d(
@@ -1245,7 +1419,9 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-D] captureHealthSnapshot streamType=$streamType " +
                 "volume=${snapshot.streamVolume}/${snapshot.streamMaxVolume} " +
                 "muted=${snapshot.streamMuted} ringerMode=${snapshot.ringerMode} " +
-                "notificationsEnabled=${snapshot.notificationsEnabled} volumeLevel=${snapshot.volumeLevel}",
+                "notificationsEnabled=${snapshot.notificationsEnabled} " +
+                "batteryOptimizationIgnored=${snapshot.batteryOptimizationIgnored} " +
+                "volumeLevel=${snapshot.volumeLevel}",
         )
         return snapshot
     }
@@ -1269,20 +1445,62 @@ class VoiceNudgePlaybackService : Service() {
                 groupId = request.groupId,
             )
         }
+        if (!health.batteryOptimizationIgnored) {
+            DeviceLog.warn(
+                "NudgeService",
+                "Nudge reliability warning: battery optimization active " +
+                    "eventId=${request.eventId}",
+                groupId = request.groupId,
+            )
+        }
         if (dndActive) {
             DeviceLog.warn(
                 "NudgeService",
-                "Nudge not delivered: DND active eventId=${request.eventId}",
+                "NUDGE_SILENT_PLAYBACK nudgeId=${request.eventId} reason=dnd_active " +
+                    "volumePercent=${health.volumePercent} " +
+                    "volume=${health.streamVolume}/${health.streamMaxVolume} " +
+                    "muted=${health.streamMuted}",
                 groupId = request.groupId,
             )
         }
         if (health.attentionReason() != null) {
             DeviceLog.warn(
                 "NudgeService",
-                "Nudge not delivered: volume too low " +
-                    "(${health.volumeLevel}) eventId=${request.eventId}",
+                "NUDGE_SILENT_PLAYBACK nudgeId=${request.eventId} " +
+                    "reason=${health.attentionReason()} " +
+                    "volumePercent=${health.volumePercent} " +
+                    "volume=${health.streamVolume}/${health.streamMaxVolume} " +
+                    "muted=${health.streamMuted}",
                 groupId = request.groupId,
             )
+        }
+    }
+
+    /**
+     * Hard receiver-side gates: when notifications are off, report a specific
+     * failure reason to the sender instead of timing out ambiguously.
+     */
+    private fun enforceHealthGates(request: NudgeRequest): Boolean {
+        val health = activeHealth ?: return true
+        if (!health.notificationsEnabled) {
+            failHealthGate(request, "permission_denied_notifications")
+            return false
+        }
+        return true
+    }
+
+    private fun failHealthGate(request: NudgeRequest, reason: String) {
+        VoiceNudgeDiagnostics.recordNudgeFailure(
+            reason = reason,
+            eventId = request.eventId,
+            kind = request.kind,
+            groupId = request.groupId,
+            senderUserId = request.senderUserId,
+            senderName = request.senderName,
+            health = activeHealth?.toCrashlyticsMap().orEmpty(),
+        )
+        acknowledge(request, "failed", reason, activeHealth) {
+            finishActive(success = false)
         }
     }
 
@@ -1308,7 +1526,7 @@ class VoiceNudgePlaybackService : Service() {
             "[FCM-D] finishActive: releasing playback queueDepth=${queue.size} " +
                 "eventSuffix=${request.eventId.takeLast(6)}",
         )
-        releasePlayback()
+        stopPlayback()
         active = null
         clearActiveTimeout()
         val manager = getSystemService(NotificationManager::class.java)
@@ -1363,13 +1581,22 @@ class VoiceNudgePlaybackService : Service() {
         }
     }
 
-    private fun releasePlayback() {
+    /**
+     * Stops the current playback but keeps the [player] instance for reuse.
+     * Releasing and rebuilding ExoPlayer per nudge was the dominant
+     * receiver-side cost; the player is released only in [onDestroy].
+     */
+    private fun stopPlayback() {
         Log.d(
             VoiceNudgeDiagnostics.tag,
-            "[FCM-D] releasePlayback hasPlayer=${player != null} hasRingTrack=${ringTrack != null}",
+            "[FCM-D] stopPlayback hasPlayer=${player != null} hasRingTrack=${ringTrack != null}",
         )
-        player?.release()
-        player = null
+        try {
+            player?.stop()
+        } catch (_: IllegalStateException) {
+            // Player may already be idle/ended.
+        }
+        player?.clearMediaItems()
         try {
             ringTrack?.stop()
         } catch (_: IllegalStateException) {
@@ -1378,6 +1605,15 @@ class VoiceNudgePlaybackService : Service() {
         ringTrack?.release()
         ringTrack = null
         cancelHaptics()
+    }
+
+    private fun releasePlayer() {
+        Log.d(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-D] releasePlayer hasPlayer=${player != null}",
+        )
+        player?.release()
+        player = null
     }
 
     private fun holdWakeLock() {
@@ -1567,6 +1803,8 @@ class VoiceNudgePlaybackService : Service() {
                 request.senderName,
                 request.senderAvatarAsset,
             ),
+            senderUserId = request.senderUserId,
+            groupName = request.groupName,
         )
     }
 
@@ -1637,6 +1875,7 @@ class VoiceNudgePlaybackService : Service() {
             kind = kind,
             eventId = eventId,
             senderName = senderName,
+            groupName = getStringExtra(VoiceNudgeContract.extraGroupName),
             senderUserId = getStringExtra(VoiceNudgeContract.extraSenderUserId),
             senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
             senderAvatarAsset = getStringExtra(VoiceNudgeContract.extraSenderAvatarAsset),
@@ -1661,6 +1900,7 @@ class VoiceNudgePlaybackService : Service() {
             kind = VoiceNudgeContract.kindVoice,
             eventId = eventId,
             senderName = getStringExtra(VoiceNudgeContract.extraSenderName) ?: "Someone",
+            groupName = getStringExtra(VoiceNudgeContract.extraGroupName),
             senderUserId = getStringExtra(VoiceNudgeContract.extraSenderUserId),
             senderPhotoUrl = getStringExtra(VoiceNudgeContract.extraSenderPhotoUrl),
             senderAvatarAsset = getStringExtra(VoiceNudgeContract.extraSenderAvatarAsset),
@@ -1686,6 +1926,7 @@ class VoiceNudgePlaybackService : Service() {
         val kind: String,
         val eventId: String,
         val senderName: String,
+        val groupName: String?,
         val senderUserId: String?,
         val senderPhotoUrl: String?,
         val senderAvatarAsset: String?,
@@ -1708,7 +1949,8 @@ class VoiceNudgePlaybackService : Service() {
     companion object {
         private const val ringSampleRate = 44_100
         private const val ringPhraseMs = 900.0
-        private val supportedRingDurationsMs = setOf(3_000L, 5_000L, 10_000L)
+        private val supportedRingDurationsMs = setOf(3_000L, 6_000L, 9_000L)
+        private val silenceExecutor = Executors.newSingleThreadExecutor()
         private const val maxAudioBytes = 128 * 1024
         private const val maxWakeLockDurationMs = 30_000L
     }

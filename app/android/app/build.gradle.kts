@@ -75,6 +75,7 @@ dependencies {
     implementation("com.google.firebase:firebase-installations")
     implementation("com.google.firebase:firebase-auth")
     implementation("com.google.firebase:firebase-messaging")
+    implementation("com.google.firebase:firebase-database")
     implementation("com.google.firebase:firebase-crashlytics")
     implementation("com.google.firebase:firebase-perf")
     // Play requires Billing Library ≥ 8.0.0 (deadline Aug 31, 2026).
@@ -84,5 +85,5 @@ dependencies {
     // Unified SplashScreen API back to API 24 — lets us hold a single
     // branded splash on screen until Flutter signals it's actually ready,
     // instead of Android auto-dismissing a native splash at first frame.
-    implementation("androidx.core:core-splashscreen:1.0.1")
+    implementation("androidx.core:core-splashscreen:1.2.0")
 }

@@ -4,8 +4,39 @@ import { maxVoiceNudgeBytes } from "../notifications/voiceNudgeValidation.js";
 
 export const voiceNudgeUploadContentType = "audio/mp4";
 
-export function getVoiceNudgeBucket() {
+export function getAppBucket() {
   return getStorage(requireFirebaseAdminApp()).bucket();
+}
+
+export function getVoiceNudgeBucket() {
+  return getAppBucket();
+}
+
+export async function createSignedWriteUrl(options: {
+  storagePath: string;
+  contentType: string;
+  expiresAtMs: number;
+  maxBytes: number;
+}) {
+  const contentLengthRange = `1,${options.maxBytes}`;
+  const file = getAppBucket().file(options.storagePath);
+  const [url] = await file.getSignedUrl({
+    version: "v4",
+    action: "write",
+    expires: options.expiresAtMs,
+    contentType: options.contentType,
+    extensionHeaders: {
+      "x-goog-content-length-range": contentLengthRange
+    }
+  });
+  return {
+    uploadUrl: url,
+    contentType: options.contentType,
+    requiredHeaders: {
+      "content-type": options.contentType,
+      "x-goog-content-length-range": contentLengthRange
+    }
+  };
 }
 
 /**
@@ -38,23 +69,10 @@ export async function createVoiceNudgeSignedWriteUrl(
   expiresAtMs: number,
   maxBytes = maxVoiceNudgeBytes
 ) {
-  const contentLengthRange = `1,${maxBytes}`;
-  const file = getVoiceNudgeBucket().file(storagePath);
-  const [url] = await file.getSignedUrl({
-    version: "v4",
-    action: "write",
-    expires: expiresAtMs,
+  return createSignedWriteUrl({
+    storagePath,
     contentType: voiceNudgeUploadContentType,
-    extensionHeaders: {
-      "x-goog-content-length-range": contentLengthRange
-    }
+    expiresAtMs,
+    maxBytes
   });
-  return {
-    uploadUrl: url,
-    contentType: voiceNudgeUploadContentType,
-    requiredHeaders: {
-      "content-type": voiceNudgeUploadContentType,
-      "x-goog-content-length-range": contentLengthRange
-    }
-  };
 }

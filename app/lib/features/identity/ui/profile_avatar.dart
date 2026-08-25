@@ -1,9 +1,17 @@
-import 'dart:convert';
+import 'package:one_one_app/one_one.dart';
 
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter/material.dart';
-
-import '../data/avatar_assets.dart';
+/// First letter of the user's display name for avatar fallbacks.
+String profileDisplayInitial(String displayName) {
+  final trimmed = displayName.trim();
+  if (trimmed.isEmpty) return '?';
+  final words = trimmed.split(RegExp(r'\s+'));
+  var word = words.first;
+  if (word.startsWith('@') && word.length > 1) {
+    word = word.substring(1);
+  }
+  if (word.isEmpty) return '?';
+  return word.substring(0, 1).toUpperCase();
+}
 
 /// Renders a profile photo filling its bounds, falling back to [fallback]
 /// (or a person icon) when there is no photo or the photo fails to load.
@@ -108,19 +116,30 @@ class _ProfileImageState extends State<ProfileImage> {
     if (url != null) {
       return ColoredBox(
         color: resolvedBackgroundColor,
-        child: CachedNetworkImage(
-          imageUrl: url,
-          fit: widget.fit,
-          fadeInDuration: widget.fadeInDuration,
-          placeholder: (context, url) =>
-              _stickyPlaceholder(resolvedBackgroundColor, resolvedFallback) ??
-              Center(child: resolvedFallback),
-          errorWidget: (context, url, error) {
-            debugPrint(
-              'ProfileImage: failed to load profile photo: '
-              '${error.runtimeType}',
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final deliveryUrl = CloudinaryDelivery.urlFor(
+              url,
+              pixelSize: _pixelSizeFor(context, constraints),
             );
-            return Center(child: resolvedFallback);
+            return CachedNetworkImage(
+              imageUrl: deliveryUrl,
+              fit: widget.fit,
+              fadeInDuration: widget.fadeInDuration,
+              placeholder: (context, url) =>
+                  _stickyPlaceholder(
+                    resolvedBackgroundColor,
+                    resolvedFallback,
+                  ) ??
+                  Center(child: resolvedFallback),
+              errorWidget: (context, url, error) {
+                debugPrint(
+                  'ProfileImage: failed to load profile photo: '
+                  '${error.runtimeType}',
+                );
+                return Center(child: resolvedFallback);
+              },
+            );
           },
         ),
       );
@@ -204,6 +223,18 @@ class _ProfileImageState extends State<ProfileImage> {
     final sticky = _stickyPhotoBase64?.trim();
     if (sticky != null && sticky.isNotEmpty) return sticky;
     return null;
+  }
+
+  int _pixelSizeFor(BuildContext context, BoxConstraints constraints) {
+    final width = constraints.maxWidth;
+    final height = constraints.maxHeight;
+    final logical = max(
+      width.isFinite ? width : 0,
+      height.isFinite ? height : 0,
+    );
+    if (logical <= 0) return CloudinaryDelivery.maxStoredEdge;
+    final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0;
+    return (logical * dpr).round();
   }
 }
 

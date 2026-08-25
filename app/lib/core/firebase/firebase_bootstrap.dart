@@ -1,4 +1,4 @@
-import 'package:firebase_core/firebase_core.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Single owner of `Firebase.initializeApp()`.
 ///

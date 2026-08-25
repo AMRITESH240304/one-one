@@ -1,22 +1,4 @@
-import 'dart:async';
-
-import 'package:firebase_database/firebase_database.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../../../app/accent_theme.dart';
-import '../../../core/firebase/app_database.dart';
-import '../../identity/data/identity_repository.dart';
-import '../../identity/models/identity_session.dart';
-import '../../identity/ui/group_action_screen.dart';
-import '../../identity/ui/identity_home_screen.dart';
-import '../../identity/ui/settings_screen.dart';
-import '../data/group_repository.dart';
-import '../data/invite_link_bridge.dart';
-import '../models/group_invite_result.dart';
-import '../models/group_summary.dart';
-import 'group_management_screen.dart';
+import 'package:one_one_app/one_one.dart';
 
 class WaitingForGroupMembersScreen extends StatefulWidget {
   const WaitingForGroupMembersScreen({

@@ -1,9 +1,6 @@
-import 'dart:convert';
-import 'dart:typed_data';
-
 import 'package:http/http.dart' as http;
 
-import '../../app/app_config.dart';
+import 'package:one_one_app/one_one.dart';
 
 class ProfilePhotoStorageException implements Exception {
   const ProfilePhotoStorageException(this.message);
@@ -44,6 +41,10 @@ class ProfilePhotoStorage {
     request.fields['context'] = 'user_id=$userId';
     request.files.add(
       http.MultipartFile.fromBytes('file', imageBytes, filename: 'profile.jpg'),
+    );
+    debugPrint(
+      '[OneOnePhoto] Uploading optimized profile photo '
+      'bytes=${imageBytes.length} userId=$userId',
     );
 
     final streamedResponse = await (_httpClient?.send(request) ?? request.send())

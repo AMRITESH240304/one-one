@@ -1,20 +1,10 @@
-import 'dart:async';
-import 'dart:io';
-
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:firebase_crashlytics/firebase_crashlytics.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart';
-import 'package:package_info_plus/package_info_plus.dart';
-
-import '../logging/log_level.dart';
-import '../logging/log_manager.dart';
-import 'firebase_analytics_service.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Canonical non-fatal nudge failure reasons shown in Crashlytics.
 abstract final class NudgeFailureReason {
   static const permissionDeniedMicrophone = 'permission_denied_microphone';
   static const permissionDeniedFirebase = 'permission_denied_firebase';
+  static const permissionDeniedNotifications = 'permission_denied_notifications';
   static const fcmNotDelivered = 'fcm_not_delivered';
   static const downloadFailed = 'download_failed';
   static const playbackFailed = 'playback_failed';
@@ -27,6 +17,7 @@ abstract final class NudgeFailureReason {
   static const Set<String> all = {
     permissionDeniedMicrophone,
     permissionDeniedFirebase,
+    permissionDeniedNotifications,
     fcmNotDelivered,
     downloadFailed,
     playbackFailed,
@@ -41,6 +32,7 @@ abstract final class NudgeFailureReason {
     switch (reason) {
       case permissionDeniedMicrophone:
       case permissionDeniedFirebase:
+      case permissionDeniedNotifications:
       case fcmNotDelivered:
       case downloadFailed:
       case playbackFailed:
@@ -58,6 +50,7 @@ abstract final class NudgeFailureReason {
       case 'timeout':
         return playbackFailed;
       case 'volume_low':
+      case 'volume_very_low':
       case 'volume_muted':
         return volumeTooLow;
       default:
@@ -70,6 +63,7 @@ String _deviceLogReason(String reason) {
   switch (reason) {
     case NudgeFailureReason.permissionDeniedMicrophone:
     case NudgeFailureReason.permissionDeniedFirebase:
+    case NudgeFailureReason.permissionDeniedNotifications:
     case NudgeFailureReason.backgroundFgServiceBlocked:
       return 'permission denied';
     case NudgeFailureReason.volumeTooLow:
@@ -100,6 +94,16 @@ class CrashlyticsService {
       '[Crashlytics] initialized collectionEnabled='
       '${_crashlytics.isCrashlyticsCollectionEnabled}',
     );
+  }
+
+  /// True when the previous process terminated from an unhandled crash.
+  static Future<bool> didCrashOnPreviousExecution() async {
+    try {
+      return await _crashlytics.didCrashOnPreviousExecution();
+    } catch (error) {
+      debugPrint('[Crashlytics] didCrashOnPreviousExecution failed: $error');
+      return false;
+    }
   }
 
   static Future<void> _primeSessionKeys() async {
@@ -134,7 +138,7 @@ class CrashlyticsService {
       fatal ? LogLevel.fatal : LogLevel.error,
       'CrashlyticsService',
       'Caught ${fatal ? 'fatal' : 'non-fatal'} error reason=${reason ?? '-'} '
-      'error=$error',
+          'error=$error',
     );
     await _crashlytics.recordError(
       error,
@@ -150,6 +154,50 @@ class CrashlyticsService {
       screenName: screenName,
       isFatal: fatal,
       reason: reason,
+    );
+  }
+
+  /// Non-fatal FCM notification-handling failure.
+  ///
+  /// Filterable in Crashlytics by `reason=fcm_notification_handling_failure`.
+  /// Worker / channel identifiers stay in this report — never in user-facing UI.
+  static Future<void> recordFcmNotificationHandlingFailure({
+    required Object error,
+    StackTrace? stack,
+    required String worker,
+    String? groupId,
+    String? eventId,
+    String? kind,
+    DateTime? timestamp,
+    bool? inBackground,
+  }) async {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    final background =
+        inBackground ??
+        (lifecycle != null && lifecycle != AppLifecycleState.resumed);
+    final information = FcmHandlingContext.information(
+      worker: worker,
+      groupId: groupId,
+      eventId: eventId,
+      kind: kind,
+      timestamp: timestamp,
+      inBackground: background,
+    );
+    await setCustomKeys({
+      'reason': FcmHandlingContext.failureReason,
+      'fcm_worker': worker,
+      'fcm_kind': kind ?? '',
+      'group_id': groupId ?? '',
+      'nudge_event_id': eventId ?? '',
+      'was_app_in_background': background,
+    });
+    await recordError(
+      error,
+      stack ?? StackTrace.current,
+      reason: FcmHandlingContext.failureReason,
+      fatal: false,
+      feature: 'fcm',
+      information: information,
     );
   }
 
@@ -205,6 +253,8 @@ class CrashlyticsService {
     String? eventId,
     Map<String, Object> extras = const {},
   }) async {
+    // Copy before merge — callers may pass `const {}`. Plugin key writes
+    // and map spreads are safe; in-place extras mutation is not.
     final reason = NudgeFailureReason.canonicalize(failureReason);
     final lifecycle = WidgetsBinding.instance.lifecycleState;
     final inBackground =
@@ -235,7 +285,7 @@ class CrashlyticsService {
       'was_app_in_background': inBackground,
       'livekit_room_state': livekitRoomState ?? '',
       if (eventId != null) 'nudge_event_id': eventId,
-      ...extras,
+      ...Map<String, Object>.of(extras),
     });
     await recordError(
       error,
@@ -248,8 +298,8 @@ class CrashlyticsService {
       LogLevel.error,
       'NudgeService',
       'Nudge not delivered: ${_deviceLogReason(reason)} '
-      '(failure_reason=$reason networkType=$networkType '
-      'background=$inBackground eventId=${eventId ?? '-'})',
+          '(failure_reason=$reason networkType=$networkType '
+          'background=$inBackground eventId=${eventId ?? '-'})',
       userId: receiverId ?? senderId,
       groupId: groupId,
     );
@@ -310,9 +360,9 @@ class CrashlyticsService {
       LogLevel.error,
       'SoloParticipantGuard',
       'Reported single-user-in-room as non-fatal bug '
-      '(room=$roomName remoteCountAtConnect=$remoteCountAtConnect '
-      'soloDurationSeconds=$soloDurationSeconds entryReason=$entryReason '
-      'mode=${connectionMode ?? '-'})',
+          '(room=$roomName remoteCountAtConnect=$remoteCountAtConnect '
+          'soloDurationSeconds=$soloDurationSeconds entryReason=$entryReason '
+          'mode=${connectionMode ?? '-'})',
       userId: userId,
       groupId: groupId,
     );

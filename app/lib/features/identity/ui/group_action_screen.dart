@@ -1,11 +1,4 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../../../app/accent_theme.dart';
-import '../../groups/data/group_repository.dart';
-import '../data/identity_repository.dart';
-import '../models/identity_session.dart';
-import 'identity_home_screen.dart';
+import 'package:one_one_app/one_one.dart';
 
 enum GroupActionMode { createGroup, joinByPin }
 

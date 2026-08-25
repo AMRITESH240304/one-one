@@ -1,3 +1,5 @@
+import 'package:one_one_app/one_one.dart';
+
 /// Maps LiveKit / connection internals to short, user-facing status copy.
 class LiveKitStatus {
   const LiveKitStatus._();
@@ -23,6 +25,9 @@ class LiveKitStatus {
 
   static String sanitizeError(Object error) {
     final text = error.toString();
+    if (UserFacingCopy.containsInternalIdentifier(text)) {
+      return UserFacingCopy.notificationDeliveryFailure;
+    }
     final lower = text.toLowerCase();
     if (lower.contains('token') ||
         lower.contains('livekit') ||

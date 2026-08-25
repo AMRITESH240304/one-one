@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Rational
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.splashscreen.SplashScreenViewProvider
 import com.google.firebase.FirebaseApp
 import com.google.firebase.installations.FirebaseInstallations
 import com.google.firebase.messaging.FirebaseMessaging
@@ -25,6 +26,10 @@ class MainActivity : FlutterFragmentActivity() {
     private lateinit var voiceNudgeChannel: MethodChannel
     private lateinit var inviteLinkChannel: MethodChannel
     private lateinit var voicePipChannel: MethodChannel
+    private var audioOutputChannel: MethodChannel? = null
+    private var audioOutputMonitor: AudioOutputMonitor? = null
+    private var proximityScreenControl: ProximityScreenControl? = null
+    private var voiceOverlayAnnouncer: VoiceOverlayAnnouncer? = null
     private var voiceSessionActive = false
     private var voiceSessionTalking = false
 
@@ -32,22 +37,89 @@ class MainActivity : FlutterFragmentActivity() {
     // "app/splash" channel below). A generous failsafe timeout guarantees
     // the splash can never get stuck forever if that signal is ever lost.
     @Volatile private var isFlutterReady = false
+    private var heldSplashView: SplashScreenViewProvider? = null
     private val splashFailsafeHandler = Handler(Looper.getMainLooper())
     private val splashFailsafeRunnable = Runnable {
         Log.w(
             VoiceNudgeDiagnostics.tag,
             "[SPLASH-01] flutterReady signal not received within failsafe window; releasing splash",
         )
-        isFlutterReady = true
+        releaseSplash()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Must be called before super.onCreate() so the splash theme is
-        // installed before the window content view is set.
+        // installSplashScreen + keep-on-screen must both run before
+        // super.onCreate(). FlutterFragmentActivity can attach the Flutter
+        // view and request a draw during onCreate; if the keep-condition is
+        // still the default at that point, Android 12+ dismisses the native
+        // splash at first frame and the Flutter underlay (previously a
+        // second, larger logo) flashes through.
         val splashScreen = installSplashScreen()
-        super.onCreate(savedInstanceState)
         splashScreen.setKeepOnScreenCondition { !isFlutterReady }
+        splashScreen.setOnExitAnimationListener { splashView ->
+            if (isFlutterReady) {
+                splashView.remove()
+            } else {
+                // Some OEM/API combinations start the splash exit before
+                // keepOnScreenCondition is honoured. Hold this view until
+                // Flutter signals the first real screen is painted.
+                Log.w(
+                    VoiceNudgeDiagnostics.tag,
+                    "[SPLASH-02] splash exit requested before flutterReady; holding splash view",
+                )
+                heldSplashView = splashView
+            }
+        }
+        super.onCreate(savedInstanceState)
         splashFailsafeHandler.postDelayed(splashFailsafeRunnable, SPLASH_FAILSAFE_TIMEOUT_MS)
+    }
+
+    private fun releaseSplash() {
+        isFlutterReady = true
+        heldSplashView?.remove()
+        heldSplashView = null
+    }
+
+    private fun attachAudioOutputChannel(flutterEngine: FlutterEngine) {
+        audioOutputMonitor?.stop()
+        proximityScreenControl?.setEnabled(false)
+        val channel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            AudioOutputContract.flutterChannel,
+        )
+        audioOutputChannel = channel
+        val proximity = ProximityScreenControl(this)
+        proximityScreenControl = proximity
+        val monitor = AudioOutputMonitor(this) {
+            channel.invokeMethod(
+                AudioOutputContract.methodOnStateChanged,
+                AudioOutput.readState(this),
+            )
+        }
+        audioOutputMonitor = monitor
+        monitor.start()
+        channel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                AudioOutputContract.methodGetState ->
+                    result.success(AudioOutput.readState(this))
+                AudioOutputContract.methodSetMuted -> {
+                    val (muted, showUi) = when (val args = call.arguments) {
+                        is Map<*, *> -> Pair(
+                            args["muted"] == true,
+                            args["showUi"] != false,
+                        )
+                        else -> Pair(args == true, true)
+                    }
+                    MediaVolume.setMuted(this, muted, showUi)
+                    result.success(AudioOutput.readState(this))
+                }
+                AudioOutputContract.methodSetProximityMonitoring -> {
+                    proximity.setEnabled(call.arguments == true)
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -58,14 +130,15 @@ class MainActivity : FlutterFragmentActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "flutterReady" -> {
-                    isFlutterReady = true
                     splashFailsafeHandler.removeCallbacks(splashFailsafeRunnable)
+                    releaseSplash()
                     result.success(null)
                 }
                 else -> result.notImplemented()
             }
         }
         VoiceNudgeNotifications.ensureChannels(this)
+        VoiceNudgeNotifications.cancelStaleChatPiles(this)
         if (BuildConfig.DEBUG) logFirebaseRuntimeConfiguration()
         voiceNudgeChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -73,8 +146,11 @@ class MainActivity : FlutterFragmentActivity() {
         )
         NudgeActionDispatcher.attach(voiceNudgeChannel)
         NudgeDeliveryResultDispatcher.attach(voiceNudgeChannel)
+        NudgeResponseDispatcher.attach(voiceNudgeChannel)
         NudgeReceivedDispatcher.attach(voiceNudgeChannel)
+        IncomingNudgeDispatcher.attach(voiceNudgeChannel)
         captureNudgeAction(intent)
+        captureChatPileOpen(intent)
         inviteLinkChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             InviteLinkContract.flutterChannel,
@@ -85,6 +161,27 @@ class MainActivity : FlutterFragmentActivity() {
             VoicePipContract.flutterChannel,
         )
         VoicePipActionDispatcher.attach(voicePipChannel)
+        VoiceSessionTeardownDispatcher.attach(voicePipChannel)
+        attachAudioOutputChannel(flutterEngine)
+        voiceOverlayAnnouncer?.shutdown()
+        val overlayAnnouncer = VoiceOverlayAnnouncer(this)
+        voiceOverlayAnnouncer = overlayAnnouncer
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            VoiceOverlayContract.flutterChannel,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                VoiceOverlayContract.methodAnnounceCallModeTimeout -> {
+                    overlayAnnouncer.announceCallModeTimeout()
+                    result.success(null)
+                }
+                VoiceOverlayContract.methodWarmup -> {
+                    overlayAnnouncer.warmup()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "app.oneone/device_log",
@@ -111,8 +208,21 @@ class MainActivity : FlutterFragmentActivity() {
                     val wasActive = voiceSessionActive
                     voiceSessionActive = arguments?.get("active") == true
                     voiceSessionTalking = arguments?.get("isTalking") == true
+                    if (voiceSessionActive) {
+                        ActiveVoiceSessionStore.save(
+                            this,
+                            groupId = arguments?.get("groupId")?.toString(),
+                            userId = arguments?.get("userId")?.toString(),
+                            deviceId = arguments?.get("deviceId")?.toString(),
+                            serviceSessionId = arguments?.get("serviceSessionId")?.toString(),
+                            livekitSessionId = arguments?.get("livekitSessionId")?.toString(),
+                        )
+                    } else {
+                        ActiveVoiceSessionStore.clear(this)
+                    }
+                    val serviceSessionId = arguments?.get("serviceSessionId")?.toString()
                     if (voiceSessionActive && !wasActive) {
-                        VoiceSessionService.start(this)
+                        VoiceSessionService.start(this, serviceSessionId)
                     } else if (!voiceSessionActive && wasActive) {
                         VoiceSessionService.stop(this)
                     }
@@ -187,6 +297,27 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(NudgeActionStore.take(this)?.toMap())
                 }
 
+                "listIncomingNudges" -> {
+                    result.success(IncomingNudgeStore.list(this))
+                }
+
+                "dismissIncomingNudge" -> {
+                    val eventId = call.arguments?.toString()
+                    if (!eventId.isNullOrBlank()) {
+                        (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                            .cancel(VoiceNudgeNotifications.idFor(eventId))
+                    }
+                    result.success(null)
+                }
+
+                "takePendingChatPileOpen" -> {
+                    result.success(ChatPileStore.takeOpened(this))
+                }
+
+                "getMediaVolumePercent" -> {
+                    result.success(MediaVolume.readPercent(this))
+                }
+
                 // B5: Sender schedules a 10-min expiry alarm for a nudge they
                 // just sent. Called from Flutter after the backend accepts the
                 // send. Cancelled automatically when a delivery result or
@@ -226,6 +357,48 @@ class MainActivity : FlutterFragmentActivity() {
                     val groupId = call.arguments?.toString()
                     if (!groupId.isNullOrBlank()) {
                         VoiceNudgeNotifications.cancelChatPile(this, groupId)
+                    }
+                    result.success(null)
+                }
+
+                "setHapticsIntensity" -> {
+                    HapticsPreferenceStore.save(
+                        this,
+                        call.arguments?.toString().orEmpty(),
+                    )
+                    result.success(null)
+                }
+
+                // Shown by Flutter after a background auto-connect succeeds:
+                // the sender's app never came to the foreground, so a shade
+                // notification is the only confirmation they get.
+                "showYouAreOnlineNotification" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val groupId = args?.get("groupId")?.toString()
+                    val groupName = args?.get("groupName")?.toString()
+                    val manager =
+                        getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+                    try {
+                        manager.notify(
+                            VoiceNudgeNotifications.idFor("online_$groupId"),
+                            VoiceNudgeNotifications.buildGeneral(
+                                this,
+                                "🟢 You are online",
+                                if (groupName.isNullOrBlank()) {
+                                    "You're live together now."
+                                } else {
+                                    "You're live in $groupName."
+                                },
+                                groupId,
+                            ),
+                        )
+                        Log.i(
+                            VoiceNudgeDiagnostics.tag,
+                            "[NUDGE-ACTION-05] posted sender 'you are online' notification " +
+                                "groupSuffix=${groupId?.takeLast(6) ?: "none"}",
+                        )
+                    } catch (error: SecurityException) {
+                        VoiceNudgeDiagnostics.logFailure("[NUDGE-E12] Notification permission", error)
                     }
                     result.success(null)
                 }
@@ -273,6 +446,7 @@ class MainActivity : FlutterFragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         captureNudgeAction(intent)
+        captureChatPileOpen(intent)
         captureInviteLink(intent)
     }
 
@@ -303,19 +477,39 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun onDestroy() {
         splashFailsafeHandler.removeCallbacks(splashFailsafeRunnable)
-        if (isFinishing && voiceSessionActive) {
-            VoiceSessionService.stop(this)
-            voiceSessionActive = false
+        heldSplashView?.remove()
+        heldSplashView = null
+        if (isFinishing) {
+            teardownVoiceSession("activity finishing")
         }
         if (::voiceNudgeChannel.isInitialized) {
             NudgeActionDispatcher.detach(voiceNudgeChannel)
             NudgeDeliveryResultDispatcher.detach(voiceNudgeChannel)
+            NudgeResponseDispatcher.detach(voiceNudgeChannel)
             NudgeReceivedDispatcher.detach(voiceNudgeChannel)
+            IncomingNudgeDispatcher.detach(voiceNudgeChannel)
         }
         if (::voicePipChannel.isInitialized) {
             VoicePipActionDispatcher.detach(voicePipChannel)
+            VoiceSessionTeardownDispatcher.detach(voicePipChannel)
         }
+        voiceOverlayAnnouncer?.shutdown()
+        voiceOverlayAnnouncer = null
+        proximityScreenControl?.setEnabled(false)
+        proximityScreenControl = null
+        audioOutputMonitor?.stop()
+        audioOutputMonitor = null
+        audioOutputChannel?.setMethodCallHandler(null)
+        audioOutputChannel = null
         super.onDestroy()
+    }
+
+    private fun teardownVoiceSession(reason: String) {
+        if (!voiceSessionActive) return
+        DeviceLog.info("VoiceSessionService", "Requesting LiveKit teardown ($reason)")
+        VoiceSessionTeardownDispatcher.requestTeardown()
+        VoiceSessionService.stop(this)
+        voiceSessionActive = false
     }
 
     private fun updatePictureInPictureParams() {
@@ -358,29 +552,74 @@ class MainActivity : FlutterFragmentActivity() {
         )
     }
 
+    private fun captureChatPileOpen(intent: Intent?) {
+        if (intent?.action != VoiceNudgeContract.actionOpenChatPile) return
+        val groupId = intent.getStringExtra(VoiceNudgeContract.extraGroupId) ?: return
+        VoiceNudgeNotifications.cancelChatPile(this, groupId)
+        ChatPileStore.markOpened(this, groupId)
+        Log.i(
+            VoiceNudgeDiagnostics.tag,
+            "[FCM-09] Chat pile opened groupSuffix=${groupId.takeLast(6)}",
+        )
+    }
+
     private fun captureNudgeAction(intent: Intent?) {
-        val action = when (intent?.action) {
+        if (intent == null) return
+        // Returning from Recents redelivers the original notification intent.
+        // That is not a new Accept/Connect tap — ignore it.
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) {
+            return
+        }
+        val action = when (intent.action) {
             VoiceNudgeContract.actionAccept -> "accept"
             VoiceNudgeContract.actionConnect -> "connect"
+            VoiceNudgeContract.actionOpenNudge -> "open"
             else -> return
         }
         val eventId = intent.getStringExtra(VoiceNudgeContract.extraEventId) ?: return
         val groupId = intent.getStringExtra(VoiceNudgeContract.extraGroupId) ?: return
+        val senderUserId = intent.getStringExtra(VoiceNudgeContract.extraSenderUserId)
         val notificationId = intent.getIntExtra(
             VoiceNudgeContract.extraNotificationId,
             VoiceNudgeNotifications.idFor(eventId),
         )
         (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
             .cancel(notificationId)
-        VoiceNudgeAudioCache.delete(this, eventId)
-        // B5: Cancel the 10-minute expiry alarm since the user took action.
-        NudgeExpiryTracker.cancelExpiry(this, eventId)
-        NudgeActionStore.save(this, PendingNudgeAction(action, eventId, groupId))
+        if (action != "open") {
+            VoiceNudgeAudioCache.delete(this, eventId)
+            // B5: Cancel the 10-minute expiry alarm since the user took action.
+            NudgeExpiryTracker.cancelExpiry(this, eventId)
+            IncomingNudgeStore.markStatus(this, eventId, "accepted")
+            IncomingNudgeDispatcher.signalStatus(eventId, "accepted")
+        }
+        NudgeActionStore.save(
+            this,
+            PendingNudgeAction(action, eventId, groupId, senderUserId),
+        )
         NudgeActionDispatcher.signal()
+        // Consume the launch intent so a later process recreation / cold
+        // start does not re-queue the same Accept/Connect tap and auto-join.
+        consumeNudgeActionIntent(intent)
         Log.i(
             VoiceNudgeDiagnostics.tag,
             "[NUDGE-ACTION-02] queued action=$action eventSuffix=${eventId.takeLast(6)}",
         )
+    }
+
+    private fun consumeNudgeActionIntent(intent: Intent?) {
+        if (intent == null) return
+        if (
+            intent.action != VoiceNudgeContract.actionAccept &&
+            intent.action != VoiceNudgeContract.actionConnect
+        ) {
+            return
+        }
+        intent.action = null
+        intent.removeExtra(VoiceNudgeContract.extraEventId)
+        intent.removeExtra(VoiceNudgeContract.extraGroupId)
+        intent.removeExtra(VoiceNudgeContract.extraNotificationId)
+        intent.removeExtra(VoiceNudgeContract.extraAction)
+        setIntent(intent)
     }
 
     private fun captureInviteLink(intent: Intent?) {

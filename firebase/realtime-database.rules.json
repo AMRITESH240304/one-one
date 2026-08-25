@@ -67,6 +67,14 @@
         }
       }
     },
+    "mediaVolume": {
+      "$groupId": {
+        ".read": "auth != null && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'",
+        "$userId": {
+          ".write": "auth != null && auth.uid == $userId && root.child('groupMembers').child($groupId).child(auth.uid).child('memberState').val() == 'active'"
+        }
+      }
+    },
     "chatUnread": {
       "$groupId": {
         "$userId": {
@@ -117,6 +125,17 @@
       "$notificationEventId": {
         ".read": "auth != null && (data.child('senderUserId').val() == auth.uid || data.child('recipientUserId').val() == auth.uid)",
         ".write": "auth != null && newData.child('recipientUserId').val() == auth.uid"
+      }
+    },
+    "userNudgeDeliveries": {
+      "$senderUserId": {
+        ".read": "auth != null && auth.uid == $senderUserId",
+        "$eventId": {
+          "$recipientUserId": {
+            ".write": "auth != null && auth.uid == $recipientUserId",
+            ".validate": "newData.hasChildren(['eventId', 'status', 'senderUserId', 'recipientUserId']) && newData.child('eventId').val() == $eventId && newData.child('senderUserId').val() == $senderUserId && newData.child('recipientUserId').val() == $recipientUserId && (newData.child('status').val() == 'played' || newData.child('status').val() == 'failed')"
+          }
+        }
       }
     },
     "voiceNudges": {

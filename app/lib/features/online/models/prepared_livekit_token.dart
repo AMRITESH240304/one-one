@@ -1,4 +1,4 @@
-import 'livekit_token_response.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// A LiveKit token that was fetched ahead of time (prefetched) together with
 /// the app-level session identifiers used to request it.

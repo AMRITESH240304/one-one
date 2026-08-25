@@ -1,31 +1,4 @@
-import 'dart:async';
-import 'dart:io';
-
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_database/firebase_database.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:google_sign_in/google_sign_in.dart';
-import 'package:package_info_plus/package_info_plus.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-import '../../../app/accent_theme.dart';
-import '../../../app/startup_performance.dart';
-import '../../../core/firebase/app_database.dart';
-import '../../../core/firebase/app_telemetry.dart';
-import '../../../core/firebase/crashlytics_service.dart';
-import '../../../core/firebase/firebase_analytics_service.dart';
-import '../../../core/logging/log_manager.dart';
-import '../../../core/storage/profile_photo_storage.dart';
-import '../../nudges/data/android_voice_nudge_bridge.dart';
-import '../models/app_user_profile.dart';
-import '../models/identity_session.dart';
-import '../models/user_device_record.dart';
-import '../models/user_settings_record.dart';
-import 'avatar_assets.dart';
-import 'device_identity_store.dart';
+import 'package:one_one_app/one_one.dart';
 
 class IdentityRepository {
   IdentityRepository({
@@ -33,10 +6,12 @@ class IdentityRepository {
     FirebaseDatabase? database,
     DeviceIdentityStore? deviceIdentityStore,
     ProfilePhotoStorage? profilePhotoStorage,
+    ApiClient? apiClient,
   }) : _auth = auth ?? FirebaseAuth.instance,
        _database = database ?? AppDatabase.instance(),
        _deviceIdentityStore = deviceIdentityStore ?? DeviceIdentityStore(),
-       _profilePhotoStorage = profilePhotoStorage ?? ProfilePhotoStorage();
+       _profilePhotoStorage = profilePhotoStorage ?? ProfilePhotoStorage(),
+       _apiClient = apiClient ?? ApiClient();
 
   static const Duration _requiredStartupTimeout = Duration(seconds: 3);
   static const Duration _optionalStartupTimeout = Duration(seconds: 4);
@@ -45,6 +20,7 @@ class IdentityRepository {
   final FirebaseDatabase _database;
   final DeviceIdentityStore _deviceIdentityStore;
   final ProfilePhotoStorage _profilePhotoStorage;
+  final ApiClient _apiClient;
   IdentitySession? _cachedSession;
   Future<void>? _identityRefresh;
   final ValueNotifier<IdentitySession?> _sessionNotifier = ValueNotifier(null);
@@ -303,30 +279,31 @@ class IdentityRepository {
   }
 
   Future<IdentitySession> updateSettings({
-    required String accentColorKey,
-    required bool hapticsEnabled,
-    required String audioOutputPreference,
+    String? accentColorKey,
+    HapticsIntensity? hapticsIntensity,
+    String? audioOutputPreference,
   }) async {
     final user = _auth.currentUser;
     if (user == null) {
       throw StateError('Cannot update settings before sign-in.');
     }
 
-    final cleanAccentKey =
-        accentOptions.any((option) => option.key == accentColorKey)
-        ? accentColorKey
-        : 'coral';
-    final cleanAudioPreference = audioOutputPreference == 'earpiece'
-        ? 'earpiece'
-        : 'speaker';
     final now = _nowSeconds();
-    final settings =
-        (_cachedSession?.settings ?? UserSettingsRecord.defaults(now)).copyWith(
-          accentColorKey: cleanAccentKey,
-          hapticsEnabled: hapticsEnabled,
-          audioOutputPreference: cleanAudioPreference,
-          updatedAt: now,
-        );
+    final current = _cachedSession?.settings ?? UserSettingsRecord.defaults(now);
+    final cleanAccentKey = accentColorKey == null
+        ? current.accentColorKey
+        : (accentOptions.any((option) => option.key == accentColorKey)
+              ? accentColorKey
+              : 'coral');
+    final cleanAudioOutput = audioOutputPreference == null
+        ? null
+        : (audioOutputPreference == 'earpiece' ? 'earpiece' : 'speaker');
+    final settings = current.copyWith(
+      accentColorKey: cleanAccentKey,
+      hapticsIntensity: hapticsIntensity,
+      audioOutputPreference: cleanAudioOutput,
+      updatedAt: now,
+    );
 
     await _database.ref('userSettings/${user.uid}').update(settings.toJson());
 
@@ -523,6 +500,25 @@ class IdentityRepository {
 
     final credential = await _googleCredential();
     await user.reauthenticateWithCredential(credential);
+
+    // Purge every per-group row (membership, presence, usage, unread piles,
+    // sessions) via the backend — client security rules forbid deleting
+    // groupMembers/userGroups directly. Without this, deleted users linger as
+    // ghost members in groups they belonged to.
+    try {
+      await _apiClient.deleteJson('/v1/account');
+    } catch (error, stack) {
+      unawaited(
+        CrashlyticsService.recordError(
+          error,
+          stack,
+          reason: 'account_purge_backend_failed',
+          feature: 'account',
+        ),
+      );
+      // Fall through: still remove the local records and auth user so the
+      // deletion isn't blocked by a transient backend failure.
+    }
 
     await _database.ref().update({
       'users/${user.uid}': null,
@@ -783,6 +779,11 @@ class IdentityRepository {
     if (!_disposed) {
       _sessionNotifier.value = session;
     }
+    unawaited(
+      AndroidVoiceNudgeBridge.setHapticsIntensity(
+        session.settings.hapticsIntensity,
+      ),
+    );
     unawaited(
       AppTelemetry.identifyUser(
         userId: session.userId,

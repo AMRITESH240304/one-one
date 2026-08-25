@@ -1,15 +1,4 @@
-import 'package:firebase_database/firebase_database.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:uuid/uuid.dart';
-
-import '../../../core/firebase/app_database.dart';
-import '../../../core/network/api_client.dart';
-import '../../groups/models/group_summary.dart';
-import '../../identity/models/identity_session.dart';
-import '../models/livekit_token_response.dart';
-import '../models/member_availability.dart';
-import '../models/online_session.dart';
-import '../models/prepared_livekit_token.dart';
+import 'package:one_one_app/one_one.dart';
 
 class OnlineRepository {
   OnlineRepository({ApiClient? apiClient, FirebaseDatabase? database})
@@ -60,6 +49,17 @@ class OnlineRepository {
       startedAt: now,
     );
 
+    await _cancelStaleOnDisconnect(
+      groupId: group.groupId,
+      userId: identity.userId,
+    );
+    _logPresenceWrite(
+      'goOnline connecting',
+      groupId: group.groupId,
+      userId: identity.userId,
+      serviceSessionId: serviceSessionId,
+    );
+
     await _database.ref().update({
       'appServiceSessions/$serviceSessionId': {
         'groupId': group.groupId,
@@ -107,6 +107,12 @@ class OnlineRepository {
 
   Future<void> markLive(OnlineSession session) async {
     final now = _nowSeconds();
+    _logPresenceWrite(
+      'markLive',
+      groupId: session.groupId,
+      userId: session.userId,
+      serviceSessionId: session.serviceSessionId,
+    );
     await _database.ref().update({
       'appServiceSessions/${session.serviceSessionId}/serviceState': 'running',
       'appServiceSessions/${session.serviceSessionId}/lastHeartbeatAt': now,
@@ -175,6 +181,12 @@ class OnlineRepository {
     String reason = 'user_away',
   }) async {
     final now = _nowSeconds();
+    _logPresenceWrite(
+      'goAway reason=$reason',
+      groupId: session.groupId,
+      userId: session.userId,
+      serviceSessionId: session.serviceSessionId,
+    );
     final availabilityRef = _database.ref(
       'memberAvailability/${session.groupId}/${session.userId}',
     );
@@ -216,6 +228,36 @@ class OnlineRepository {
     });
   }
 
+  /// Clears leftover RTDB presence from a previous process that died mid-session.
+  ///
+  /// No-ops if another session (or an explicit away write) already replaced
+  /// [session.serviceSessionId] as the active handle.
+  Future<void> clearAbandonedSession(OnlineSession session) async {
+    final snapshot = await _database
+        .ref('memberAvailability/${session.groupId}/${session.userId}')
+        .get();
+    final value = snapshot.value;
+    if (value is! Map) return;
+    final activeId = value['activeServiceSessionId']?.toString();
+    if (activeId != session.serviceSessionId) {
+      _logPresenceWrite(
+        'clearAbandonedSession skipped — active session replaced',
+        groupId: session.groupId,
+        userId: session.userId,
+        serviceSessionId: session.serviceSessionId,
+        extra: 'activeSuffix=${activeId == null || activeId.isEmpty ? "none" : (activeId.length <= 6 ? activeId : activeId.substring(activeId.length - 6))}',
+      );
+      return;
+    }
+    _logPresenceWrite(
+      'clearAbandonedSession goAway process_killed',
+      groupId: session.groupId,
+      userId: session.userId,
+      serviceSessionId: session.serviceSessionId,
+    );
+    await goAway(session, reason: 'process_killed');
+  }
+
   /// Asks the backend to push a "you're offline" alert to this user's devices
   /// after an involuntary leave (peer left, inactivity, usage cap, network).
   Future<void> notifyGoneOffline({
@@ -225,15 +267,69 @@ class OnlineRepository {
     try {
       await _apiClient.postJson(
         '/v1/groups/${session.groupId}/notifications/gone-offline',
-        {
-          'deviceId': session.deviceId,
-          'reason': reason,
-        },
+        {'deviceId': session.deviceId, 'reason': reason},
       );
     } catch (_) {
       // Best-effort — RTDB presence is already away; missing the push is
       // non-fatal (foreground snackbars still cover the same cases).
     }
+  }
+
+  Future<void> _cancelStaleOnDisconnect({
+    required String groupId,
+    required String userId,
+  }) async {
+    final availabilityRef = _database.ref(
+      'memberAvailability/$groupId/$userId',
+    );
+    final cancels = <Future<void>>[availabilityRef.onDisconnect().cancel()];
+    try {
+      final snapshot = await availabilityRef.get();
+      final value = snapshot.value;
+      if (value is Map) {
+        final serviceId = value['activeServiceSessionId']?.toString();
+        final livekitId = value['activeLivekitSessionId']?.toString();
+        if (serviceId != null && serviceId.isNotEmpty) {
+          cancels.add(
+            _database
+                .ref('appServiceSessions/$serviceId')
+                .onDisconnect()
+                .cancel(),
+          );
+        }
+        if (livekitId != null && livekitId.isNotEmpty) {
+          cancels.add(
+            _database
+                .ref('livekitSessions/$livekitId')
+                .onDisconnect()
+                .cancel(),
+          );
+        }
+      }
+    } catch (_) {
+      // Best-effort — availability cancel is the critical one.
+    }
+    await Future.wait(cancels);
+  }
+
+  void _logPresenceWrite(
+    String action, {
+    required String groupId,
+    required String userId,
+    required String serviceSessionId,
+    String? extra,
+  }) {
+    final suffix = serviceSessionId.length <= 6
+        ? serviceSessionId
+        : serviceSessionId.substring(serviceSessionId.length - 6);
+    LogManager.log(
+      LogLevel.info,
+      'PresenceRing',
+      '$action userId=$userId groupId=$groupId sessionSuffix=$suffix'
+          '${extra == null ? '' : ' $extra'}',
+      userId: userId,
+      groupId: groupId,
+    );
   }
 
   Future<void> _scheduleAwayOnDisconnect(OnlineSession session) async {

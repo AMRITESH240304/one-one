@@ -1,9 +1,4 @@
-import 'dart:math' as math;
-
-import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-
-import '../models/emoji_burst.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Full-screen, input-transparent overlay that renders every currently
 /// active [EmojiBurst]. Each burst spawns [EmojiBurstConfig.particleCount]
@@ -172,7 +167,7 @@ class _ParticleSpec {
   final double wobbleScale;
   final double rotation;
 
-  static final _random = math.Random();
+  static final _random = Random();
 
   static List<_ParticleSpec> generate(EmojiBurstConfig config) {
     final total = config.totalDurationMs;
@@ -196,7 +191,7 @@ class _ParticleSpec {
             config.minEmojiSize +
             _random.nextDouble() * (config.maxEmojiSize - config.minEmojiSize),
         wobbleFrequency: 1.3 + _random.nextDouble() * 1.7,
-        wobblePhase: _random.nextDouble() * 2 * math.pi,
+        wobblePhase: _random.nextDouble() * 2 * pi,
         wobbleScale: 0.6 + _random.nextDouble() * 0.7,
         rotation: (_random.nextDouble() - 0.5) * 0.5,
       );
@@ -225,7 +220,7 @@ class _ParticleSpec {
 
     final wobbleDamping = 1 - localProgress * 0.5;
     final wobble =
-        math.sin(localProgress * wobbleFrequency * 2 * math.pi + wobblePhase) *
+        sin(localProgress * wobbleFrequency * 2 * pi + wobblePhase) *
         config.wobbleAmplitude *
         wobbleScale *
         wobbleDamping;

@@ -26,7 +26,7 @@ const envSchema = z.object({
   // nudge of the same type (regardless of recipient). Independent from the
   // recipient-specific and group-wide limiters above so each nudge type can
   // be tuned without affecting the others.
-  NUDGE_COOLDOWN_RING_SECONDS: z.coerce.number().int().min(0).max(600).default(20),
+  NUDGE_COOLDOWN_RING_SECONDS: z.coerce.number().int().min(0).max(600).default(0),
   NUDGE_COOLDOWN_VOICE_SECONDS: z.coerce.number().int().min(0).max(600).default(60),
   NUDGE_COOLDOWN_PUSH_SECONDS: z.coerce.number().int().min(0).max(600).default(10),
   // Anti-spam guard: caps the total number of nudges (any type) a single

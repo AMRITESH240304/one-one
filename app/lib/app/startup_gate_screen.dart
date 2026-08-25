@@ -1,26 +1,4 @@
-import 'dart:async';
-
-import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-import '../features/groups/data/group_repository.dart';
-import '../features/groups/data/invite_link_bridge.dart';
-import '../features/groups/models/group_summary.dart';
-import '../features/identity/data/identity_home_bootstrap.dart';
-import '../features/identity/data/identity_repository.dart';
-import '../features/identity/data/last_active_group_store.dart';
-import '../features/identity/models/identity_session.dart';
-import '../features/identity/ui/identity_home_screen.dart';
-import '../features/identity/ui/no_groups_screen.dart';
-import '../core/network/api_client.dart';
-import '../core/firebase/crashlytics_service.dart';
-import 'display_name_screen.dart';
-import 'native_splash_bridge.dart';
-import 'profile_picture_screen.dart';
-import 'setup_permission_screen.dart';
-import 'startup_performance.dart';
+import 'package:one_one_app/one_one.dart';
 
 class StartupGateScreen extends StatefulWidget {
   const StartupGateScreen({super.key});
@@ -338,36 +316,29 @@ class _StartupGateScreenState extends State<StartupGateScreen>
       // A real destination (permissions/onboarding/home/no-groups) is ready
       // — the native splash can come down now that there's real content
       // behind it, not another loader.
-      WidgetsBinding.instance.addPostFrameCallback(
-        (_) => NativeSplashBridge.markReady(),
-      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        NativeSplashBridge.markReady();
+      });
       return nextScreen;
     }
 
     if (_startupError != null) {
       // Terminal error state with a retry action — also real, interactive
       // content, so drop the native splash here too.
-      WidgetsBinding.instance.addPostFrameCallback(
-        (_) => NativeSplashBridge.markReady(),
-      );
-    }
-
-    return Scaffold(
-      backgroundColor: const Color(0xffF8BE03),
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: EdgeInsets.symmetric(horizontal: 28.w),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Image.asset(
-                  'assets/logo.png',
-                  width: 190.w,
-                  fit: BoxFit.contain,
-                ),
-                SizedBox(height: 28.h),
-                if (_startupError != null) ...[
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        NativeSplashBridge.markReady();
+      });
+      return Scaffold(
+        backgroundColor: BrandSplashScreen.backgroundColor,
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 28.w),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
                   Text(
                     'We couldn\'t finish setting up your account.',
                     textAlign: TextAlign.center,
@@ -383,11 +354,16 @@ class _StartupGateScreenState extends State<StartupGateScreen>
                     child: const Text('Try again'),
                   ),
                 ],
-              ],
+              ),
             ),
           ),
         ),
-      ),
-    );
+      );
+    }
+
+    // Covered by the native splash. No Flutter logo — that was the
+    // duplicate large-logo screen on devices that dismiss the native
+    // splash at first frame.
+    return const BrandSplashScreen();
   }
 }

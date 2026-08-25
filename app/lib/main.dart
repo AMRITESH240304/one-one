@@ -1,23 +1,4 @@
-import 'dart:async';
-import 'dart:isolate';
-
-import 'package:firebase_core/firebase_core.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:google_fonts/google_fonts.dart';
-
-import 'app/one_one_app.dart';
-import 'app/startup_performance.dart';
-import 'core/firebase/crashlytics_service.dart';
-import 'core/firebase/firebase_analytics_service.dart';
-import 'core/firebase/firebase_bootstrap.dart';
-import 'core/firebase/firebase_performance_service.dart';
-import 'core/logging/log_level.dart';
-import 'core/logging/log_manager.dart';
-import 'features/online/livekit_connection_warmer.dart';
-import 'features/subscriptions/revenue_cat_service.dart';
+import 'package:one_one_app/one_one.dart';
 
 final RawReceivePort _isolateErrorPort = RawReceivePort((dynamic pair) {
   final errorAndStack = pair as List<dynamic>;
@@ -49,6 +30,10 @@ void _reportFatalToCrashlytics(Future<void> Function() report) {
 }
 
 Future<void> main() async {
+  // Do not pass `zoneValues:` here. Zone value maps are unmodifiable; any
+  // later write (or a plugin that mutates the map it was given) becomes a
+  // fatal `Cannot modify unmodifiable map` inside this zone. If zone values
+  // are ever needed, pass `mutableMapOf(values)` — never `const {}`.
   await runZonedGuarded(() async {
     // Nothing below this line may `await` — every millisecond here is a
     // millisecond the user stares at a blank/frozen screen. All I/O
@@ -110,9 +95,9 @@ Future<void> main() async {
     );
     FlutterForegroundTask.initCommunicationPort();
 
-    // _FirebaseGate (the brand-splash screen) awaits this same future, so
-    // Firebase only ever initializes once and the first frame never waits
-    // on it.
+    // _FirebaseGate (logo-less underlay under the native splash) awaits this
+    // same future, so Firebase only ever initializes once and the first
+    // frame never waits on it.
     final firebaseReady = FirebaseBootstrap.start();
     unawaited(
       firebaseReady.then((_) {

@@ -13,7 +13,9 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.MethodChannel
@@ -49,6 +51,29 @@ object VoicePipActionDispatcher {
     }
 }
 
+object VoiceSessionTeardownDispatcher {
+    private var channel: MethodChannel? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    fun attach(nextChannel: MethodChannel) {
+        channel = nextChannel
+    }
+
+    fun detach(targetChannel: MethodChannel) {
+        if (channel === targetChannel) channel = null
+    }
+
+    fun requestTeardown() {
+        val target = channel ?: return
+        mainHandler.post {
+            try {
+                target.invokeMethod("onProcessTeardown", null)
+            } catch (_: Exception) {
+            }
+        }
+    }
+}
+
 class VoicePipActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
@@ -59,8 +84,15 @@ class VoicePipActionReceiver : BroadcastReceiver() {
 }
 
 class VoiceSessionService : Service() {
+    /** Session ID that was active when this service instance started.
+     *  Passed to [ActiveVoiceSessionStore.markAwayBestEffort] so it can
+     *  bail out if Flutter saved a newer session before we finish shutting down. */
+    private var capturedSessionId: String? = null
+
     override fun onCreate() {
         super.onCreate()
+        // Capture BEFORE any concurrent save() can overwrite the prefs.
+        capturedSessionId = ActiveVoiceSessionStore.readServiceSessionId(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
@@ -72,17 +104,29 @@ class VoiceSessionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        intent?.getStringExtra(EXTRA_SERVICE_SESSION_ID)?.takeIf { it.isNotBlank() }
+            ?.let { capturedSessionId = it }
         DeviceLog.init(this)
+        val inBackground = DeviceLog.wasAppInBackground()
         DeviceLog.info(
-            "VoiceSessionService",
-            "onStartCommand called flags=$flags startId=$startId sdk=${Build.VERSION.SDK_INT}",
+            "PresenceRing",
+            "VoiceSessionService.onStartCommand " +
+                "capturedSuffix=${capturedSessionId?.takeLast(6) ?: "none"} " +
+                "storedSuffix=${ActiveVoiceSessionStore.readServiceSessionId(this)?.takeLast(6) ?: "none"} " +
+                "flags=$flags startId=$startId " +
+                "sdk=${Build.VERSION.SDK_INT} background=$inBackground",
         )
-        // B1: On API 34+ (and especially 36), starting a foreground service of
-        // type "microphone" requires android.permission.FOREGROUND_SERVICE_MICROPHONE
-        // (declared in the manifest) AND android.permission.RECORD_AUDIO to be
-        // granted at runtime. If RECORD_AUDIO is missing, fail gracefully instead
-        // of crashing the process.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        // On Android 14+ (and especially 15/16), the "microphone" foreground
+        // service type is a foreground-only permission: it cannot be started
+        // while the app is in the background. A backgrounded sender is in
+        // walkie-talkie mode (mic muted) anyway, so start with "mediaPlayback"
+        // instead to keep the process alive and the receiver's audio playing.
+        val useMicrophoneType = !inBackground
+        // B1: On API 34+, a foreground service of type "microphone" additionally
+        // requires android.permission.RECORD_AUDIO to be granted at runtime.
+        // If it is missing, fail gracefully instead of crashing the process.
+        // The mediaPlayback-only background path does not need RECORD_AUDIO.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && useMicrophoneType) {
             val recordGranted = ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.RECORD_AUDIO,
@@ -110,13 +154,17 @@ class VoiceSessionService : Service() {
             }
         }
         try {
-            DeviceLog.info("VoiceSessionService", "startForeground called")
+            val fgsType = if (useMicrophoneType) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            }
+            DeviceLog.info(
+                "VoiceSessionService",
+                "startForeground called type=${if (useMicrophoneType) "microphone" else "mediaPlayback"}",
+            )
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    notificationId,
-                    notification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-                )
+                startForeground(notificationId, notification(), fgsType)
             } else {
                 @Suppress("DEPRECATION")
                 startForeground(notificationId, notification())
@@ -144,16 +192,50 @@ class VoiceSessionService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        DeviceLog.info(
+            "PresenceRing",
+            "VoiceSessionService.onTaskRemoved capturedSuffix=${capturedSessionId?.takeLast(6) ?: "none"}",
+        )
+        if (shouldRunSessionCleanup()) {
+            VoiceSessionTeardownDispatcher.requestTeardown()
+            ActiveVoiceSessionStore.markAwayBestEffort(this, capturedSessionId)
+        } else {
+            DeviceLog.warn(
+                "PresenceRing",
+                "VoiceSessionService.onTaskRemoved skipped teardown — session superseded",
+            )
+        }
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
-        DeviceLog.info("VoiceSessionService", "service stopped")
+        DeviceLog.info(
+            "PresenceRing",
+            "VoiceSessionService.onDestroy capturedSuffix=${capturedSessionId?.takeLast(6) ?: "none"}",
+        )
+        if (shouldRunSessionCleanup()) {
+            VoiceSessionTeardownDispatcher.requestTeardown()
+            ActiveVoiceSessionStore.markAwayBestEffort(this, capturedSessionId)
+        } else {
+            DeviceLog.warn(
+                "PresenceRing",
+                "VoiceSessionService.onDestroy skipped teardown — session superseded",
+            )
+        }
         super.onDestroy()
     }
+
+    /** Only tear down when this service instance still owns the stored session. */
+    private fun shouldRunSessionCleanup(): Boolean =
+        ActiveVoiceSessionStore.sessionStillOwned(this, capturedSessionId)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     @Suppress("DEPRECATION")
     private fun notification(): Notification {
-        val openApp = PendingIntent.getActivity(
+        val openApp = BrandedSplashIntents.mainActivity(
             this,
             0,
             Intent(this, MainActivity::class.java),
@@ -179,11 +261,16 @@ class VoiceSessionService : Service() {
     companion object {
         private const val channelId = "active_voice_session"
         private const val notificationId = 7012
+        const val EXTRA_SERVICE_SESSION_ID = "serviceSessionId"
 
-        fun start(context: Context) {
-            // B1: Guard against starting when RECORD_AUDIO isn't granted at
-            // runtime — API 34+ requires it for foreground service type "microphone".
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        fun start(context: Context, serviceSessionId: String? = null) {
+            // B1: Guard against starting a "microphone" foreground service when
+            // RECORD_AUDIO isn't granted at runtime (API 34+ requires it). When
+            // the app is in the background we fall back to "mediaPlayback" (see
+            // onStartCommand), which does not require RECORD_AUDIO.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+                !DeviceLog.wasAppInBackground()
+            ) {
                 val recordGranted = ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.RECORD_AUDIO,
@@ -198,6 +285,9 @@ class VoiceSessionService : Service() {
                 }
             }
             val intent = Intent(context, VoiceSessionService::class.java)
+            if (!serviceSessionId.isNullOrBlank()) {
+                intent.putExtra(EXTRA_SERVICE_SESSION_ID, serviceSessionId)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {

@@ -1,13 +1,13 @@
 import { randomBytes, createHash } from "node:crypto";
-import { RoomServiceClient } from "livekit-server-sdk";
 import { config } from "../config.js";
 import { sendAndroidDataPushes } from "../firebase/messaging.js";
 import { getRealtimeDatabase } from "../firebase/database.js";
 import { getVoiceNudgeBucket } from "../firebase/storage.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
+import { createLiveKitRoomServiceClient, isLiveKitNotFound } from "../livekit/tokens.js";
 
-const maxMembers = 100;
+const maxMembers = 6;
 const defaultMaxTalkMs = 60_000;
 
 export type CreateGroupInput = {
@@ -518,6 +518,7 @@ export async function deleteGroup(input: GroupMemberActionInput) {
       [`groupMembers/${input.groupId}`]: null,
       [`livekitRooms/${input.groupId}`]: null,
       [`memberAvailability/${input.groupId}`]: null,
+      [`mediaVolume/${input.groupId}`]: null,
       [`groupMessages/${input.groupId}`]: null,
       [`talkLocks/${input.groupId}`]: null,
       [`talkSessions/${input.groupId}`]: null,
@@ -549,6 +550,167 @@ export async function deleteGroup(input: GroupMemberActionInput) {
     await lifecycleRef.remove().catch(() => undefined);
     throw error;
   }
+}
+
+/**
+ * Fully purges a user's account: every per-group row the user has ever
+ * written (membership, presence, usage, unread piles, sessions, locks, talk
+ * state) plus the user's own records. Runs with admin privileges so it works
+ * regardless of the client-facing security rules, and covers groups created
+ * before the deletion path existed.
+ */
+export async function purgeUserAccount(userId: string) {
+  const db = getRealtimeDatabase();
+
+  const groupIds = new Set<string>();
+  const indexSnap = await db.ref(`userGroups/${userId}`).get();
+  if (isRecord(indexSnap.val())) {
+    for (const groupId of Object.keys(indexSnap.val() as Record<string, unknown>)) {
+      groupIds.add(groupId);
+    }
+  }
+
+  // Sweep groupMembers as an authoritative source too — catches groups whose
+  // inverse index is missing/stale for this legacy account.
+  const membersSnap = await db.ref("groupMembers").get();
+  if (isRecord(membersSnap.val())) {
+    for (const [groupId, rawMembers] of Object.entries(
+      membersSnap.val() as Record<string, unknown>
+    )) {
+      if (isRecord(rawMembers) && rawMembers[userId] != null) {
+        groupIds.add(groupId);
+      }
+    }
+  }
+
+  for (const groupId of groupIds) {
+    const memberRef = db.ref(`groupMembers/${groupId}/${userId}`);
+    const member = await memberRef.get();
+    const role = member.child("role").val()?.toString() ?? "member";
+    const groupSnap = await db.ref(`groups/${groupId}`).get();
+    const ownerUserId = groupSnap.child("ownerUserId").val()?.toString();
+
+    if (ownerUserId === userId || role === "owner") {
+      // The deleted user owns this group — tear the whole group down.
+      try {
+        await deleteGroup({ groupId, userId });
+        continue;
+      } catch (error) {
+        // deleteGroup enforces active-owner guards that may be stale on a
+        // deleted account; fall through to removing just this user's rows.
+        logger.warn(
+          {
+            checkpoint: "ACCOUNT-PURGE-W1",
+            groupId,
+            userId,
+            error: error instanceof Error ? error.message : String(error)
+          },
+          "owned group teardown failed during account purge; removing member rows only"
+        );
+      }
+    }
+
+    // Remove this member from the group but keep the group alive for the
+    // remaining members. cleanupMemberState handles sessions/locks/talk, and
+    // we additionally drop membership, availability, usage, and the unread
+    // pile rows the user owned.
+    const updates: Record<string, unknown> = {
+      [`groupMembers/${groupId}/${userId}`]: null,
+      [`memberAvailability/${groupId}/${userId}`]: null,
+      [`mediaVolume/${groupId}/${userId}`]: null,
+      [`dailyUsage/${groupId}/${userId}`]: null,
+      [`chatUnread/${groupId}/${userId}`]: null,
+      [`userGroups/${userId}/${groupId}`]: null
+    };
+    await db.ref().update(updates);
+    await cleanupMemberState(groupId, userId, "account_deleted");
+  }
+
+  const finalUpdates: Record<string, unknown> = {
+    [`users/${userId}`]: null,
+    [`userDevices/${userId}`]: null,
+    [`userSettings/${userId}`]: null,
+    [`userGroups/${userId}`]: null,
+    [`userGroupIndexVersion/${userId}`]: null
+  };
+
+  // Purge any notification deliveries involving this user (best effort, so a
+  // missing doc never blocks the wipe).
+  const deliveriesSnap = await db.ref("notificationDeliveries").get();
+  if (isRecord(deliveriesSnap.val())) {
+    for (const [eventId, raw] of Object.entries(
+      deliveriesSnap.val() as Record<string, unknown>
+    )) {
+      if (
+        isRecord(raw) &&
+        (raw.senderUserId === userId || raw.recipientUserId === userId)
+      ) {
+        finalUpdates[`notificationDeliveries/${eventId}`] = null;
+      }
+    }
+  }
+
+  await db.ref().update(finalUpdates);
+  logger.info(
+    { checkpoint: "ACCOUNT-PURGE-01", userId, groupsTouched: groupIds.size },
+    "account fully purged"
+  );
+  return { purged: true, groupsTouched: groupIds.size };
+}
+
+/**
+ * Keep only user ids that still have an active `users/{uid}` record.
+ *
+ * Missing `users/{uid}` means the account was deleted (account deletion wipes
+ * that path). App uninstall does not — uninstall leaves `users/{uid}` intact,
+ * so those members are correctly retained here.
+ */
+export async function filterActiveAccountUserIds(userIds: string[]) {
+  if (userIds.length === 0) return [];
+  const db = getRealtimeDatabase();
+  const active: string[] = [];
+  for (const userId of userIds) {
+    const snapshot = await db.ref(`users/${userId}`).get();
+    if (!snapshot.exists()) continue;
+    if ((snapshot.child("accountState").val() ?? "active") !== "active") continue;
+    active.push(userId);
+  }
+  return active;
+}
+
+const inVoiceSessionStates = new Set([
+  "connecting",
+  "live",
+  "talking",
+  "listening",
+  "connected"
+]);
+
+/**
+ * User IDs currently in an active voice session for a group, read from RTDB
+ * `memberAvailability` presence. Mirrors the client's `isInVoiceSessionAt`
+ * check (desiredState online + effectiveState in a voice-session state + not
+ * stale), so no LiveKit server round-trip is needed.
+ */
+export async function listInVoiceSessionUserIds(groupId: string): Promise<string[]> {
+  const snapshot = await getRealtimeDatabase().ref(`memberAvailability/${groupId}`).get();
+  if (!snapshot.exists()) return [];
+
+  const value = snapshot.val();
+  if (!isRecord(value)) return [];
+
+  const now = nowSeconds();
+  const userIds: string[] = [];
+  for (const [userId, raw] of Object.entries(value)) {
+    if (!isRecord(raw)) continue;
+    if ((raw.desiredState ?? "away") !== "online") continue;
+    const staleAfterAt = readNumber(raw.staleAfterAt, 0);
+    if (staleAfterAt > 0 && staleAfterAt <= now) continue;
+    const effectiveState = String(raw.effectiveState ?? "");
+    if (!inVoiceSessionStates.has(effectiveState)) continue;
+    userIds.push(userId);
+  }
+  return userIds;
 }
 
 export async function requireActiveUser(userId: string) {
@@ -793,6 +955,7 @@ async function cleanupMemberState(groupId: string, userId: string, reason: strin
   const updates: Record<string, unknown> = {
     [`userGroups/${userId}/${groupId}`]: null,
     [`memberAvailability/${groupId}/${userId}`]: null,
+    [`mediaVolume/${groupId}/${userId}`]: null,
     [`dailyUsage/${groupId}/${userId}`]: null
   };
 
@@ -918,16 +1081,8 @@ async function notifyUsers(
   }
 }
 
-function roomServiceClient() {
-  if (!config.LIVEKIT_URL || !config.LIVEKIT_API_KEY || !config.LIVEKIT_API_SECRET) {
-    return null;
-  }
-  const host = config.LIVEKIT_URL.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
-  return new RoomServiceClient(host, config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET);
-}
-
 async function disconnectLiveKitMember(groupId: string, userId: string) {
-  const client = roomServiceClient();
+  const client = createLiveKitRoomServiceClient();
   if (!client) return;
   try {
     const group = await getRealtimeDatabase().ref(`groups/${groupId}`).get();
@@ -952,7 +1107,7 @@ async function disconnectLiveKitMember(groupId: string, userId: string) {
 }
 
 async function disconnectLiveKitRoom(roomName: string) {
-  const client = roomServiceClient();
+  const client = createLiveKitRoomServiceClient();
   if (!client) return;
   try {
     const participants = await client.listParticipants(roomName);
@@ -969,12 +1124,6 @@ async function disconnectLiveKitRoom(roomName: string) {
       logger.warn({ error, roomName }, "LiveKit room deletion failed");
     }
   }
-}
-
-function isLiveKitNotFound(error: unknown) {
-  if (!isRecord(error)) return false;
-  const status = error.status ?? error.code;
-  return status === 404 || status === "not_found";
 }
 
 function defaultAvailability(now: number) {

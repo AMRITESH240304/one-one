@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:one_one_app/features/nudges/data/nudge_repository.dart';
+
+import 'package:one_one_app/one_one.dart';
 
 void main() {
   test('all-friends target emits only the scope', () {
@@ -15,6 +16,26 @@ void main() {
       'targetUserId': 'friend-123',
     });
     expect(target.query, {
+      'targetScope': 'single_friend',
+      'targetUserId': 'friend-123',
+    });
+  });
+
+  test('selected-friends target includes the recipient list', () {
+    final target = NudgeTarget.selectedFriends(['friend-1', 'friend-2']);
+    expect(target.json, {
+      'targetScope': 'selected_friends',
+      'targetUserIds': ['friend-1', 'friend-2'],
+    });
+    expect(target.query, {
+      'targetScope': 'selected_friends',
+      'targetUserIds': 'friend-1,friend-2',
+    });
+  });
+
+  test('a single selected friend collapses to single-friend scope', () {
+    final target = NudgeTarget.selectedFriends(['friend-123']);
+    expect(target.json, {
       'targetScope': 'single_friend',
       'targetUserId': 'friend-123',
     });

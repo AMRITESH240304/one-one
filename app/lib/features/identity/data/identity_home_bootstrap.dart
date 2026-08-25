@@ -1,7 +1,4 @@
-import '../../groups/data/group_repository.dart';
-import '../../groups/models/group_member_summary.dart';
-import '../../groups/models/group_summary.dart';
-import '../../online/livekit_status.dart';
+import 'package:one_one_app/one_one.dart';
 
 /// Prefetched home-screen payload so the splash can stay up until the first
 /// paint of [IdentityHomeScreen] is ready.
@@ -52,10 +49,10 @@ class IdentityHomeBootstrap {
     String? preferredGroupId,
   }) async {
     if (groups.isEmpty) {
-      return const IdentityHomeBootstrap(
-        groups: [],
+      return IdentityHomeBootstrap(
+        groups: const [],
         selectedGroup: null,
-        members: [],
+        members: const [],
         membersByGroupId: {},
         carouselIndex: 0,
       );
@@ -70,7 +67,7 @@ class IdentityHomeBootstrap {
           ? const <GroupMemberSummary>[]
           : await groupRepository.loadGroupMembers(selected.groupId);
       final membersByGroupId = selected == null
-          ? const <String, List<GroupMemberSummary>>{}
+          ? <String, List<GroupMemberSummary>>{}
           : <String, List<GroupMemberSummary>>{
               selected.groupId: selectedMembers,
             };
@@ -94,7 +91,7 @@ class IdentityHomeBootstrap {
         groups: groups,
         selectedGroup: fallback,
         members: const [],
-        membersByGroupId: const {},
+        membersByGroupId: {},
         carouselIndex: 0,
         loadError: LiveKitStatus.sanitizeError(error),
       );
@@ -106,7 +103,7 @@ class IdentityHomeBootstrap {
       groups: const [],
       selectedGroup: null,
       members: const [],
-      membersByGroupId: const {},
+      membersByGroupId: {},
       carouselIndex: 0,
       loadError: LiveKitStatus.sanitizeError(error),
     );

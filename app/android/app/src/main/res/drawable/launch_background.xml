@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- First-frame window background: brand yellow + centered logo.
+     Theme.SplashScreen's splash attributes do not apply to the starting
+     window for notification/deep-link cold starts, so this drawable is
+     what the user sees before installSplashScreen() takes over.
+     Logo size matches the Android 12 splash icon (240dp viewport with
+     64dp inset → 112dp). -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splash_background" />
+    <item
+        android:width="112dp"
+        android:height="112dp"
+        android:gravity="center"
+        android:drawable="@drawable/splash_logo" />
+</layer-list>

@@ -1,7 +1,4 @@
-import 'dart:async';
-
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
+import 'package:one_one_app/one_one.dart';
 
 enum VoicePipAction { toggleMicrophone }
 
@@ -22,17 +19,24 @@ class VoicePipBridge {
   final ValueNotifier<bool> isInPictureInPicture = ValueNotifier(false);
   final StreamController<VoicePipAction> _actions =
       StreamController<VoicePipAction>.broadcast();
+  final StreamController<void> _processTeardown =
+      StreamController<void>.broadcast();
 
   Stream<VoicePipAction> get actions => _actions.stream;
+
+  /// Fired when Android is about to kill the task or voice foreground service.
+  Stream<void> get processTeardown => _processTeardown.stream;
 
   Future<void> setSessionState({
     required bool active,
     required bool isTalking,
+    OnlineSession? session,
   }) async {
     try {
       await _channel.invokeMethod<void>('setSessionState', {
         'active': active,
         'isTalking': isTalking,
+        if (session != null) ...session.toPresenceHandle(),
       });
     } on MissingPluginException {
       // PiP is Android-only.
@@ -48,6 +52,9 @@ class VoicePipBridge {
         final action = parseVoicePipAction(call.arguments as String?);
         if (action != null) _actions.add(action);
         return;
+      case 'onProcessTeardown':
+        if (!_processTeardown.isClosed) _processTeardown.add(null);
+        return;
     }
   }
 
@@ -55,5 +62,6 @@ class VoicePipBridge {
     _channel.setMethodCallHandler(null);
     isInPictureInPicture.dispose();
     await _actions.close();
+    await _processTeardown.close();
   }
 }

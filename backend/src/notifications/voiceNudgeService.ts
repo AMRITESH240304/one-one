@@ -10,6 +10,7 @@ import {
 import { config } from "../config.js";
 import { HttpError } from "../http/httpError.js";
 import { logger } from "../logger.js";
+import { listInVoiceSessionUserIds, requireActiveGroup } from "../groups/groupService.js";
 import { createAckTicket } from "./nudgeDeliveryService.js";
 import {
   createUploadTicket,
@@ -25,7 +26,7 @@ import {
 // ---------------------------------------------------------------------------
 
 type NudgeTarget = {
-  targetScope: "single_friend" | "all_friends";
+  targetScope: "single_friend" | "all_friends" | "selected_friends";
   targetUserId?: string;
 };
 
@@ -60,7 +61,7 @@ export type CompleteVoiceNudgeUploadInput = {
 export type SendRingNudgeInput = NudgeTarget & {
   groupId: string;
   senderUserId: string;
-  durationSeconds: 3 | 5 | 10;
+  durationSeconds: 3 | 6 | 9;
   recipientDevices: RecipientDevice[];
   senderName: string;
 };
@@ -194,7 +195,16 @@ async function dispatchVoiceNudgeFromContext(ctx: {
   recipientUserIds: string[];
   recipientDevices: RecipientDevice[];
 }) {
-  const audioBytes = await verifyClientUploadedVoiceObject(ctx.eventId, ctx.storagePath);
+  const [liveParticipantUserIds, group, audioBytes] = await Promise.all([
+    listInVoiceSessionUserIds(ctx.groupId),
+    requireActiveGroup(ctx.groupId),
+    verifyClientUploadedVoiceObject(ctx.eventId, ctx.storagePath)
+  ]);
+  const liveUserIds = new Set(liveParticipantUserIds);
+  const recipientDevices = ctx.recipientDevices.filter(
+    (device) => device.userId !== ctx.senderUserId && !liveUserIds.has(device.userId)
+  );
+  const recipientUserIds = [...new Set(recipientDevices.map((device) => device.userId))];
 
   logger.info(
     {
@@ -209,25 +219,8 @@ async function dispatchVoiceNudgeFromContext(ctx: {
   );
 
   const file = getVoiceNudgeBucket().file(ctx.storagePath);
-  let signedAudioUrl: string;
-  try {
-    signedAudioUrl = await createVoiceNudgeSignedReadUrl(ctx.storagePath, ctx.expiresAt * 1000);
-  } catch (error) {
-    logger.error(
-      {
-        checkpoint: "VOICE-NUDGE-BE-E1",
-        category: "unexpected",
-        eventId: ctx.eventId,
-        storagePath: ctx.storagePath,
-        error: describeError(error)
-      },
-      "voice nudge signed read URL generation failed, rolling back Cloud Storage object"
-    );
-    await file.delete({ ignoreNotFound: true }).catch(() => undefined);
-    throw error;
-  }
 
-  if (ctx.recipientDevices.length === 0) {
+  if (recipientDevices.length === 0) {
     logger.warn(
       {
         checkpoint: "VOICE-NUDGE-BE-W1",
@@ -241,27 +234,50 @@ async function dispatchVoiceNudgeFromContext(ctx: {
     return nudgeResult(ctx.eventId, ctx.recipientUserIds.length, 0, 0, 0);
   }
 
-  // Write a lightweight notification event so the respond-to-nudge endpoint
-  // can validate voice-nudge responses and notification action buttons work.
+  // Independent post-upload work runs in parallel instead of serially: sign
+  // the read URL, fetch the sender's profile photo + avatar, and write the
+  // respond-event record (non-fatal). Previously each awaited before the FCM
+  // push, adding several serial RTDB/GCS round trips to sender-visible latency.
   const baseUrl = config.PUBLIC_API_BASE_URL.replace(/\/$/, "");
   const responseUrl = `${baseUrl}/v1/groups/${ctx.groupId}/nudges/${ctx.eventId}/respond`;
-  await writeNudgeNotificationEvent({
-    groupId: ctx.groupId,
-    eventId: ctx.eventId,
-    senderUserId: ctx.senderUserId,
-    eventType: "voice_nudge",
-    targetScope: "all_friends",
-    targetUserIds: ctx.recipientUserIds.filter((uid) => uid !== ctx.senderUserId),
-    createdAt: nowSeconds(),
-    responseUrl,
-    senderName: ctx.senderName
+  const signedAudioUrlPromise = createVoiceNudgeSignedReadUrl(
+    ctx.storagePath,
+    ctx.expiresAt * 1000
+  ).catch(async (error) => {
+    logger.error(
+      {
+        checkpoint: "VOICE-NUDGE-BE-E1",
+        category: "unexpected",
+        eventId: ctx.eventId,
+        storagePath: ctx.storagePath,
+        error: describeError(error)
+      },
+      "voice nudge signed read URL generation failed, rolling back Cloud Storage object"
+    );
+    await file.delete({ ignoreNotFound: true }).catch(() => undefined);
+    throw error;
   });
 
+  const [signedAudioUrl, senderPhotoUrl, senderAvatarAsset] = await Promise.all([
+    signedAudioUrlPromise,
+    readProfilePhotoUrl(ctx.senderUserId),
+    readAvatarAsset(ctx.senderUserId),
+    writeNudgeNotificationEvent({
+      groupId: ctx.groupId,
+      eventId: ctx.eventId,
+      senderUserId: ctx.senderUserId,
+      eventType: "voice_nudge",
+      targetScope: "all_friends",
+      targetUserIds: recipientUserIds,
+      createdAt: nowSeconds(),
+      responseUrl,
+      senderName: ctx.senderName
+    })
+  ]);
+
   const ackUrl = `${baseUrl}/v1/nudges/${ctx.eventId}/ack`;
-  const senderPhotoUrl = await readProfilePhotoUrl(ctx.senderUserId);
-  const senderAvatarAsset = await readAvatarAsset(ctx.senderUserId);
   const pushResult = await sendAndroidDataPushes(
-    ctx.recipientDevices.map((device) => ({
+    recipientDevices.map((device) => ({
       token: device.fcmToken,
       data: {
         type: "voice_nudge",
@@ -269,6 +285,7 @@ async function dispatchVoiceNudgeFromContext(ctx: {
         groupId: ctx.groupId,
         senderUserId: ctx.senderUserId,
         senderName: ctx.senderName,
+        groupName: group.name,
         ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         ...(senderAvatarAsset ? { senderAvatarAsset } : {}),
         durationMs: String(ctx.durationMs),
@@ -295,7 +312,7 @@ async function dispatchVoiceNudgeFromContext(ctx: {
       category: "expected",
       eventId: ctx.eventId,
       audioBytes,
-      targetDevices: ctx.recipientDevices.length,
+      targetDevices: recipientDevices.length,
       sent: pushResult.successCount,
       failed: pushResult.failureCount,
       deliveryMode: "signed_url",
@@ -305,13 +322,16 @@ async function dispatchVoiceNudgeFromContext(ctx: {
     "voice nudge dispatched via FCM (zero RTDB calls)"
   );
 
-  return nudgeResult(
-    ctx.eventId,
-    ctx.recipientUserIds.length,
-    ctx.recipientDevices.length,
-    pushResult.successCount,
-    pushResult.failureCount
-  );
+  return {
+    ...nudgeResult(
+      ctx.eventId,
+      recipientUserIds.length,
+      recipientDevices.length,
+      pushResult.successCount,
+      pushResult.failureCount
+    ),
+    recipientUserIds
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +386,7 @@ async function verifyClientUploadedVoiceObject(eventId: string, storagePath: str
 }
 
 // ---------------------------------------------------------------------------
-// sendRingNudge — also RTDB-free (client provides recipient devices)
+// sendRingNudge
 // ---------------------------------------------------------------------------
 
 export async function sendRingNudge(input: SendRingNudgeInput) {
@@ -376,12 +396,32 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
     return nudgeResult(eventId, 0, 0, 0, 0);
   }
 
-  const recipientUserIds = [...new Set(input.recipientDevices.map((d) => d.userId))]
-    .filter((uid) => uid !== input.senderUserId);
+  const now = nowSeconds();
+  const [group, liveIds, suppressionSnapshot] = await Promise.all([
+    requireActiveGroup(input.groupId),
+    listInVoiceSessionUserIds(input.groupId),
+    getRealtimeDatabase().ref(`ringSuppressions/${input.groupId}`).get()
+  ]);
+  const liveUserIds = new Set(liveIds);
+  const suppressions = isRecord(suppressionSnapshot.val())
+    ? suppressionSnapshot.val() as Record<string, unknown>
+    : {};
+  const recipientDevices = input.recipientDevices.filter((device) => {
+    if (device.userId === input.senderUserId || liveUserIds.has(device.userId)) return false;
+    const record = suppressions[device.userId];
+    return !isRecord(record) || Number(record.suppressedUntil ?? 0) <= now;
+  });
+  const recipientUserIds = [...new Set(recipientDevices.map((d) => d.userId))];
+  if (recipientDevices.length === 0 && input.recipientDevices.length > 0) {
+    throw new HttpError(
+      429,
+      "nudge_rate_limited",
+      "Ring is temporarily unavailable for the selected recipient."
+    );
+  }
 
   // Write a lightweight notification event so the respond-to-nudge endpoint
   // can validate ring-nudge responses and notification action buttons work.
-  const now = nowSeconds();
   const baseUrl = config.PUBLIC_API_BASE_URL.replace(/\/$/, "");
   const responseUrl = `${baseUrl}/v1/groups/${input.groupId}/nudges/${eventId}/respond`;
   await writeNudgeNotificationEvent({
@@ -401,7 +441,7 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
   const senderPhotoUrl = await readProfilePhotoUrl(input.senderUserId);
   const senderAvatarAsset = await readAvatarAsset(input.senderUserId);
   const pushResult = await sendAndroidDataPushes(
-    input.recipientDevices.map((device) => ({
+    recipientDevices.map((device) => ({
       token: device.fcmToken,
       data: {
         type: "ring_nudge",
@@ -409,6 +449,7 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
         groupId: input.groupId,
         senderUserId: input.senderUserId,
         senderName: input.senderName,
+        groupName: group.name,
         ...(senderPhotoUrl ? { senderPhotoUrl } : {}),
         ...(senderAvatarAsset ? { senderAvatarAsset } : {}),
         durationMs: String(input.durationSeconds * 1000),
@@ -427,13 +468,16 @@ export async function sendRingNudge(input: SendRingNudgeInput) {
     ringNudgePushTtlMs
   );
 
-  return nudgeResult(
-    eventId,
-    recipientUserIds.length,
-    input.recipientDevices.length,
-    pushResult.successCount,
-    pushResult.failureCount
-  );
+  return {
+    ...nudgeResult(
+      eventId,
+      recipientUserIds.length,
+      recipientDevices.length,
+      pushResult.successCount,
+      pushResult.failureCount
+    ),
+    recipientUserIds
+  };
 }
 
 // ===================================================================
@@ -525,7 +569,7 @@ async function writeNudgeNotificationEvent(input: {
   eventId: string;
   senderUserId: string;
   eventType: "ring_nudge" | "voice_nudge";
-  targetScope: "single_friend" | "all_friends";
+  targetScope: "single_friend" | "all_friends" | "selected_friends";
   targetUserId?: string;
   targetUserIds: string[];
   createdAt: number;
@@ -623,4 +667,8 @@ function isHttpErrorCode(error: unknown, code: number): boolean {
     Number((error as { code?: unknown }).code) === code ||
     Number((error as { status?: unknown }).status) === code
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
