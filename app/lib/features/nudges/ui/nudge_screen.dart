@@ -948,6 +948,11 @@ class _QuickNudgeSheetState extends State<_QuickNudgeSheet> {
       return;
     }
 
+    // Cancel sender 10-min expiry on any terminal reply (accept/decline/snooze).
+    unawaited(
+      AndroidVoiceNudgeBridge.shared.cancelSenderNudgeExpiry(response.eventId),
+    );
+
     if (response.isAccept) {
       NudgeStatusMemory.instance.clear(widget.group.groupId);
       if (mounted) {
