@@ -1047,6 +1047,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   /// Sender-side: decline/snooze (and accept) replies update profile signifiers
   /// even when the nudge sheet is closed.
   void _onSenderNudgeResponse(NudgeRecipientResponse response) {
+    // Defense in depth: native FCM handling also cancels, but do not leave the
+    // 10-min sender expiry armed after any terminal reply (accept/decline/snooze).
+    unawaited(
+      _nudgeActionBridge.cancelSenderNudgeExpiry(response.eventId),
+    );
     if (response.isAccept) {
       NudgeStatusMemory.instance.clear(response.groupId);
       if (mounted && _selectedGroup?.groupId == response.groupId) {
@@ -1327,22 +1332,30 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   Future<void> _declineIncomingNudge(ActiveNudge nudge) async {
     if (_incomingPromptBusy) return;
     setState(() => _incomingPromptBusy = true);
-    final pending = _nudgeInbox.activeInGroup(nudge.groupId);
-    for (final event in pending) {
-      _processedNudgeEventIds.add(event.nudgeId);
+    // Decline only this event plus any rings that share its shade notification.
+    // Do not fan out to every active nudge in the group (that incorrectly
+    // declined unrelated voice nudges / other batches when one was declined).
+    final batchIds = await _nudgeActionBridge.eventIdsSharingNotification(
+      nudge.nudgeId,
+    );
+    final ids = batchIds.isEmpty ? <String>[nudge.nudgeId] : batchIds;
+    for (final eventId in ids) {
+      _processedNudgeEventIds.add(eventId);
       unawaited(
         _nudgeRepository.respond(
-          groupId: event.groupId,
-          eventId: event.nudgeId,
+          groupId: nudge.groupId,
+          eventId: eventId,
           action: 'decline',
         ),
       );
-      unawaited(_nudgeActionBridge.dismissIncomingNudge(event.nudgeId));
+      await _nudgeInbox.mark(
+        nudgeId: eventId,
+        status: ActiveNudgeStatus.declined,
+      );
     }
-    await _nudgeInbox.markAllInGroup(
-      groupId: nudge.groupId,
-      status: ActiveNudgeStatus.declined,
-    );
+    // One dismiss cancels the shared ring-batch notification (or the single
+    // voice slab) and clears native batch state.
+    unawaited(_nudgeActionBridge.dismissIncomingNudge(nudge.nudgeId));
     if (!mounted) return;
     setState(() => _incomingPromptBusy = false);
     await _presentIncomingNudgePrompt();

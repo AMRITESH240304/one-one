@@ -238,6 +238,28 @@ class AndroidVoiceNudgeBridge {
     }
   }
 
+  /// Event IDs that share the same shade notification as [eventId].
+  ///
+  /// Rings batched within a 10-minute window return every member; voice and
+  /// unpaired events return `[eventId]` alone.
+  Future<List<String>> eventIdsSharingNotification(String eventId) async {
+    if (!Platform.isAndroid || eventId.isEmpty) return [eventId];
+    try {
+      final raw = await _channel.invokeMethod<List<dynamic>>(
+        'eventIdsSharingNotification',
+        eventId,
+      );
+      final ids = raw
+          ?.map((value) => value?.toString().trim() ?? '')
+          .where((value) => value.isNotEmpty)
+          .toList(growable: false);
+      if (ids == null || ids.isEmpty) return [eventId];
+      return ids;
+    } catch (_) {
+      return [eventId];
+    }
+  }
+
   /// Shows a "you are online" shade notification on the sender's device after
   /// a background auto-connect completes (the app never came to the foreground).
   Future<void> showYouAreOnlineNotification({
@@ -256,9 +278,9 @@ class AndroidVoiceNudgeBridge {
   }
 
   /// B5: Schedule a 10-minute expiry alarm on the sender's device after a
-  /// nudge is successfully dispatched.  The native MessagingService
-  /// automatically cancels it when a delivery result or accept response
-  /// arrives; this just starts the countdown.
+  /// nudge is successfully dispatched. Cancelled on accept / decline / snooze
+  /// (native FCM response and Flutter defense-in-depth). Delivery ("played")
+  /// does not clear the accept window.
   Future<void> scheduleSenderNudgeExpiry({
     required String eventId,
     required String recipientName,
