@@ -132,22 +132,21 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
   bool _loadingGroups = true;
   bool _busy = false;
+
   /// Sync lock so concurrent auto-connect paths (FCM accept + native pending
   /// action) cannot both run [goOnline] and flash live→connecting→live.
   bool _goOnlineInFlight = false;
   bool _audioOutputBusy = false;
-  bool _audioMuteBusy = false;
   bool _microphoneMutedByUser = false;
   final CallAudioRouteController _callAudio = CallAudioRouteController();
   AudioOutputRoute get _audioRoute => _callAudio.displayRoute;
   bool get _audioMuted => _callAudio.muted;
   StreamSubscription<AudioOutputState>? _audioOutputSubscription;
   StreamSubscription<List<MediaDevice>>? _hardwareAudioDeviceSubscription;
-  bool _talkBusy = false;
-  bool _talkPressed = false;
   // Per-user connection style for the *local* user's own connection — never
-  // a group-wide mode. Defaults to walkie-talkie; see _toggleConnectionMode
-  // and the startInCallMode logic in _goOnline for how it changes.
+  // a group-wide mode. Defaults to walkie-talkie (mic off). Tapping the main
+  // button latches call mode (mic on, overlapping with peers); tapping again
+  // mutes and returns to walkie-talkie. See _toggleConnectionMode.
   String _connectionMode = MemberAvailability.walkieTalkieMode;
   bool _connectionModeBusy = false;
   // Caps continuous call mode at PresenceConfig.callModeTimeout; cancelled
@@ -177,6 +176,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   StreamSubscription<void>? _processTeardownSubscription;
   late final PeerReconnectCoordinator _peerReconnect;
   bool _inPictureInPicture = false;
+
   /// True when another route (settings, group action, etc.) covers home.
   bool _routeCovered = false;
   String? _preferredGroupId;
@@ -519,14 +519,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     if (_onlineSession == null) return;
     switch (action) {
       case VoicePipAction.toggleMicrophone:
-        // Call mode's mic is always on by design — the PiP quick-action is
-        // only meaningful for the walkie-talkie push-to-talk lock.
-        if (_isCallMode) return;
-        if (_talkSession == null) {
-          await _startTalking();
-        } else {
-          await _stopTalking(reason: 'pip_toggle');
-        }
+        await _toggleConnectionMode();
         return;
     }
   }
@@ -545,7 +538,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     unawaited(
       _voicePipBridge.setSessionState(
         active: _onlineSession != null,
-        isTalking: _talkSession != null || _isCallMode,
+        isTalking: _isTransmitting,
         session: _onlineSession,
       ),
     );
@@ -769,7 +762,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     setState(() {
       _onlineSession = null;
       _talkSession = null;
-      _talkPressed = false;
       _speakingUserIds = const {};
       _state = 'away';
       _connectionMode = MemberAvailability.walkieTalkieMode;
@@ -1049,9 +1041,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
   void _onSenderNudgeResponse(NudgeRecipientResponse response) {
     // Defense in depth: native FCM handling also cancels, but do not leave the
     // 10-min sender expiry armed after any terminal reply (accept/decline/snooze).
-    unawaited(
-      _nudgeActionBridge.cancelSenderNudgeExpiry(response.eventId),
-    );
+    unawaited(_nudgeActionBridge.cancelSenderNudgeExpiry(response.eventId));
     if (response.isAccept) {
       NudgeStatusMemory.instance.clear(response.groupId);
       if (mounted && _selectedGroup?.groupId == response.groupId) {
@@ -1573,9 +1563,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             // Deterministic order: createdAt, then messageId (not arrival order).
             messages.sort((a, b) {
               final byTime = a.createdAt.compareTo(b.createdAt);
-              return byTime != 0
-                  ? byTime
-                  : a.messageId.compareTo(b.messageId);
+              return byTime != 0 ? byTime : a.messageId.compareTo(b.messageId);
             });
             final window = messages.length > ChatMessageRepository.visibleLimit
                 ? messages.sublist(
@@ -2387,19 +2375,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       return;
     }
 
-    // If peers are already connected to each other in call mode, join
-    // directly into call mode with them rather than defaulting to
-    // walkie-talkie — this is only ever the starting point, though: the
-    // user can still tap the call-mode button to switch back at any time.
-    final startInCallMode = _availability.entries.any(
-      (entry) =>
-          entry.key != _session.userId &&
-          entry.value.isLive &&
-          entry.value.isCallMode,
-    );
-    final startingConnectionMode = startInCallMode
-        ? MemberAvailability.callMode
-        : MemberAvailability.walkieTalkieMode;
+    // Each participant latches their own mic independently via the main
+    // button — joining a live room always starts muted (walkie-talkie).
+    const startingConnectionMode = MemberAvailability.walkieTalkieMode;
 
     OnlineSession? createdSession;
     // E1: live sessions always warm/connect on speaker regardless of settings.
@@ -2419,9 +2397,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       );
       unawaited(ActiveOnlineSessionStore.save(createdSession));
       await _connectLiveKit(createdSession, preparedRoom: preparedRoom);
-      if (startInCallMode) {
-        await _setMicrophoneEnabled(true);
-      }
       await _onlineRepository.markLive(createdSession);
       _heartbeatTimer?.cancel();
       _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -2430,7 +2405,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           unawaited(
             _onlineRepository.heartbeat(
               activeSession,
-              isTalking: _talkSession != null,
+              isTalking: _isTransmitting,
             ),
           );
         }
@@ -2449,18 +2424,13 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _listenToEmojiBursts(group.groupId);
       _syncPipSessionState();
       unawaited(TalkFeedback.joined());
-      if (startInCallMode) {
-        _scheduleCallModeTimeout();
-      } else {
-        _cancelCallModeTimeout();
-      }
+      _cancelCallModeTimeout();
       _scheduleInactivityCheck();
       _startUsageTracking();
       unawaited(
         AnalyticsService.logGoOnline(
           groupId: group.groupId,
           connectionMode: startingConnectionMode,
-          joinedCallMode: startInCallMode,
         ),
       );
       unawaited(
@@ -2601,141 +2571,66 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         reason == 'network_loss';
   }
 
+  /// Latches the local mic on (call mode). Peers can latch independently so
+  /// voices overlap; there is no exclusive talk lock.
   Future<void> _startTalking() async {
-    final session = _onlineSession;
-    if (session == null ||
-        !_isViewingActiveGroup ||
-        _talkSession != null ||
-        _talkBusy) {
-      return;
-    }
+    if (_isCallMode) return;
+    await _toggleConnectionMode();
+  }
 
-    _talkPressed = true;
-    setState(() {
-      _talkBusy = true;
-      _message = null;
-    });
-
-    TalkSession? startedTalk;
-    try {
-      startedTalk = await _talkRepository.startTalk(session);
-      if (!_talkPressed) {
-        await _talkRepository.stopTalk(startedTalk, reason: 'released_early');
-        await _setMicrophoneEnabled(false);
-        if (!mounted) return;
-        setState(() {
-          _talkSession = null;
-          _state = 'live';
-        });
-        return;
-      }
-
-      await _setMicrophoneEnabled(true);
-      unawaited(
-        TalkFeedback.talkStarted(
-          hapticsEnabled: _session.settings.hapticsEnabled,
-        ),
-      );
-      if (!mounted) return;
-
-      if (!_talkPressed) {
-        await _setMicrophoneEnabled(false);
-        await _talkRepository.stopTalk(startedTalk, reason: 'released_early');
-        setState(() {
-          _talkSession = null;
-          _state = 'live';
-        });
-        return;
-      }
-
+  /// Mutes the local mic. Releases any leftover exclusive talk lock, then
+  /// exits call mode so the 15-minute cap is cancelled.
+  Future<void> _stopTalking({String reason = 'released'}) async {
+    final talkSession = _talkSession;
+    if (talkSession != null) {
       setState(() {
-        _talkSession = startedTalk;
-        _state = 'talking';
-        _message = LiveKitStatus.talking;
+        _talkSession = null;
+        if (!_isCallMode) {
+          _state = 'live';
+          _message = LiveKitStatus.live;
+        }
       });
       _syncPipSessionState();
       _recordVoiceActivity();
-      unawaited(AnalyticsService.logTalkStart(groupId: session.groupId));
-    } catch (error, stack) {
-      unawaited(
-        CrashlyticsService.recordError(
-          error,
-          stack,
-          reason: 'talk_start_mic_failed',
-          feature: 'talk',
-        ),
-      );
-      if (startedTalk != null) {
-        await _talkRepository.stopTalk(startedTalk, reason: 'mic_failed');
+
+      Object? stopError;
+      try {
+        if (!_isCallMode) {
+          await _setMicrophoneEnabled(false);
+          if (mounted) _updatePipOverlay();
+        }
+      } catch (error) {
+        stopError = error;
       }
-      if (!mounted) return;
-      setState(() {
-        _talkSession = null;
-        _state = _onlineSession == null ? 'away' : 'live';
-        _message = LiveKitStatus.sanitizeError(error);
-      });
-      _syncPipSessionState();
-    } finally {
-      if (mounted) {
-        setState(() => _talkBusy = false);
+
+      try {
+        await _talkRepository.stopTalk(talkSession, reason: reason);
+        unawaited(
+          AnalyticsService.logTalkStop(
+            groupId: talkSession.groupId,
+            reason: reason,
+          ),
+        );
+      } catch (error) {
+        stopError ??= error;
       }
+
+      if (stopError != null && mounted) {
+        setState(() => _message = 'Couldn’t stop talking. Try again.');
+      }
+    }
+
+    if (_isCallMode && reason != 'connection_mode_changed') {
+      await _toggleConnectionMode();
     }
   }
 
-  Future<void> _stopTalking({String reason = 'released'}) async {
-    _talkPressed = false;
-    final talkSession = _talkSession;
-    if (talkSession == null) return;
-
-    setState(() {
-      _talkSession = null;
-      _state = 'live';
-      _message = LiveKitStatus.live;
-    });
-    _syncPipSessionState();
-
-    _recordVoiceActivity();
-
-    Object? stopError;
-    try {
-      await _setMicrophoneEnabled(false);
-      if (mounted) _updatePipOverlay();
-    } catch (error) {
-      stopError = error;
-    }
-
-    try {
-      unawaited(
-        TalkFeedback.talkStopped(
-          hapticsEnabled: _session.settings.hapticsEnabled,
-        ),
-      );
-      await _talkRepository.stopTalk(talkSession, reason: reason);
-      unawaited(
-        AnalyticsService.logTalkStop(
-          groupId: talkSession.groupId,
-          reason: reason,
-        ),
-      );
-    } catch (error) {
-      stopError ??= error;
-    }
-
-    if (stopError != null) {
-      if (!mounted) return;
-      setState(() => _message = 'Couldn’t stop talking. Try again.');
-    }
-  }
-
-  /// Toggles the local user's own connection between walkie-talkie
-  /// (push-to-talk) and call (always-on mic). Purely per-user: it never
-  /// touches anyone else's connection or availability.
+  /// Toggles the local user's own connection between walkie-talkie (mic off)
+  /// and call (latched-on mic, overlapping with anyone else who has also
+  /// tapped). Purely per-user: it never touches anyone else's connection.
   Future<void> _toggleConnectionMode() async {
     final session = _onlineSession;
-    if (session == null ||
-        _connectionModeBusy ||
-        !_isViewingActiveGroup ||
-        _busy) {
+    if (session == null || _connectionModeBusy || _busy) {
       return;
     }
 
@@ -2761,14 +2656,33 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       if (!mounted) return;
       setState(() {
         _connectionMode = nextMode;
-        _microphoneMutedByUser = false;
+        _microphoneMutedByUser = !switchingToCallMode;
+        _state = switchingToCallMode ? 'talking' : 'live';
+        _message = switchingToCallMode
+            ? LiveKitStatus.talking
+            : LiveKitStatus.live;
       });
       if (switchingToCallMode) {
         _scheduleCallModeTimeout();
+        unawaited(
+          TalkFeedback.talkStarted(
+            hapticsEnabled: _session.settings.hapticsEnabled,
+          ),
+        );
       } else {
         _cancelCallModeTimeout();
+        unawaited(
+          TalkFeedback.talkStopped(
+            hapticsEnabled: _session.settings.hapticsEnabled,
+          ),
+        );
       }
+      _recordVoiceActivity();
       _syncPipSessionState();
+      if (mounted) _updatePipOverlay();
+      unawaited(
+        _onlineRepository.heartbeat(session, isTalking: switchingToCallMode),
+      );
       // A mode change (call ↔ walkie-talkie) is a LiveKit state signal; give
       // the solo-participant countdown a fresh start off the latest state.
       _soloGuard?.refreshCountdown();
@@ -2778,6 +2692,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
           mode: nextMode,
         ),
       );
+      if (switchingToCallMode) {
+        unawaited(AnalyticsService.logTalkStart(groupId: session.groupId));
+      } else {
+        unawaited(
+          AnalyticsService.logTalkStop(
+            groupId: session.groupId,
+            reason: 'connection_mode_changed',
+          ),
+        );
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _message = 'Couldn\u2019t switch connection mode.');
@@ -2820,9 +2744,16 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         connectionMode: MemberAvailability.walkieTalkieMode,
       );
       if (!mounted) return;
-      setState(() => _connectionMode = MemberAvailability.walkieTalkieMode);
+      setState(() {
+        _connectionMode = MemberAvailability.walkieTalkieMode;
+        _microphoneMutedByUser = true;
+        _state = 'live';
+        _message = LiveKitStatus.live;
+      });
       _cancelCallModeTimeout();
       _syncPipSessionState();
+      if (mounted) _updatePipOverlay();
+      unawaited(_onlineRepository.heartbeat(session, isTalking: false));
       // Auto-exiting call mode flips the mic off (a LiveKit state signal).
       // Re-base the solo-participant countdown for any remaining participant.
       _soloGuard?.refreshCountdown();
@@ -2869,7 +2800,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               ],
             ),
             action: SnackBarAction(
-              label: 'Call mode',
+              label: 'Talk',
               textColor: const Color(0xfffff1a8),
               onPressed: () {
                 if (!_isCallMode) unawaited(_toggleConnectionMode());
@@ -3114,42 +3045,10 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     await _toggleMicrophone();
   }
 
-  /// Toggles the actual LiveKit microphone. Walkie mode reuses the existing
-  /// talk lock; call mode mutes/unmutes the published microphone track.
+  /// Toggles the actual LiveKit microphone by latching or releasing call
+  /// mode. Each participant controls only their own mic; peers keep speaking.
   Future<void> _toggleMicrophone() async {
-    if (_audioMuteBusy) return;
-    if (!_isCallMode) {
-      if (_talkSession != null || _microphoneEnabled) {
-        await _stopTalking(reason: 'microphone_toggle');
-      } else {
-        await _startTalking();
-      }
-      return;
-    }
-
-    _audioMuteBusy = true;
-    final enable = !_microphoneEnabled;
-    try {
-      await _setMicrophoneEnabled(enable);
-      if (!mounted) return;
-      _microphoneMutedByUser = !enable;
-      setState(() {});
-      _updatePipOverlay();
-      _showPresenceSnackbar(enable ? 'Microphone on' : 'Microphone muted');
-    } catch (error, stack) {
-      unawaited(
-        CrashlyticsService.recordError(
-          error,
-          stack,
-          reason: 'microphone_toggle_failed',
-        ),
-      );
-      if (!mounted) return;
-      setState(() {});
-      _showPresenceSnackbar(LiveKitStatus.sanitizeError(error));
-    } finally {
-      _audioMuteBusy = false;
-    }
+    await _toggleConnectionMode();
   }
 
   void _handleAudioOutputState(AudioOutputState next) {
@@ -3389,7 +3288,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
             if (hasRemoteSpeaker || speaking.contains(_session.userId)) {
               _recordVoiceActivity();
             }
-            if (newlySpeakingRemote && _talkSession != null) {
+            if (newlySpeakingRemote && _isTransmitting) {
               unawaited(_handleRemoteSpeakerStarted());
             }
             // E1: never reassert speaker/earpiece from active-speaker events —
@@ -3399,7 +3298,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
               final remoteSpeaking = speaking.any(
                 (id) => id != _session.userId,
               );
-              if (remoteSpeaking && _talkSession == null) {
+              if (remoteSpeaking && !_isTransmitting) {
                 _message = LiveKitStatus.receivingVoice;
               } else if (_message == LiveKitStatus.receivingVoice) {
                 _message = LiveKitStatus.live;
@@ -3459,8 +3358,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     }
 
     // Restore the microphone to match the current session state.
-    // In call mode the mic should be on; in walkie-talkie, it stays off
-    // until the user presses talk.
+    // Call mode (latched mic) stays on unless the user muted; walkie-talkie
+    // stays off until they tap the main button again.
     final shouldBeEnabled =
         (_isCallMode && !_microphoneMutedByUser) || _talkSession != null;
     try {
@@ -3475,7 +3374,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         '[LiveKit] Post-reconnect microphone restored: '
         'enabled=$shouldBeEnabled '
         'mode=${_isCallMode ? "call" : "walkie"} '
-        'talking=${_talkSession != null}',
+        'talking=$_isTransmitting',
       );
     } catch (error) {
       debugPrint(
@@ -3514,7 +3413,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       setState(() {
         _onlineSession = null;
         _talkSession = null;
-        _talkPressed = false;
         _speakingUserIds = const {};
         _state = 'away';
         _connectionMode = MemberAvailability.walkieTalkieMode;
@@ -3841,8 +3739,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         onlineUserIds: onlineUserIds,
         // LiveKit holds the hardware mic while unmuted / PTT — voice nudge
         // recording cannot share it. Caller must mute first.
-        isLiveMicrophoneInUse: () =>
-            _isOnline && (_microphoneEnabled || _talkSession != null),
+        isLiveMicrophoneInUse: () => _isOnline && _isTransmitting,
       ),
     );
   }
@@ -3976,6 +3873,11 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
       _onlineSession?.groupId == _selectedGroup?.groupId;
   bool get _isCallMode => _connectionMode == MemberAvailability.callMode;
 
+  /// True while this device is sending audio — latched call-mode mic or a
+  /// leftover exclusive talk lock.
+  bool get _isTransmitting =>
+      _talkSession != null || (_isCallMode && !_microphoneMutedByUser);
+
   bool get _serviceReady =>
       groupHasServicePeer(members: _members, currentUserId: _session.userId);
 
@@ -4096,8 +3998,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
         member: member,
         speaking:
             _speakingUserIds.contains(member.userId) ||
-            (_talkSession != null && member.userId == _session.userId),
-        talking: _talkSession != null,
+            (_isTransmitting && member.userId == _session.userId),
+        talking: _isTransmitting,
         accent: accent,
       );
     }
@@ -4116,8 +4018,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
 
     // Tri-state for the focused group's control cluster: whether nobody, some,
     // or everybody (self included) is currently online. Drives whether the
-    // main button becomes a nudge trigger, whether the nudge bell shows, and
-    // whether the call-mode controls render at all.
+    // main button becomes a nudge trigger and whether the nudge bell shows.
     final friends = _friends;
     final anyFriendOnline = friends.any(
       (friend) =>
@@ -4136,8 +4037,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
     final showGoLive = !_isOnline && anyFriendOnline;
     final liveAvailability = <String, MemberAvailability>{
       for (final friend in friends)
-        friend.userId: (_availability[friend.userId] ?? MemberAvailability.away)
-                .isLive
+        friend.userId:
+            (_availability[friend.userId] ?? MemberAvailability.away).isLive
             ? MemberAvailability(
                 desiredState: 'online',
                 effectiveState: _speakingUserIds.contains(friend.userId)
@@ -4236,8 +4137,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                     ),
                   ),
                 ],
-                if (_message != null &&
-                    !(_isOnline && viewingActiveGroup)) ...[
+                if (_message != null && !(_isOnline && viewingActiveGroup)) ...[
                   SizedBox(height: 10.h),
                   Padding(
                     padding: EdgeInsets.symmetric(horizontal: 24.w),
@@ -4285,9 +4185,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                 ),
                 // Status hint: collapsed when keyboard is open so the
                 // message feed gets more space above the keyboard.
-                if (!(_isOnline &&
-                    viewingActiveGroup &&
-                    !_isSessionConnecting))
+                if (!(_isOnline && viewingActiveGroup && !_isSessionConnecting))
                   AnimatedOpacity(
                     duration: const Duration(milliseconds: 180),
                     opacity: keyboardOpen ? 0.0 : 1.0,
@@ -4304,10 +4202,8 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                                     ? LiveKitStatus.reconnecting
                                     : LiveKitStatus.connecting)
                               : viewingActiveGroup
-                              ? (_isCallMode
-                                    ? (_microphoneEnabled
-                                          ? 'In a call — mic on'
-                                          : 'In a call — mic muted')
+                              ? (_isTransmitting
+                                    ? 'Mic on — tap to mute'
                                     : 'Tap to Talk')
                               : _isOnline
                               ? 'connected to ${activeGroup?.name ?? 'another group'} • tap to nudge this group'
@@ -4331,7 +4227,7 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                   ),
                 // Keep nudge secondary on the right while peers are live.
                 // With nobody live it remains inside the main button.
-                if ((live && (groupMixed || anyMemberOnline)) || showGoLive)
+                if ((live && groupMixed) || showGoLive)
                   Align(
                     alignment: Alignment.centerRight,
                     child: Padding(
@@ -4340,11 +4236,6 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                       child: _EdgeQuickActions(
                         showNudge: groupMixed || showGoLive,
                         onNudge: _busy ? null : _openNudges,
-                        showModeToggle: live && anyMemberOnline,
-                        modeToggleEnabled:
-                            viewingActiveGroup && !_connectionModeBusy,
-                        callModeActive: _isCallMode,
-                        onToggleMode: _toggleConnectionMode,
                       ),
                     ),
                   ),
@@ -4368,14 +4259,9 @@ class _IdentityHomeScreenState extends State<IdentityHomeScreen>
                           talkEnabled:
                               viewingActiveGroup &&
                               !_busy &&
-                              !_isCallMode &&
                               !_isSessionConnecting,
-                          talkActive:
-                              _talkSession != null ||
-                              (_isCallMode &&
-                                  _speakingUserIds.contains(_session.userId)),
-                          talkBusy: _talkBusy,
-                          callMode: _isCallMode,
+                          talkActive: _isTransmitting,
+                          talkBusy: _connectionModeBusy,
                           accent: accent,
                           nudgeGroupId:
                               (groupAllOffline ||
@@ -5381,133 +5267,32 @@ class _AddFriendChip extends StatelessWidget {
   }
 }
 
-/// Vertical edge actions on the right of the main button row: 👋 nudge on
-/// top (when the group is mixed), and the alternate connection-mode icon
-/// below (shown whenever someone is online). No circular chrome — just the
-/// glyph — with a subtle shake to telegraph "tap me".
-///
-/// Mode icon semantics: in walkie-talkie mode the edge shows a call icon
-/// (tap → call mode); in call mode it shows the walkie asset (tap → walkie).
+/// Vertical edge action on the right of the main button row: 👋 nudge
+/// (when the group is mixed). No circular chrome — just the glyph.
 class _EdgeQuickActions extends StatelessWidget {
-  const _EdgeQuickActions({
-    required this.showNudge,
-    required this.onNudge,
-    required this.showModeToggle,
-    required this.modeToggleEnabled,
-    required this.callModeActive,
-    required this.onToggleMode,
-  });
+  const _EdgeQuickActions({required this.showNudge, required this.onNudge});
 
   final bool showNudge;
   final VoidCallback? onNudge;
-  final bool showModeToggle;
-  final bool modeToggleEnabled;
-  final bool callModeActive;
-  final VoidCallback onToggleMode;
 
-  /// Shared column width so 👋 and the mode glyph share one right-edge axis.
+  /// Shared column width so the nudge glyph stays on the right-edge axis.
   static double get _columnWidth => 48.w;
 
   @override
   Widget build(BuildContext context) {
-    if (!showNudge && !showModeToggle) return const SizedBox.shrink();
+    if (!showNudge) return const SizedBox.shrink();
     return SizedBox(
       width: _columnWidth,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          if (showNudge)
-            Semantics(
-              button: true,
-              label: 'Nudge the group',
-              child: Tooltip(
-                message: 'Send a nudge',
-                child: _EdgeActionHit(
-                  onTap: onNudge,
-                  enabled: onNudge != null,
-                  shake: false,
-                  hitSize: _columnWidth,
-                  child: Text('👋', style: TextStyle(fontSize: 28.sp)),
-                ),
-              ),
-            ),
-          if (showNudge && showModeToggle) SizedBox(height: 10.h),
-          if (showModeToggle)
-            Semantics(
-              button: true,
-              label: callModeActive
-                  ? 'Switch to walkie-talkie mode'
-                  : 'Switch to call mode',
-              child: Tooltip(
-                message: callModeActive
-                    ? 'Switch to walkie-talkie'
-                    : 'Switch to call mode',
-                child: _EdgeActionHit(
-                  onTap: modeToggleEnabled ? onToggleMode : null,
-                  enabled: modeToggleEnabled,
-                  shake: modeToggleEnabled,
-                  hitSize: _columnWidth,
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 240),
-                    transitionBuilder: (child, animation) => ScaleTransition(
-                      scale: animation,
-                      child: FadeTransition(opacity: animation, child: child),
-                    ),
-                    child: callModeActive
-                        ? _WalkieEdgeIcon(
-                            key: const ValueKey('edge-walkie'),
-                            size: _columnWidth * 0.78,
-                          )
-                        : Icon(
-                            Icons.call_rounded,
-                            key: const ValueKey('edge-call'),
-                            color: Colors.white,
-                            size: 26.sp,
-                          ),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Walkie PNG has large transparent padding, so a plain `Image.asset` +
-/// `BoxFit.contain` leaves the device art looking tiny and inset from the
-/// edge. Zoom to the painted body and center it in [size] for the edge stack.
-class _WalkieEdgeIcon extends StatelessWidget {
-  const _WalkieEdgeIcon({super.key, required this.size});
-
-  final double size;
-
-  // Source is 2079×1135 with content roughly at x 743–1337 / y 88–1047.
-  // Scale is tuned so the body reads clearly without dominating the edge.
-  static const double _contentZoom = 2.35;
-
-  @override
-  Widget build(BuildContext context) {
-    // Inset from the hit slot so scale-up doesn't clip top/bottom.
-    final paintSize = size * 0.82;
-    return SizedBox(
-      width: size,
-      height: size,
-      child: Center(
-        child: SizedBox(
-          width: paintSize,
-          height: paintSize,
-          child: ClipRect(
-            child: Transform.scale(
-              scale: _contentZoom,
-              alignment: Alignment.center,
-              child: Image.asset(
-                'assets/walkie.png',
-                fit: BoxFit.contain,
-                filterQuality: FilterQuality.medium,
-              ),
-            ),
+      child: Semantics(
+        button: true,
+        label: 'Nudge the group',
+        child: Tooltip(
+          message: 'Send a nudge',
+          child: _EdgeActionHit(
+            onTap: onNudge,
+            enabled: onNudge != null,
+            hitSize: _columnWidth,
+            child: Text('👋', style: TextStyle(fontSize: 28.sp)),
           ),
         ),
       ),
@@ -5515,20 +5300,17 @@ class _WalkieEdgeIcon extends StatelessWidget {
   }
 }
 
-/// Comfortable hit target around a bare glyph. Optional soft shake while
-/// [enabled] so mode-toggle reads as tappable (nudge keeps still).
+/// Comfortable hit target around a bare glyph.
 class _EdgeActionHit extends StatelessWidget {
   const _EdgeActionHit({
     required this.onTap,
     required this.enabled,
     required this.child,
-    this.shake = false,
     this.hitSize,
   });
 
   final VoidCallback? onTap;
   final bool enabled;
-  final bool shake;
   final double? hitSize;
   final Widget child;
 
@@ -5542,82 +5324,9 @@ class _EdgeActionHit extends StatelessWidget {
         width: size,
         height: size,
         child: Center(
-          child: Opacity(
-            opacity: enabled ? 1 : 0.4,
-            child: shake && enabled
-                ? _SoftShake(active: true, child: child)
-                : child,
-          ),
+          child: Opacity(opacity: enabled ? 1 : 0.4, child: child),
         ),
       ),
-    );
-  }
-}
-
-/// Subtle left/right wobble that loops while [active] is true — used on the
-/// edge nudge and mode-toggle glyphs to signal they can be tapped.
-class _SoftShake extends StatefulWidget {
-  const _SoftShake({required this.active, required this.child});
-
-  final bool active;
-  final Widget child;
-
-  @override
-  State<_SoftShake> createState() => _SoftShakeState();
-}
-
-class _SoftShakeState extends State<_SoftShake>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1400),
-  );
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.active) _controller.repeat();
-  }
-
-  @override
-  void didUpdateWidget(covariant _SoftShake oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.active && !_controller.isAnimating) {
-      _controller.repeat();
-    } else if (!widget.active && _controller.isAnimating) {
-      _controller
-        ..stop()
-        ..value = 0;
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!widget.active) return widget.child;
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) {
-        // Two soft half-wobbles per loop, then a rest — feels playful without
-        // reading as an alert.
-        final t = _controller.value;
-        final wave = t < 0.45
-            ? sin(t / 0.45 * pi * 2) * (1 - t / 0.45)
-            : 0.0;
-        return Transform.rotate(
-          angle: wave * 0.12,
-          child: Transform.translate(
-            offset: Offset(wave * 2.2, 0),
-            child: child,
-          ),
-        );
-      },
-      child: widget.child,
     );
   }
 }
@@ -5631,7 +5340,6 @@ class _ExperienceCarousel extends StatefulWidget {
     required this.talkEnabled,
     required this.talkActive,
     required this.talkBusy,
-    required this.callMode,
     required this.accent,
     required this.nudgeGroupId,
     required this.goLiveGroupId,
@@ -5653,10 +5361,6 @@ class _ExperienceCarousel extends StatefulWidget {
   final bool talkEnabled;
   final bool talkActive;
   final bool talkBusy;
-
-  /// Local conversation mode: true = always-on call, false = walkie-talkie
-  /// (push-to-talk). Drives which glyph the main connected circle shows.
-  final bool callMode;
   final Color accent;
 
   /// Group id of the focused card when the whole group (self included) is
@@ -5813,7 +5517,6 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
           widget.nudgeGroupId == null,
       talkActive: widget.talkActive && actuallySelected,
       talkBusy: widget.talkBusy,
-      callMode: widget.callMode,
       accent: widget.accent,
       // Offline/default icon whenever this focused card is not in a live
       // session and not mid-connect — never leave the circle with no glyph.
@@ -5854,11 +5557,7 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
                 ..rotateY(rotationY),
               child: Transform.scale(
                 scale: scale,
-                child:
-                    focused &&
-                        connectedToThisGroup &&
-                        !widget.callMode &&
-                        !widget.connecting
+                child: focused && connectedToThisGroup && !widget.connecting
                     ? Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -6034,7 +5733,6 @@ class _MainAvatarCircle extends StatelessWidget {
     required this.joinEnabled,
     required this.talkActive,
     required this.talkBusy,
-    required this.callMode,
     required this.accent,
     required this.nudgeMode,
     required this.goLiveMode,
@@ -6052,10 +5750,6 @@ class _MainAvatarCircle extends StatelessWidget {
   final bool joinEnabled;
   final bool talkActive;
   final bool talkBusy;
-
-  /// True when the local user is in always-on call mode; false = walkie
-  /// (push-to-talk). Controls which overlay glyph renders while connected.
-  final bool callMode;
   final Color accent;
 
   /// True when this focused card should open the nudge sheet (👋) instead of
@@ -6162,10 +5856,8 @@ class _MainAvatarCircle extends StatelessWidget {
     final plateSize = size * 0.96;
     final glyphSize = size * 0.88;
     if (connecting || connected) {
-      // ~2–3 logical px shrink while PTT is held for a pressed feel.
-      final transmitInset = talkActive && !callMode && !connecting
-          ? 2.5.w
-          : 0.0;
+      // ~2–3 logical px shrink while transmitting for a pressed feel.
+      final transmitInset = talkActive && !connecting ? 2.5.w : 0.0;
       circle = SizedBox(
         width: size,
         height: size,
@@ -6215,15 +5907,6 @@ class _MainAvatarCircle extends StatelessWidget {
                         ? _MainButtonDotsLoader(
                             key: const ValueKey('main-connecting'),
                             size: glyphSize * 0.52,
-                          )
-                        : callMode
-                        ? Icon(
-                            Icons.call_rounded,
-                            key: const ValueKey('main-call'),
-                            color: talkActive
-                                ? const Color(0xffffd54f)
-                                : Colors.white,
-                            size: glyphSize * 0.42,
                           )
                         : AnimatedScale(
                             key: const ValueKey('main-walkie'),

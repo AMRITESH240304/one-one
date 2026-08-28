@@ -161,8 +161,8 @@ class OnlineRepository {
     });
   }
 
-  /// Switches a member's own connection between walkie-talkie (push-to-talk)
-  /// and call (always-on mic). This is a per-user setting, not a group-wide
+  /// Switches a member's own connection between walkie-talkie (mic off)
+  /// and call (latched-on mic). This is a per-user setting, not a group-wide
   /// mode: it only ever writes the caller's own availability entry.
   Future<void> setConnectionMode(
     OnlineSession session, {
@@ -245,7 +245,8 @@ class OnlineRepository {
         groupId: session.groupId,
         userId: session.userId,
         serviceSessionId: session.serviceSessionId,
-        extra: 'activeSuffix=${activeId == null || activeId.isEmpty ? "none" : (activeId.length <= 6 ? activeId : activeId.substring(activeId.length - 6))}',
+        extra:
+            'activeSuffix=${activeId == null || activeId.isEmpty ? "none" : (activeId.length <= 6 ? activeId : activeId.substring(activeId.length - 6))}',
       );
       return;
     }
@@ -299,10 +300,7 @@ class OnlineRepository {
         }
         if (livekitId != null && livekitId.isNotEmpty) {
           cancels.add(
-            _database
-                .ref('livekitSessions/$livekitId')
-                .onDisconnect()
-                .cancel(),
+            _database.ref('livekitSessions/$livekitId').onDisconnect().cancel(),
           );
         }
       }
