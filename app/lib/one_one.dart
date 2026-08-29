@@ -106,6 +106,7 @@ export 'core/storage/profile_photo_storage.dart';
 
 // Core — ui
 export 'core/ui/bottom_system_inset.dart';
+export 'core/ui/faded_horizontal_row.dart';
 
 // Features — chat
 export 'features/chat/data/chat_message_repository.dart';
@@ -168,6 +169,7 @@ export 'features/nudges/nudge_status_memory.dart';
 export 'features/nudges/ui/incoming_nudge_list_sheet.dart';
 export 'features/nudges/ui/incoming_nudge_prompt.dart';
 export 'features/nudges/ui/nudge_screen.dart';
+export 'features/nudges/ui/voice_record_swipe_cancel.dart';
 
 // Features — online
 export 'features/online/audio_output_bridge.dart';

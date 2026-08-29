@@ -78,6 +78,9 @@ abstract class _NudgeSheetStateBase extends State<_QuickNudgeSheet> {
   bool _finishingRecording = false;
   bool _pointerHeld = false;
   bool _sendAfterPointerEnd = true;
+
+  /// WhatsApp-style swipe-up-to-cancel while holding the voice mic.
+  final VoiceRecordSwipeCancel _swipeCancel = VoiceRecordSwipeCancel();
   bool _busy = false;
   bool _sendingVoice = false;
   Duration _elapsed = Duration.zero;
@@ -347,6 +350,7 @@ class _QuickNudgeSheetState extends _NudgeSheetStateBase
   @override
   void initState() {
     super.initState();
+    _swipeCancel.addListener(_onSwipeCancelChanged);
     _cooldownTicker = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (mounted) setState(() {});
     });
@@ -361,6 +365,19 @@ class _QuickNudgeSheetState extends _NudgeSheetStateBase
     _restoreLastNudgeStatus();
   }
 
+  void _onSwipeCancelChanged() {
+    if (!mounted || _finishingRecording) return;
+    setState(() {
+      _sendAfterPointerEnd = _swipeCancel.shouldSendOnRelease;
+      if (_recording) {
+        _message = _swipeCancel.recordingStatusMessage(isRecording: true);
+        _messageIsError = false;
+        _messageIsWarning = _swipeCancel.isArmed;
+        _messagePending = !_swipeCancel.isArmed;
+      }
+    });
+  }
+
   @override
   void dispose() {
     _recordingTimer?.cancel();
@@ -369,6 +386,9 @@ class _QuickNudgeSheetState extends _NudgeSheetStateBase
     _cancelDeliveryWaitTimers();
     _stopDeliveryStatusWatch();
     _autoDismissTimer?.cancel();
+    _swipeCancel
+      ..removeListener(_onSwipeCancelChanged)
+      ..dispose();
     unawaited(_deliverySub?.cancel());
     unawaited(_responseSub?.cancel());
     if (_recording) unawaited(_recorder.stop());
