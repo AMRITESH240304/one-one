@@ -1,7 +1,7 @@
 part of '../../identity_home_screen.dart';
 
 // 1. Group name + friend chips (live ring, nudge reply).
-// 2. Talking pulse and add-friend chip.
+// 2. Talking pulse and pinned invite chip with overflow fade.
 
 class _FriendsStrip extends StatelessWidget {
   const _FriendsStrip({
@@ -43,13 +43,10 @@ class _FriendsStrip extends StatelessWidget {
             ),
           ),
         SizedBox(height: 6.h),
-        SizedBox(
-          height: 92.h,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            padding: EdgeInsets.symmetric(horizontal: 16.w),
-            children: [
-              for (final friend in friends) ...[
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final profileChips = [
+              for (final friend in friends)
                 _FriendChip(
                   key: ValueKey(friend.userId),
                   name: friend.displayName,
@@ -66,11 +63,49 @@ class _FriendsStrip extends StatelessWidget {
                       ConnectionQuality.unknown,
                   nudgeReply: nudgeRepliesByUserId[friend.userId],
                 ),
-                SizedBox(width: 12.w),
+            ];
+            final inviteChip = _AddFriendChip(onTap: onInvite);
+            // Name column is 72.w; 12.w gap after each profile before invite.
+            final profilesWidth = friends.isEmpty
+                ? 0.0
+                : friends.length * 72.w + max(0, friends.length - 1) * 12.w;
+            final packedWidth = 32.w + profilesWidth + 12.w + 56.w;
+            final pinInvite =
+                friends.length > 4 || packedWidth > constraints.maxWidth;
+
+            if (!pinInvite) {
+              return SizedBox(
+                height: 92.h,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  physics: const NeverScrollableScrollPhysics(),
+                  padding: EdgeInsets.symmetric(horizontal: 16.w),
+                  children: [
+                    for (final chip in profileChips) ...[
+                      chip,
+                      SizedBox(width: 12.w),
+                    ],
+                    inviteChip,
+                  ],
+                ),
+              );
+            }
+
+            return FadedHorizontalRow(
+              height: 92.h,
+              listPadding: EdgeInsets.only(left: 16.w),
+              trailing: Padding(
+                padding: EdgeInsets.only(right: 16.w),
+                child: inviteChip,
+              ),
+              children: [
+                for (var i = 0; i < profileChips.length; i++) ...[
+                  if (i > 0) SizedBox(width: 12.w),
+                  profileChips[i],
+                ],
               ],
-              _AddFriendChip(onTap: onInvite),
-            ],
-          ),
+            );
+          },
         ),
       ],
     );

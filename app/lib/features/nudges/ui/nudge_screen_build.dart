@@ -40,6 +40,9 @@ mixin _NudgeSheetBuild
                 maxHeight: MediaQuery.sizeOf(context).height * 0.68,
               ),
               child: SingleChildScrollView(
+                physics: _blockDismissWhileHolding
+                    ? const NeverScrollableScrollPhysics()
+                    : null,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -90,75 +93,70 @@ mixin _NudgeSheetBuild
                     SizedBox(height: 10.h),
 
                     // ── Recipient picker (selection is self-explanatory) ──
-                    SizedBox(
+                    FadedHorizontalRow(
                       height: 92.h,
-                      child: ListView(
-                        scrollDirection: Axis.horizontal,
-                        clipBehavior: Clip.none,
-                        padding: EdgeInsets.symmetric(horizontal: 20.w),
-                        children: [
-                          // "Everyone" group chip — no delivery badge (not a user)
-                          _NudgeRecipient(
-                            label: 'Everyone',
-                            selected: _isEveryoneSelected,
-                            accent: accent,
-                            enabled:
-                                actionEnabled && _nudgeableFriends.isNotEmpty,
-                            onTap: actionEnabled && _nudgeableFriends.isNotEmpty
-                                ? _selectEveryone
-                                : null,
-                            avatar: Container(
-                              color: accent.withValues(alpha: 0.18),
-                              child: Icon(
-                                Icons.group_rounded,
-                                color: accent,
-                                size: 22.sp,
-                              ),
+                      clipBehavior: Clip.none,
+                      listPadding: EdgeInsets.symmetric(horizontal: 20.w),
+                      children: [
+                        // "Everyone" group chip — no delivery badge (not a user)
+                        _NudgeRecipient(
+                          label: 'Everyone',
+                          selected: _isEveryoneSelected,
+                          accent: accent,
+                          enabled:
+                              actionEnabled && _nudgeableFriends.isNotEmpty,
+                          onTap: actionEnabled && _nudgeableFriends.isNotEmpty
+                              ? _selectEveryone
+                              : null,
+                          avatar: Container(
+                            color: accent.withValues(alpha: 0.18),
+                            child: Icon(
+                              Icons.group_rounded,
+                              color: accent,
+                              size: 22.sp,
                             ),
                           ),
-                          for (final friend in _friends) ...[
-                            SizedBox(width: 12.w),
-                            Builder(
-                              builder: (context) {
-                                final online = _isOnline(friend.userId);
-                                final failed = _isDeliveryFailed(friend.userId);
-                                final reply = _replyFor(friend.userId);
-                                final volumeBand = _volumeBandFor(
-                                  friend.userId,
-                                );
-                                final Widget? deliveryBadge = failed
-                                    ? null
-                                    : reply != null
-                                    ? _ResponseBadgeIcon(reply: reply)
-                                    : volumeBand != null
-                                    ? _VolumeBadgeIcon(band: volumeBand)
-                                    : null;
-                                return _NudgeRecipient(
-                                  label: friend.displayName,
-                                  subtitle: online ? 'already online' : null,
-                                  selected:
-                                      !online &&
-                                      _selectedUserIds.contains(friend.userId),
-                                  accent: accent,
-                                  enabled: actionEnabled && !online,
-                                  dimmed: online,
-                                  onTap: actionEnabled && !online
-                                      ? () => _toggleFriend(friend.userId)
-                                      : null,
-                                  deliveryBadge: deliveryBadge,
-                                  avatar: Opacity(
-                                    opacity: online ? 0.38 : 1,
-                                    child: _buildFriendAvatar(
-                                      friend: friend,
-                                      failed: failed,
-                                    ),
+                        ),
+                        for (final friend in _friends) ...[
+                          SizedBox(width: 12.w),
+                          Builder(
+                            builder: (context) {
+                              final online = _isOnline(friend.userId);
+                              final failed = _isDeliveryFailed(friend.userId);
+                              final reply = _replyFor(friend.userId);
+                              final volumeBand = _volumeBandFor(friend.userId);
+                              final Widget? deliveryBadge = failed
+                                  ? null
+                                  : reply != null
+                                  ? _ResponseBadgeIcon(reply: reply)
+                                  : volumeBand != null
+                                  ? _VolumeBadgeIcon(band: volumeBand)
+                                  : null;
+                              return _NudgeRecipient(
+                                label: friend.displayName,
+                                subtitle: online ? 'already online' : null,
+                                selected:
+                                    !online &&
+                                    _selectedUserIds.contains(friend.userId),
+                                accent: accent,
+                                enabled: actionEnabled && !online,
+                                dimmed: online,
+                                onTap: actionEnabled && !online
+                                    ? () => _toggleFriend(friend.userId)
+                                    : null,
+                                deliveryBadge: deliveryBadge,
+                                avatar: Opacity(
+                                  opacity: online ? 0.38 : 1,
+                                  child: _buildFriendAvatar(
+                                    friend: friend,
+                                    failed: failed,
                                   ),
-                                );
-                              },
-                            ),
-                          ],
+                                ),
+                              );
+                            },
+                          ),
                         ],
-                      ),
+                      ],
                     ),
 
                     SizedBox(height: 12.h),
@@ -319,7 +317,7 @@ mixin _NudgeSheetBuild
     );
   }
 
-  /// Builds the primary voice mic button (unchanged press-and-hold behavior).
+  /// Builds the primary voice mic button (press-and-hold; swipe up to cancel).
   Widget _buildVoiceMicButton({
     required Color accent,
     required bool voiceEnabled,
@@ -327,117 +325,149 @@ mixin _NudgeSheetBuild
     required Duration voiceCooldown,
   }) {
     final muteFirstLabel = _liveMicBlocksVoice && !_recording && !_sendingVoice;
+    final showCancelHint = _pointerHeld || _recording;
+    final cancelArmed = _swipeCancel.isArmed;
+    final deleteColor = _swipeCancel.deleteColor;
+    final buttonColor = cancelArmed
+        ? deleteColor
+        : _recording
+        ? accent
+        : _sendingVoice
+        ? accent.withValues(alpha: 0.18)
+        : const Color(0xff202020);
+    final ringColor = cancelArmed
+        ? deleteColor
+        : _recording || _sendingVoice
+        ? accent
+        : Colors.white.withValues(alpha: 0.09);
+    final micButton = Semantics(
+      button: true,
+      enabled: voiceEnabled,
+      label: _recording
+          ? cancelArmed
+                ? 'Release to delete recording'
+                : 'Recording voice nudge, swipe up to cancel, release to send'
+          : _sendingVoice
+          ? 'Sending voice nudge'
+          : muteFirstLabel
+          ? 'Mute your microphone first to record a voice nudge'
+          : 'Voice nudge, press and hold to record, swipe up to cancel',
+      child: Listener(
+        onPointerDown: (event) {
+          if (!voiceEnabled) {
+            if (_liveMicBlocksVoice) {
+              setState(() {
+                _message = 'Mute your mic first to send a voice nudge.';
+                _messageIsError = false;
+                _messageIsWarning = true;
+                _messagePending = false;
+              });
+            }
+            return;
+          }
+          // Fixed default while holding to record (not Settings intensity).
+          unawaited(HapticFeedback.lightImpact());
+          // Lock back/close on the same frame as press — before async
+          // mic start — so a second gesture cannot pop the sheet.
+          _swipeCancel.begin(
+            pointer: event.pointer,
+            startDy: event.position.dy,
+            onHoldEnded: _onVoiceHoldEnded,
+          );
+          setState(() {
+            _pointerHeld = true;
+            _sendAfterPointerEnd = true;
+          });
+          unawaited(_beginRecording());
+        },
+        child: Transform.translate(
+          offset: _swipeCancel.buttonLiftOffset,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            width: 104.r,
+            height: 104.r,
+            decoration: BoxDecoration(
+              color: buttonColor,
+              shape: BoxShape.circle,
+              border: Border.all(color: ringColor),
+              boxShadow: _recording || _sendingVoice || cancelArmed
+                  ? [
+                      BoxShadow(
+                        color: (cancelArmed ? deleteColor : accent).withValues(
+                          alpha: 0.35,
+                        ),
+                        blurRadius: 26.r,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: _sendingVoice
+                ? _SendingVoicePulse(accent: accent)
+                : Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Padding(
+                        padding: EdgeInsets.all(6.r),
+                        child: CircularProgressIndicator(
+                          value: _recording ? recordingProgress : 0,
+                          strokeWidth: 4.r,
+                          color: Colors.white,
+                          backgroundColor: Colors.white24,
+                        ),
+                      ),
+                      Icon(
+                        muteFirstLabel
+                            ? Icons.mic_off_rounded
+                            : cancelArmed
+                            ? Icons.delete_rounded
+                            : _recording
+                            ? Icons.mic_rounded
+                            : Icons.mic_none_rounded,
+                        size: 42.sp,
+                        color: cancelArmed
+                            ? Colors.white
+                            : _recording
+                            ? Colors.black
+                            : voiceEnabled
+                            ? Colors.white
+                            : Colors.white24,
+                      ),
+                    ],
+                  ),
+          ),
+        ),
+      ),
+    );
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Semantics(
-          button: true,
-          enabled: voiceEnabled,
-          label: _recording
-              ? 'Recording voice nudge, release to send'
-              : _sendingVoice
-              ? 'Sending voice nudge'
-              : muteFirstLabel
-              ? 'Mute your microphone first to record a voice nudge'
-              : 'Voice nudge, press and hold to record',
-          child: Listener(
-            onPointerDown: (_) {
-              if (!voiceEnabled) {
-                if (_liveMicBlocksVoice) {
-                  setState(() {
-                    _message = 'Mute your mic first to send a voice nudge.';
-                    _messageIsError = false;
-                    _messageIsWarning = true;
-                    _messagePending = false;
-                  });
-                }
-                return;
-              }
-              // Fixed default while holding to record (not Settings intensity).
-              unawaited(HapticFeedback.lightImpact());
-              // Lock back/close on the same frame as press — before async
-              // mic start — so a second gesture cannot pop the sheet.
-              setState(() {
-                _pointerHeld = true;
-                _sendAfterPointerEnd = true;
-              });
-              unawaited(_beginRecording());
-            },
-            onPointerUp: (_) {
-              setState(() {
-                _pointerHeld = false;
-                _sendAfterPointerEnd = true;
-              });
-              unawaited(_finishRecording(send: true));
-            },
-            onPointerCancel: (_) {
-              setState(() {
-                _pointerHeld = false;
-                _sendAfterPointerEnd = false;
-              });
-              unawaited(_finishRecording(send: false));
-            },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 160),
-              width: 104.r,
-              height: 104.r,
-              decoration: BoxDecoration(
-                color: _recording
-                    ? accent
-                    : _sendingVoice
-                    ? accent.withValues(alpha: 0.18)
-                    : const Color(0xff202020),
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: _recording || _sendingVoice
-                      ? accent
-                      : Colors.white.withValues(alpha: 0.09),
-                ),
-                boxShadow: _recording || _sendingVoice
-                    ? [
-                        BoxShadow(
-                          color: accent.withValues(alpha: 0.35),
-                          blurRadius: 26.r,
-                        ),
-                      ]
-                    : null,
-              ),
-              child: _sendingVoice
-                  ? _SendingVoicePulse(accent: accent)
-                  : Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        Padding(
-                          padding: EdgeInsets.all(6.r),
-                          child: CircularProgressIndicator(
-                            value: _recording ? recordingProgress : 0,
-                            strokeWidth: 4.r,
-                            color: Colors.white,
-                            backgroundColor: Colors.white24,
-                          ),
-                        ),
-                        Icon(
-                          muteFirstLabel
-                              ? Icons.mic_off_rounded
-                              : _recording
-                              ? Icons.mic_rounded
-                              : Icons.mic_none_rounded,
-                          size: 42.sp,
-                          color: _recording
-                              ? Colors.black
-                              : voiceEnabled
-                              ? Colors.white
-                              : Colors.white24,
-                        ),
-                      ],
+        // Normal in-flow sibling (not an overlay) so it only ever pushes the
+        // button down when it grows — it can never overlap the divider above.
+        AnimatedSize(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOut,
+          alignment: Alignment.bottomCenter,
+          child: showCancelHint
+              ? Padding(
+                  padding: EdgeInsets.only(bottom: 10.h),
+                  child: IgnorePointer(
+                    child: VoiceRecordSwipeCancelHint(
+                      progress: _swipeCancel.progress,
+                      armed: cancelArmed,
+                      color: deleteColor,
                     ),
-            ),
-          ),
+                  ),
+                )
+              : const SizedBox(width: double.infinity, height: 0),
         ),
+        micButton,
         SizedBox(height: 8.h),
         Text(
           voiceCooldown > Duration.zero
               ? _cooldownLabel(voiceCooldown)
+              : cancelArmed
+              ? 'Release to delete'
               : _recording
               ? '${(_elapsed.inMilliseconds / 1000).toStringAsFixed(1)} / 6.0s'
               : _sendingVoice
@@ -446,7 +476,9 @@ mixin _NudgeSheetBuild
               ? 'Mute first'
               : 'Hold to speak',
           style: TextStyle(
-            color: _recording || _sendingVoice
+            color: cancelArmed
+                ? deleteColor
+                : _recording || _sendingVoice
                 ? accent
                 : voiceEnabled
                 ? Colors.white70
@@ -455,6 +487,17 @@ mixin _NudgeSheetBuild
             fontWeight: FontWeight.w500,
           ),
         ),
+        if (showCancelHint && !cancelArmed) ...[
+          SizedBox(height: 4.h),
+          Text(
+            'Swipe up to cancel',
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 12.sp,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
       ],
     );
   }

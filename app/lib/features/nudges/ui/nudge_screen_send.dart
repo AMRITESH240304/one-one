@@ -303,6 +303,16 @@ mixin _NudgeSheetSend on _NudgeSheetStateBase, _NudgeSheetDelivery {
 
   // ── 3. Voice record ─────────────────────────────────────────────────────
 
+  void _onVoiceHoldEnded(bool send) {
+    if (!mounted) return;
+    if (!_pointerHeld && !_recording && !_startingRecording) return;
+    setState(() {
+      _pointerHeld = false;
+      _sendAfterPointerEnd = send;
+    });
+    unawaited(_finishRecording(send: send));
+  }
+
   Future<void> _beginRecording() async {
     if (!_canSend || _startingRecording) return;
     if (_cooldownRemaining(NudgeKind.voice) > Duration.zero) return;
@@ -344,7 +354,7 @@ mixin _NudgeSheetSend on _NudgeSheetStateBase, _NudgeSheetDelivery {
       _recordingTimer?.cancel();
       _recordingCapTimer?.cancel();
       _recordingCapTimer = Timer(VoiceNudgeAudio.maxRecordingDuration, () {
-        unawaited(_finishRecording(send: true));
+        unawaited(_finishRecording(send: _swipeCancel.shouldSendOnRelease));
       });
       _voiceRequestId = const Uuid().v4();
       _voiceNudgeId = null;
@@ -374,10 +384,10 @@ mixin _NudgeSheetSend on _NudgeSheetStateBase, _NudgeSheetDelivery {
       setState(() {
         _recording = true;
         _elapsed = Duration.zero;
-        _message = 'Recording\u2026 release to send';
+        _message = _swipeCancel.recordingStatusMessage(isRecording: true);
         _messageIsError = false;
-        _messageIsWarning = false;
-        _messagePending = true;
+        _messageIsWarning = _swipeCancel.isArmed;
+        _messagePending = !_swipeCancel.isArmed;
       });
       if (!_pointerHeld) {
         await _finishRecording(send: _sendAfterPointerEnd);
@@ -399,12 +409,15 @@ mixin _NudgeSheetSend on _NudgeSheetStateBase, _NudgeSheetDelivery {
   Future<void> _finishRecording({required bool send}) async {
     if (!_recording || _finishingRecording) return;
     _finishingRecording = true;
+    _swipeCancel.reset();
     _recordingTimer?.cancel();
     _recordingCapTimer?.cancel();
     _recordingWatch.stop();
     // Recording feedback stays on a fixed default — Settings haptics only
     // apply to incoming voice-nudge playback.
-    unawaited(HapticFeedback.selectionClick());
+    unawaited(
+      send ? HapticFeedback.selectionClick() : HapticFeedback.mediumImpact(),
+    );
     final actualDurationMs = _recordingWatch.elapsedMilliseconds;
     final durationMs = actualDurationMs.clamp(
       0,
@@ -430,9 +443,9 @@ mixin _NudgeSheetSend on _NudgeSheetStateBase, _NudgeSheetDelivery {
         _busy = send;
         _sendingVoice = send;
         // Step 1: "Voice nudge sending"
-        _message = send ? 'Voice nudge sending\u2026' : null;
+        _message = send ? 'Voice nudge sending\u2026' : 'Recording discarded';
         _messageIsError = false;
-        _messageIsWarning = false;
+        _messageIsWarning = !send;
         _messagePending = send;
         _showDeliveryBadges = false;
       });

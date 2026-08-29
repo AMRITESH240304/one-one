@@ -341,14 +341,14 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
                       top: 0,
                       bottom: 0,
                       width: 52.w,
-                      child: const _CarouselEdgeVeil(leftEdge: true),
+                      child: const HorizontalEdgeVeil(leftEdge: true),
                     ),
                     Positioned(
                       right: 0,
                       top: 0,
                       bottom: 0,
                       width: 52.w,
-                      child: const _CarouselEdgeVeil(leftEdge: false),
+                      child: const HorizontalEdgeVeil(leftEdge: false),
                     ),
                   ],
                 ),
@@ -364,33 +364,6 @@ class _ExperienceCarouselState extends State<_ExperienceCarousel>
         ),
         SizedBox(width: 12.w),
       ],
-    );
-  }
-}
-
-class _CarouselEdgeVeil extends StatelessWidget {
-  const _CarouselEdgeVeil({required this.leftEdge});
-
-  final bool leftEdge;
-
-  @override
-  Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: ShaderMask(
-        blendMode: BlendMode.dstIn,
-        shaderCallback: (bounds) => LinearGradient(
-          begin: leftEdge ? Alignment.centerLeft : Alignment.centerRight,
-          end: leftEdge ? Alignment.centerRight : Alignment.centerLeft,
-          colors: const [Colors.white, Color(0x99FFFFFF), Colors.transparent],
-          stops: const [0, 0.35, 1],
-        ).createShader(bounds),
-        child: ClipRect(
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-            child: const ColoredBox(color: Colors.transparent),
-          ),
-        ),
-      ),
     );
   }
 }
