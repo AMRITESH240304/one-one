@@ -1,7 +1,5 @@
 import 'package:one_one_app/one_one.dart';
 
-/// Persists accept/decline/snooze so an incoming nudge is not re-prompted
-/// after the user already answered it (in-app or via the notification).
 abstract class ActiveNudgeStatusStore {
   Future<Map<String, ActiveNudgeStatusRecord>> load(String userId);
   Future<void> save(
